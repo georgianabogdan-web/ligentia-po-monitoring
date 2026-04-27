@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(git -C /Users/georgianabogdan/po-monitoring-agent status)",
+      "Bash(git -C /Users/georgianabogdan/po-monitoring-agent remote -v)",
+      "Bash(npm install *)",
+      "Bash(sudo rm *)",
+      "Bash(sudo npm *)",
+      "Bash(npx tsx *)",
+      "Bash(npx tsc *)",
+      "Bash(npx vite *)",
+      "Bash(netlify deploy *)",
+      "Bash(awk 'NR==3119{found=1} found && /^\\\\/\\\\/ ── App /{print; found=0; next} !found{print}' /Users/georgianabogdan/po-monitoring-agent/src/App.tsx)",
+      "Bash(mv /tmp/App_trimmed.tsx /Users/georgianabogdan/po-monitoring-agent/src/App.tsx)",
+      "Bash(python3 -)",
+      "Bash(sed -i '' 's/^function PORegister\\({/export function PORegister\\({/' /Users/georgianabogdan/po-monitoring-agent/src/App.tsx)",
+      "Bash(sed -i '' 's/^function SuppliersView\\(\\) {/export function SuppliersView\\(\\) {/' /Users/georgianabogdan/po-monitoring-agent/src/App.tsx)",
+      "Bash(sed -i '' 's/^function ChaseScheduler\\({/export function ChaseScheduler\\({/' /Users/georgianabogdan/po-monitoring-agent/src/App.tsx)",
+      "Bash(sed -i '' 's/^function KanbanPanel\\({/export function KanbanPanel\\({/' /Users/georgianabogdan/po-monitoring-agent/src/App.tsx)",
+      "Bash(sed -i '' 's/classifyPO\\(p\\) === '\\\\''pre_dispatch'\\\\''/classifyPO\\(p\\) === '\\\\''late_dc'\\\\''/g' /Users/georgianabogdan/po-monitoring-agent/src/App.tsx)",
+      "Bash(sed -i '' 's/type: '\\\\''overdue'\\\\'' | '\\\\''at_risk'\\\\'' | '\\\\''pre_dispatch'\\\\''/type: '\\\\''overdue'\\\\'' | '\\\\''at_risk'\\\\'' | '\\\\''late_dc'\\\\''/g' /Users/georgianabogdan/po-monitoring-agent/src/App.tsx)",
+      "Bash(sed -i '' 's/makeGroups\\(preDispatchPOs, '\\\\''pre_dispatch'\\\\''\\)/makeGroups\\(preDispatchPOs, '\\\\''late_dc'\\\\''\\)/g' /Users/georgianabogdan/po-monitoring-agent/src/App.tsx)",
+      "Bash(sed -i '' 's/g\\\\.type === '\\\\''pre_dispatch'\\\\''/g.type === '\\\\''late_dc'\\\\''/g' /Users/georgianabogdan/po-monitoring-agent/src/App.tsx)",
+      "Bash(sed -i '' 's/selectedGroup\\\\.type === '\\\\''pre_dispatch'\\\\''/selectedGroup.type === '\\\\''late_dc'\\\\''/g' /Users/georgianabogdan/po-monitoring-agent/src/App.tsx)",
+      "Bash(sed -i '' 's/cl === '\\\\''pre_dispatch'\\\\''/cl === '\\\\''late_dc'\\\\''/g' /Users/georgianabogdan/po-monitoring-agent/src/App.tsx)",
+      "Bash(sed -i '' 's/value=\"pre_dispatch\"/value=\"late_dc\"/g' /Users/georgianabogdan/po-monitoring-agent/src/App.tsx)",
+      "Bash(sed -i '' 's/{ label: '\\\\''Pre-Dispatch'\\\\'', count: preDispatchPOs/{ label: '\\\\''Late DC booking'\\\\'', count: preDispatchPOs/' /Users/georgianabogdan/po-monitoring-agent/src/App.tsx)",
+      "Bash(sed -i '' 's/{ label: '\\\\''On Track'\\\\'',     count: onTrackPOs/{ label: '\\\\''On track'\\\\'',     count: onTrackPOs/' /Users/georgianabogdan/po-monitoring-agent/src/App.tsx)"
+    ]
+  }
+}
