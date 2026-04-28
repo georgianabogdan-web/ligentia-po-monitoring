@@ -9,7 +9,7 @@ import {
 } from 'lucide-react'
 import { ComposedChart, LineChart, Cell, Bar, Line, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceArea, ReferenceLine } from 'recharts'
 import { INVENTORY_PRODUCTS, REORDER_RECOMMENDATIONS } from './mockData'
-import type { SizeBand, StockStatus, ApprovalStatus, SizeCurveEntry, InventoryProduct, ReorderRecommendation } from './mockData'
+import type { SizeBand, StockStatus, ApprovalStatus, SizeCurveEntry, InventoryProduct, ReorderRecommendation, Category } from './mockData'
 import { REPLEN_PRODUCTS } from './replenData'
 import type { ReplenProduct, DCStatus as ReplenDCStatus } from './replenData'
 
@@ -89,6 +89,22 @@ interface RegisterFilter {
 type RAGStatus   = 'green' | 'amber' | 'red'
 type ChaseType   = 'booking_in' | 'handover' | 'cpr'
 type POEventType = 'chase_sent' | 'supplier_reply' | 'date_change_proposed' | 'date_change_applied' | 'manual_note' | 'decision_recorded'
+
+type ChaseThreadMsgStatus = 'sent' | 'auto-sent' | 'awaiting-review' | 'received' | 'dismissed'
+interface ChaseThreadMsg {
+  id:         string
+  sender:     'you' | 'agent' | string
+  timestamp:  string
+  body:       string
+  status:     ChaseThreadMsgStatus
+  emailType?: string
+}
+interface ChaseThread {
+  status:    'awaiting-reply' | 'reply-received' | 'resolved'
+  startedAt: string
+  messages:  ChaseThreadMsg[]
+}
+interface ActionGroup { supplierId: string; type: 'overdue' | 'at_risk' | 'late_dc'; pos: PO[] }
 
 interface POEvent {
   id:        string
@@ -405,6 +421,9 @@ const ESCALATION_RULES = {
   moqMaxMultiplier: 1.5,
   leadTimeMaxWeeks: 8,
 }
+
+type CpRulesState = { openingAskPct: number; escalateIfPct: number; maxRounds: number }
+const DEFAULT_CP_RULES: CpRulesState = { openingAskPct: 6, escalateIfPct: 8, maxRounds: 3 }
 
 // ── Fit Families ──────────────────────────────────────────────────────────────
 const FIT_FAMILIES = [
@@ -739,20 +758,8 @@ function ActionCard({
 
 
 // ── Overview chart data ────────────────────────────────────────────────────────
-const STOCK_CHART_DATA = [
-  { week: 'W1 Jan', available: 4800, onOrder: 3500, safetyStock: 4000 },
-  { week: 'W2 Jan', available: 4200, onOrder: 3900, safetyStock: 4000 },
-  { week: 'W3 Jan', available: 3700, onOrder: 4400, safetyStock: 4000 },
-  { week: 'W4 Jan', available: 5100, onOrder: 3700, safetyStock: 4000 },
-  { week: 'W1 Feb', available: 4600, onOrder: 4200, safetyStock: 4000 },
-  { week: 'W2 Feb', available: 4000, onOrder: 4700, safetyStock: 4000 },
-  { week: 'W3 Feb', available: 3400, onOrder: 5100, safetyStock: 4000 },
-  { week: 'W4 Feb', available: 5200, onOrder: 3900, safetyStock: 4000 },
-  { week: 'W1 Mar', available: 4700, onOrder: 4300, safetyStock: 4000 },
-  { week: 'W2 Mar', available: 4000, onOrder: 4900, safetyStock: 4000 },
-  { week: 'W3 Mar', available: 3500, onOrder: 5400, safetyStock: 4000 },
-  { week: 'W4 Mar', available: 5000, onOrder: 4100, safetyStock: 4000 },
-]
+// Clean 4-week sawtooth: on-hand oscillates trough→peak, on-order = 2 orders in flight
+// onOrder is ~2× available so the pipeline segment clearly dominates the bar
 
 const AVAILABILITY_CHART_DATA = [
   { week: 'W1 Jan', actual: 99.8, target: 97.5 },
@@ -770,31 +777,267 @@ const AVAILABILITY_CHART_DATA = [
 ]
 
 // ── Alert Digest ───────────────────────────────────────────────────────────────
+const SUBCATEGORY_MAP: Record<Category, string[]> = {
+  'Beauty':      ['Skincare', 'Makeup', 'Fragrance', 'Bath & Body'],
+  'Clothing':    ['Tops', 'Bottoms', 'Dresses', 'Outerwear', 'Knitwear'],
+  'Footwear':    ['Trainers', 'Boots', 'Heels', 'Sandals'],
+  'Accessories': ['Bags', 'Belts', 'Jewellery'],
+}
+
+function getSubcategory(p: InventoryProduct): string {
+  const n = p.name.toLowerCase()
+  switch (p.category) {
+    case 'Beauty':
+      if (n.includes('serum') || n.includes('cream') || n.includes('mist') || n.includes('moistur') || n.includes('spf')) return 'Skincare'
+      if (n.includes('foundation') || n.includes('mascara') || n.includes('lipstick') || n.includes('illuminat') || n.includes('highlighter') || n.includes('glow')) return 'Makeup'
+      if (n.includes('shower') || n.includes('bath') || n.includes('gel')) return 'Bath & Body'
+      if (n.includes('fragrance') || n.includes('perfume')) return 'Fragrance'
+      return 'Skincare'
+    case 'Clothing':
+      if (n.includes('dress') || n.includes('skirt') || n.includes('midi') || n.includes('maxi') || n.includes('wrap')) return 'Dresses'
+      if (n.includes('blazer') || n.includes('jacket') || n.includes('coat') || n.includes('outerwear')) return 'Outerwear'
+      if (n.includes('jumper') || n.includes('knitwear') || n.includes('cardigan') || n.includes('roll-neck') || n.includes('wool') || n.includes('knit')) return 'Knitwear'
+      if (n.includes('trouser') || n.includes('jeans') || n.includes('short') || n.includes('chino') || n.includes('linen') || n.includes('pant')) return 'Bottoms'
+      return 'Tops'
+    case 'Footwear':
+      if (n.includes('boot')) return 'Boots'
+      if (n.includes('heel') || n.includes('pump') || n.includes('wedge') || n.includes('slingback')) return 'Heels'
+      if (n.includes('sandal') || n.includes('espadrille') || n.includes('flip')) return 'Sandals'
+      return 'Trainers'
+    case 'Accessories':
+      if (n.includes('belt')) return 'Belts'
+      if (n.includes('jewel') || n.includes('necklace') || n.includes('ring') || n.includes('earring')) return 'Jewellery'
+      return 'Bags'
+  }
+}
+
+// ── Chase Thread Panel ────────────────────────────────────────────────────────
+function ChaseThreadPanel({
+  thread, group, supplier, expandedIds, onToggleExpand,
+  onSimulateReply, onSendFollowUp, onDismissFollowUp,
+}: {
+  thread:           ChaseThread
+  group:            ActionGroup
+  supplier:         { name: string; id: string } | undefined
+  expandedIds:      Set<string>
+  onToggleExpand:   (id: string) => void
+  onSimulateReply:  () => void
+  onSendFollowUp:   (msgId: string) => void
+  onDismissFollowUp:(msgId: string) => void
+}) {
+  const statusPillCls =
+    thread.status === 'resolved'      ? 'bg-green-100 text-green-700' :
+    thread.status === 'reply-received'? 'bg-amber-100 text-amber-700' :
+    'bg-blue-100 text-blue-700'
+  const statusLabel =
+    thread.status === 'resolved'       ? 'Resolved' :
+    thread.status === 'reply-received' ? 'Reply received' :
+    'Awaiting reply'
+  const startedDate = new Date(thread.startedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+
+  return (
+    <div className="h-full flex flex-col overflow-hidden">
+      {/* Header */}
+      <div className="px-4 py-2.5 border-b border-gray-100 bg-gray-50 shrink-0">
+        <div className="flex items-center justify-between mb-0.5">
+          <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Chase Thread</span>
+          <span className={`text-[9px] font-semibold px-2 py-0.5 rounded-full ${statusPillCls}`}>{statusLabel}</span>
+        </div>
+        <div className="text-xs font-semibold text-gray-800 truncate">{supplier?.name ?? group.supplierId}</div>
+        <div className="text-[10px] text-gray-400 mt-0.5">{group.pos.length} PO{group.pos.length > 1 ? 's' : ''} · Started {startedDate}</div>
+      </div>
+
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto p-2.5 space-y-2">
+        {thread.messages.filter(m => m.status !== 'dismissed').map((msg, idx, arr) => {
+          const isLatest   = idx === arr.length - 1
+          const isExpanded = expandedIds.has(msg.id) || isLatest
+          const senderLbl  = msg.sender === 'you' ? 'You' : msg.sender === 'agent' ? 'Agent' : msg.sender
+          const senderCls  = msg.sender === 'you' ? 'text-indigo-700' : msg.sender === 'agent' ? 'text-purple-600' : 'text-amber-700'
+          const borderCls  = msg.sender === 'you' ? 'border-indigo-100' : msg.sender === 'agent' ? 'border-purple-100' : 'border-amber-200'
+          const bgCls      = msg.sender === 'you' ? 'bg-indigo-50/40' : msg.sender === 'agent' ? 'bg-purple-50/40' : 'bg-amber-50/30'
+          const timeStr    = new Date(msg.timestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+          const snippet    = msg.body.split('\n').find(l => l.trim())?.slice(0, 45) ?? ''
+
+          const statusBadge =
+            msg.status === 'sent'            ? <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-600 font-semibold border border-indigo-100 whitespace-nowrap">Sent</span> :
+            msg.status === 'auto-sent'       ? <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-green-50 text-green-600 font-semibold border border-green-100 whitespace-nowrap">Auto-sent</span> :
+            msg.status === 'awaiting-review' ? <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600 font-semibold border border-amber-200 whitespace-nowrap">Awaiting review</span> :
+            <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 font-semibold whitespace-nowrap">Received</span>
+
+          return (
+            <div key={msg.id} className={`rounded-xl border overflow-hidden ${borderCls}`}>
+              <button
+                className={`w-full flex items-center justify-between px-3 py-2 text-left ${bgCls} hover:brightness-95 transition-colors`}
+                onClick={() => onToggleExpand(msg.id)}
+              >
+                <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                  <span className={`text-[10px] font-bold shrink-0 ${senderCls}`}>{senderLbl}</span>
+                  <span className="text-[9px] text-gray-400 shrink-0">{timeStr}</span>
+                  {!isExpanded && <span className="text-[9px] text-gray-500 truncate">{snippet}…</span>}
+                </div>
+                <div className="flex items-center gap-1 shrink-0 ml-1">
+                  {statusBadge}
+                  <ChevronDown className={`w-3 h-3 text-gray-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                </div>
+              </button>
+              {isExpanded && (
+                <div className="px-3 py-2.5 bg-white">
+                  <pre className="text-[10px] text-gray-700 leading-relaxed whitespace-pre-wrap font-sans">{msg.body}</pre>
+                  {msg.status === 'awaiting-review' && isLatest && (
+                    <div className="mt-2.5 pt-2 border-t border-gray-100 flex gap-2">
+                      <button
+                        onClick={() => onSendFollowUp(msg.id)}
+                        className="flex-1 h-7 rounded-lg bg-indigo-600 text-white text-[10px] font-semibold hover:bg-indigo-700 flex items-center justify-center gap-1"
+                      >
+                        <Send className="w-2.5 h-2.5" /> Review &amp; Send
+                      </button>
+                      <button
+                        onClick={() => onDismissFollowUp(msg.id)}
+                        className="px-2.5 h-7 rounded-lg border border-gray-200 text-[10px] font-semibold text-gray-500 hover:bg-gray-50"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  )}
+                  {msg.status === 'auto-sent' && isLatest && (
+                    <div className="mt-1.5 text-[9px] text-green-600 italic">
+                      Automatically sent per Agent Settings → {msg.emailType}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      {/* DEMO — simulate supplier reply */}
+      {thread.status === 'awaiting-reply' && (
+        <div className="p-3 border-t border-gray-100 shrink-0">
+          <button
+            onClick={onSimulateReply}
+            className="w-full py-2 rounded-lg border-2 border-dashed border-gray-200 text-[10px] font-semibold text-gray-400 hover:border-amber-300 hover:text-amber-600 hover:bg-amber-50/30 transition-colors"
+          >
+            DEMO — Simulate supplier reply
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function AlertDigest() {
+  const [filterCat, setFilterCat]         = useState<Category | ''>('')
+  const [filterSubcat, setFilterSubcat]   = useState('')
+  const [stockChartUnit, setStockChartUnit] = useState<'value' | 'units' | 'cover'>('value')
+
+  const OVERVIEW_AVG_COST = 22
+
+  const filteredProds = INVENTORY_PRODUCTS.filter(p =>
+    (!filterCat    || p.category === filterCat) &&
+    (!filterSubcat || getSubcategory(p) === filterSubcat)
+  )
+
+  const eligibleProds    = filteredProds.filter(p => p.weeklySales > 0)
+  const totalWeeklySales = eligibleProds.reduce((s, p) => s + p.weeklySales, 0)
+  const totalAvailable   = eligibleProds.reduce((s, p) => s + p.available, 0)
+  const totalSafetyStock = eligibleProds.reduce((s, p) => s + p.safetyStock, 0)
+  // Chart on-order is inflated to 60% of available for visual prominence (presentation layer only —
+  // per-SKU on-order values in Reorder tab are unaffected).
+  const chartOnOrder  = totalWeeklySales > 0 ? Math.round(0.8 * totalAvailable) : 0
+  const networkCover  = totalWeeklySales > 0 ? (totalAvailable + chartOnOrder) / totalWeeklySales : 0
+
+  const CHART_WEEK_LABELS = ['W1 Jan','W2 Jan','W3 Jan','W4 Jan','W1 Feb','W2 Feb','W3 Feb','W4 Feb','W1 Mar','W2 Mar','W3 Mar','W4 Mar']
+  const peakAvail    = totalWeeklySales > 0 ? Math.round(totalAvailable * 0.55 + 0.6 * totalWeeklySales) : 3900
+  // On-order sawtooth offset by 2 weeks so its peak lands mid-cycle of available's decline —
+  // reads visually as "replenishment order placed as stock runs down".
+  const peakOnOrder  = totalWeeklySales > 0 ? Math.round(chartOnOrder + 1.5 * totalWeeklySales) : 6000
+  const dynamicChartData  = CHART_WEEK_LABELS.map((week, i) => ({
+    week,
+    available:   Math.max(totalSafetyStock, peakAvail - (i % 4) * totalWeeklySales),
+    onOrder:     Math.max(0, peakOnOrder - ((i + 2) % 4) * totalWeeklySales),
+    safetyStock: totalSafetyStock,
+  }))
+  const overviewChartData = stockChartUnit === 'cover'
+    ? dynamicChartData.map(d => ({ ...d, available: +(d.available / totalWeeklySales).toFixed(1), onOrder: +(d.onOrder / totalWeeklySales).toFixed(1), safetyStock: +(d.safetyStock / totalWeeklySales).toFixed(1) }))
+    : stockChartUnit === 'value'
+    ? dynamicChartData.map(d => ({ ...d, available: Math.round(d.available * OVERVIEW_AVG_COST / 1000), onOrder: Math.round(d.onOrder * OVERVIEW_AVG_COST / 1000), safetyStock: Math.round(d.safetyStock * OVERVIEW_AVG_COST / 1000) }))
+    : dynamicChartData
+  const subcatOptions = filterCat ? SUBCATEGORY_MAP[filterCat] : []
+
   const totalReorderValue = REORDER_RECOMMENDATIONS.reduce((s, r) => s + r.totalCost, 0)
   const draftCount        = REORDER_RECOMMENDATIONS.filter(r => r.approvalStatus === 'Draft').length
   const pendingCount      = REORDER_RECOMMENDATIONS.filter(r => r.approvalStatus === 'Pending Approval').length
   const approvedCount     = REORDER_RECOMMENDATIONS.filter(r => r.approvalStatus === 'Approved').length
 
-  const totalWeeklyRevenue = INVENTORY_PRODUCTS.reduce((s, p) => s + p.weeklySales * p.sellingPrice, 0)
-  const totalMonthlyRevenue = INVENTORY_PRODUCTS.reduce((s, p) => s + p.monthlyRevenue, 0)
+  const totalWeeklyRevenue  = filteredProds.reduce((s, p) => s + p.weeklySales * p.sellingPrice, 0)
+  const totalMonthlyRevenue = filteredProds.reduce((s, p) => s + p.monthlyRevenue, 0)
 
   const avgAvailPct  = 97.2
-  const avgWosCover  = INVENTORY_PRODUCTS.reduce((s, p) => s + p.weeksOfStock, 0) / INVENTORY_PRODUCTS.length
-  const totalStockValueAtCost = INVENTORY_PRODUCTS.reduce((s, p) => s + p.stockValue, 0)
+
+  const totalStockValueAtCost = filteredProds.reduce((s, p) => s + p.stockValue, 0)
+
+  const invTotal         = filteredProds.length
+  const onTargetCount    = filteredProds.filter(p => p.stockStatus === 'on-target').length
+  const overstockedCount = filteredProds.filter(p => p.stockStatus === 'overstocked').length
+  const lowStockCount    = filteredProds.filter(p => p.stockStatus === 'low-stock').length
+  const invPct           = (n: number) => invTotal > 0 ? `${Math.round(n / invTotal * 100)}%` : '0%'
+  // Display-only inflated product count for demo realism (Pavers manages 25k+ SKUs).
+  // Scales proportionally when category / subcategory filter is applied.
+  const DEMO_SKU_TOTAL   = 25000
+  const displayInvTotal  = INVENTORY_PRODUCTS.length > 0 ? Math.round(DEMO_SKU_TOTAL * invTotal / INVENTORY_PRODUCTS.length) : 0
+  const displayOnTarget  = invTotal > 0 ? Math.round(displayInvTotal * onTargetCount  / invTotal) : 0
+  const displayOverstocked = invTotal > 0 ? Math.round(displayInvTotal * overstockedCount / invTotal) : 0
+  const displayLowStock  = invTotal > 0 ? Math.round(displayInvTotal * lowStockCount   / invTotal) : 0
 
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="p-6 space-y-2">
 
-        {/* ── FYI row label ───────────────────────────────────────────────── */}
+        {/* ── Overview header + filters ───────────────────────────────────── */}
         <div className="flex items-center gap-3">
           <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Overview</span>
           <div className="flex-1 h-px bg-gray-200" />
+          {/* Category + subcategory filters */}
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <select
+                className="h-7 pl-2.5 pr-6 rounded-lg border border-gray-200 bg-white text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none"
+                value={filterCat}
+                onChange={e => { setFilterCat(e.target.value as Category | ''); setFilterSubcat('') }}
+              >
+                <option value="">All categories</option>
+                {(['Beauty', 'Clothing', 'Footwear', 'Accessories'] as Category[]).map(c => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+              <ChevronDown className="absolute right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+            </div>
+            {filterCat && (
+              <div className="relative">
+                <select
+                  className="h-7 pl-2.5 pr-6 rounded-lg border border-gray-200 bg-white text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none"
+                  value={filterSubcat}
+                  onChange={e => setFilterSubcat(e.target.value)}
+                >
+                  <option value="">All subcategories</option>
+                  {subcatOptions.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+                <ChevronDown className="absolute right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+              </div>
+            )}
+            {(filterCat || filterSubcat) && (
+              <button
+                onClick={() => { setFilterCat(''); setFilterSubcat('') }}
+                className="h-7 px-2 text-xs text-gray-400 hover:text-gray-600 rounded-lg border border-gray-200 bg-white hover:bg-gray-50"
+              >✕</button>
+            )}
+          </div>
         </div>
 
         {/* KPI cards */}
-        <div className="grid grid-cols-3 gap-4 pb-2">
+        <div className="grid grid-cols-4 gap-4 pb-2">
           {/* Card 1 — Reorder actions */}
           <div className="bg-white border border-gray-100 rounded-xl px-5 py-4 shadow-sm">
             <div className="text-xs font-semibold text-gray-500 mb-2">Reorder Actions Required</div>
@@ -811,7 +1054,7 @@ function AlertDigest() {
           <div className="bg-white border border-gray-100 rounded-xl px-5 py-4 shadow-sm">
             <div className="text-xs font-semibold text-gray-500 mb-2">Sales Performance</div>
             <div className="text-2xl font-bold text-gray-900 mb-0.5">{fmtGBP(totalWeeklyRevenue)}</div>
-            <div className="text-[10px] text-gray-400 mb-1">Revenue this week</div>
+            <div className="text-[10px] text-gray-400 mb-1">Revenue this week{filterCat ? ` · ${filterCat}${filterSubcat ? ` / ${filterSubcat}` : ''}` : ''}</div>
             <div className="flex gap-3 text-[10px]">
               <span className="text-green-600 font-semibold">↑ +8.4% WoW</span>
               <span className="text-green-600 font-semibold">↑ +12.1% YoY</span>
@@ -819,7 +1062,7 @@ function AlertDigest() {
             <div className="text-xs text-gray-400 mt-1">{fmtGBP(totalMonthlyRevenue)} monthly revenue</div>
           </div>
 
-          {/* Card 3 — Stock health */}
+          {/* Card 3 — Stock health (metrics) */}
           <div className="bg-white border border-gray-100 rounded-xl px-5 py-4 shadow-sm">
             <div className="text-xs font-semibold text-gray-500 mb-2">Stock Health</div>
             <div className="grid grid-cols-3 gap-2">
@@ -828,13 +1071,29 @@ function AlertDigest() {
                 <div className="text-[10px] text-gray-400 mt-0.5">Availability</div>
               </div>
               <div className="text-center border-x border-gray-100">
-                <div className="text-xl font-bold text-gray-900">{avgWosCover.toFixed(1)}w</div>
+                <div className="text-xl font-bold text-gray-900">{networkCover.toFixed(1)}w</div>
                 <div className="text-[10px] text-gray-400 mt-0.5">Weeks Cover</div>
               </div>
               <div className="text-center">
                 <div className="text-xl font-bold text-gray-900">{fmtGBP(totalStockValueAtCost)}</div>
                 <div className="text-[10px] text-gray-400 mt-0.5">Stock at Cost</div>
               </div>
+            </div>
+          </div>
+
+          {/* Card 4 — Stock status traffic light (mirrors All Inventory) */}
+          <div className="bg-white border border-gray-100 rounded-xl px-5 py-4 shadow-sm">
+            <div className="text-xs font-semibold text-gray-500 mb-2">Stock Status</div>
+            <div className="text-2xl font-bold text-gray-900">{displayInvTotal.toLocaleString()} <span className="text-sm font-normal text-gray-400">Products</span></div>
+            <div className="mt-2 flex h-2 rounded-full overflow-hidden gap-px">
+              <div className="bg-emerald-400" style={{ width: invPct(onTargetCount) }} />
+              <div className="bg-amber-400"   style={{ width: invPct(overstockedCount) }} />
+              <div className="bg-red-400 flex-1" />
+            </div>
+            <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1.5 text-[9px] text-gray-500">
+              <span className="flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />On Target: {displayOnTarget.toLocaleString()}</span>
+              <span className="flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-amber-400 inline-block" />Overstocked: {displayOverstocked.toLocaleString()}</span>
+              <span className="flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-red-400 inline-block" />Low Stock: {displayLowStock.toLocaleString()}</span>
             </div>
           </div>
         </div>
@@ -845,9 +1104,10 @@ function AlertDigest() {
           <div className="bg-white border border-gray-100 rounded-xl p-4 shadow-sm">
             <div className="flex items-center justify-between mb-3">
               <span className="text-sm font-semibold text-gray-800">Stock levels</span>
-              <div className="flex items-center bg-gray-100 rounded-lg p-0.5">
-                {['Value', 'Units'].map((v, idx) => (
-                  <button key={v} className={`h-6 px-3 rounded-md text-xs font-semibold transition-colors ${idx === 0 ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'}`}>{v}</button>
+              <div className="flex items-center bg-gray-100 rounded-lg p-0.5 gap-0.5">
+                {(['Value', 'Units', 'Cover'] as const).map(v => (
+                  <button key={v} onClick={() => setStockChartUnit(v.toLowerCase() as 'value' | 'units' | 'cover')}
+                    className={`h-6 px-3 rounded-md text-xs font-semibold transition-colors ${stockChartUnit === v.toLowerCase() ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'}`}>{v}</button>
                 ))}
               </div>
             </div>
@@ -857,11 +1117,20 @@ function AlertDigest() {
               <span className="flex items-center gap-1"><span className="w-4 border-t-2 border-dashed border-amber-400 inline-block" />Safety Stock</span>
             </div>
             <ResponsiveContainer width="100%" height={190}>
-              <ComposedChart data={STOCK_CHART_DATA} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
+              <ComposedChart data={overviewChartData} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" vertical={false} />
                 <XAxis dataKey="week" tick={{ fontSize: 9, fill: '#9ca3af' }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} tickLine={false} axisLine={false} />
-                <Tooltip contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #e5e7eb' }} />
+                <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} tickLine={false} axisLine={false}
+                  tickFormatter={v =>
+                    stockChartUnit === 'cover' ? `${v}w` :
+                    stockChartUnit === 'value' ? `£${v}k` :
+                    v >= 1000 ? `${(v/1000).toFixed(1)}k` : `${v}`} />
+                <Tooltip contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #e5e7eb' }}
+                  formatter={(v: any, name: any) => {
+                    const label = name === 'available' ? 'Available' : name === 'onOrder' ? 'On Order' : 'Safety Stock'
+                    const fmt = stockChartUnit === 'cover' ? `${v} wks` : stockChartUnit === 'value' ? `£${v}k` : `${v} units`
+                    return [fmt, label] as [string, string]
+                  }} />
                 <Bar dataKey="available" stackId="a" fill="#4338ca" name="Available" />
                 <Bar dataKey="onOrder" stackId="a" fill="#c7d2fe" name="On Order" radius={[3, 3, 0, 0]} />
                 <Line dataKey="safetyStock" type="monotone" stroke="#f59e0b" strokeWidth={1.5} strokeDasharray="4 2" dot={false} name="Safety Stock" />
@@ -904,7 +1173,7 @@ function AlertDigest() {
               <Star className="w-3.5 h-3.5 text-amber-400" />
               <span className="text-xs font-semibold text-gray-800">Bestsellers this week</span>
             </div>
-            {[...INVENTORY_PRODUCTS]
+            {[...filteredProds]
               .sort((a, b) => b.weeklySales - a.weeklySales)
               .slice(0, 5)
               .map((p, rank) => {
@@ -932,7 +1201,7 @@ function AlertDigest() {
             </div>
             <div className="grid grid-cols-2 gap-3">
               {(['up', 'down'] as const).map(dir => {
-                const sorted = [...INVENTORY_PRODUCTS].map((p, i) => {
+                const sorted = [...filteredProds].map((p, i) => {
                   const seed = p.sku.split('').reduce((a, c) => a + c.charCodeAt(0), 0)
                   return { p, wow: ((seed * 7 + i * 3) % 20) - 8 }
                 }).filter(x => dir === 'up' ? x.wow > 0 : x.wow < 0)
@@ -964,10 +1233,10 @@ function AlertDigest() {
               <Clock className="w-3.5 h-3.5 text-amber-500" />
               <span className="text-xs font-semibold text-gray-800">Aged stock flags</span>
               <span className="ml-auto text-[10px] font-bold px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded-full">
-                {INVENTORY_PRODUCTS.filter(p => p.weeksOfStock > 8).length}
+                {filteredProds.filter(p => p.weeksOfStock > 8).length}
               </span>
             </div>
-            {INVENTORY_PRODUCTS.filter(p => p.weeksOfStock > 8).map(p => (
+            {filteredProds.filter(p => p.weeksOfStock > 8).map(p => (
               <div key={p.id} className="flex items-center gap-2 py-1.5 border-b border-gray-50 last:border-0">
                 <img src={p.imageUrl} className="w-6 h-6 rounded object-cover shrink-0" alt="" />
                 <span className="text-xs text-gray-700 flex-1 truncate">{p.name}</span>
@@ -1262,15 +1531,18 @@ function SizeBar({ bands }: { bands: SizeBand[] }) {
 
 // ── Inventory View ─────────────────────────────────────────────────────────────
 function InventoryView({ configMode, setConfigMode }: { configMode: boolean; setConfigMode: (v: boolean) => void }) {
-  const [search, setSearch] = useState('')
-  const [cat, setCat]       = useState('')
-  const [status, setStatus] = useState('')
+  const [search,    setSearch]   = useState('')
+  const [cat,       setCat]      = useState('')
+  const [status,    setStatus]   = useState('')
+  const [supplier,  setSupplier] = useState('')
+
+  const supplierOptions = [...new Set(INVENTORY_PRODUCTS.map(p => p.supplier))].sort()
 
   // config mode state
   const [selectedIds,      setSelectedIds]      = useState<Set<string>>(() => new Set())
   const [drawerOpen,       setDrawerOpen]        = useState(false)
-  const [editForm,         setEditForm]          = useState({ moqGrouping: '', moqQty: '', fwcMin: '', fwcMax: '', reason: '' })
-  const [formErrors,       setFormErrors]        = useState<{ fwcRange?: string; fwcWarn?: string; reason?: string }>({})
+  const [editForm,         setEditForm]          = useState({ moqQty: '', fwc: '', reason: '' })
+  const [formErrors,       setFormErrors]        = useState<{ fwc?: string; fwcWarn?: string; reason?: string }>({})
   const [productOverrides, setProductOverrides]  = useState<Record<string, ProductOverride>>({})
   const [auditLog,         setAuditLog]          = useState<Record<string, InvAuditEntry[]>>(() => ({ ...SEEDED_INV_AUDIT }))
   const [flashIds,         setFlashIds]          = useState<Set<string>>(() => new Set())
@@ -1281,9 +1553,10 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
   const [dismissedFwcWarn, setDismissedFwcWarn] = useState(false)
 
   const rows = INVENTORY_PRODUCTS.filter(p =>
-    (!search || p.name.toLowerCase().includes(search.toLowerCase()) || p.sku.toLowerCase().includes(search.toLowerCase())) &&
-    (!cat    || p.category === cat) &&
-    (!status || p.stockStatus === status)
+    (!search   || p.name.toLowerCase().includes(search.toLowerCase()) || p.sku.toLowerCase().includes(search.toLowerCase())) &&
+    (!cat      || p.category === cat) &&
+    (!status   || p.stockStatus === status) &&
+    (!supplier || p.supplier === supplier)
   )
 
   // Clear selection & drawer when leaving config mode
@@ -1301,6 +1574,10 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
   const overstockedCount = INVENTORY_PRODUCTS.filter(p => p.stockStatus === 'overstocked').length
   const lowStockCount    = INVENTORY_PRODUCTS.filter(p => p.stockStatus === 'low-stock').length
   const invPct           = (n: number) => `${Math.round(n / invTotal * 100)}%`
+  const INV_DEMO_TOTAL      = 25000
+  const dispOnTarget        = Math.round(INV_DEMO_TOTAL * onTargetCount    / invTotal)
+  const dispOverstocked     = Math.round(INV_DEMO_TOTAL * overstockedCount / invTotal)
+  const dispLowStock        = Math.round(INV_DEMO_TOTAL * lowStockCount    / invTotal)
 
   // selection helpers
   const allVisibleSelected = rows.length > 0 && rows.every(p => selectedIds.has(p.id))
@@ -1328,20 +1605,19 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
   // form validation
   const validateForm = (): boolean => {
     const errs: typeof formErrors = {}
-    const mn = parseFloat(editForm.fwcMin)
-    const mx = parseFloat(editForm.fwcMax)
     if (editForm.moqQty && (!/^\d+$/.test(editForm.moqQty) || parseInt(editForm.moqQty) <= 0)) {
-      errs.fwcRange = 'MOQ Quantity must be a positive integer'
+      errs.fwc = 'MOQ Quantity must be a positive integer'
     }
-    if (editForm.fwcMin && editForm.fwcMax) {
-      if (mx <= mn) errs.fwcRange = 'FWC Max must be greater than Min'
-      else if (!dismissedFwcWarn && (mx - mn < 1 || mx - mn > 20)) {
-        errs.fwcWarn = mx - mn < 1 ? 'FWC range is very tight (< 1 week) — are you sure?' : 'FWC range is unusually wide (> 20 weeks) — are you sure?'
+    if (editForm.fwc) {
+      const v = parseFloat(editForm.fwc)
+      if (isNaN(v) || v <= 0) errs.fwc = 'Forward weeks cover must be a positive number'
+      else if (!dismissedFwcWarn && (v < 1 || v > 20)) {
+        errs.fwcWarn = v < 1 ? 'FWC is very low (< 1 week) — are you sure?' : 'FWC is unusually high (> 20 weeks) — are you sure?'
       }
     }
     if (!editForm.reason.trim()) errs.reason = 'Please provide a reason for this change'
     setFormErrors(errs)
-    return !errs.fwcRange && !errs.reason
+    return !errs.fwc && !errs.reason
   }
 
   const handleApply = () => {
@@ -1353,9 +1629,8 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
 
     // build changes description for audit
     const changeDescs: { field: string; newVal: string }[] = []
-    if (editForm.moqGrouping) changeDescs.push({ field: 'MOQ Grouping', newVal: editForm.moqGrouping })
-    if (editForm.moqQty)      changeDescs.push({ field: 'MOQ Qty',      newVal: `${editForm.moqQty} units` })
-    if (editForm.fwcMin && editForm.fwcMax) changeDescs.push({ field: 'FWC Range', newVal: `${editForm.fwcMin}–${editForm.fwcMax} wks` })
+    if (editForm.moqQty) changeDescs.push({ field: 'MOQ Qty',    newVal: `${editForm.moqQty} units` })
+    if (editForm.fwc)    changeDescs.push({ field: 'FWC Target', newVal: `${editForm.fwc} wks` })
 
     // apply overrides
     setProductOverrides(prev => {
@@ -1363,9 +1638,8 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
       selectedArr.forEach(id => {
         next[id] = {
           ...next[id],
-          ...(editForm.moqGrouping                    ? { moqGrouping: editForm.moqGrouping }           : {}),
-          ...(editForm.moqQty                         ? { moqQty: parseInt(editForm.moqQty) }           : {}),
-          ...(editForm.fwcMin && editForm.fwcMax      ? { fwcMin: parseFloat(editForm.fwcMin), fwcMax: parseFloat(editForm.fwcMax) } : {}),
+          ...(editForm.moqQty ? { moqQty: parseInt(editForm.moqQty) }                                           : {}),
+          ...(editForm.fwc    ? { fwcMin: parseFloat(editForm.fwc), fwcMax: parseFloat(editForm.fwc) }          : {}),
         }
       })
       return next
@@ -1380,9 +1654,8 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
         const prevOv = prevSnapshot[id]
         const changes = changeDescs.map(c => {
           let oldVal = '—'
-          if (c.field === 'MOQ Qty')      oldVal = prevOv?.moqQty != null ? `${prevOv.moqQty} units` : (p ? `${p.minOrderQty} units` : '—')
-          if (c.field === 'FWC Range')    oldVal = prevOv?.fwcMin != null ? `${prevOv.fwcMin}–${prevOv.fwcMax} wks` : '—'
-          if (c.field === 'MOQ Grouping') oldVal = prevOv?.moqGrouping ?? 'SKU'
+          if (c.field === 'MOQ Qty')    oldVal = prevOv?.moqQty != null ? `${prevOv.moqQty} units` : (p ? `${p.minOrderQty} units` : '—')
+          if (c.field === 'FWC Target') oldVal = prevOv?.fwcMin != null ? `${prevOv.fwcMin} wks` : '—'
           return { field: c.field, oldVal, newVal: c.newVal }
         })
         const entry: InvAuditEntry = { id: `aud-${Date.now()}-${id}`, user: 'You', initial: 'Y', date: now, changes, reason: editForm.reason }
@@ -1403,7 +1676,7 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
 
     // close & reset
     setDrawerOpen(false)
-    setEditForm({ moqGrouping: '', moqQty: '', fwcMin: '', fwcMax: '', reason: '' })
+    setEditForm({ moqQty: '', fwc: '', reason: '' })
     setFormErrors({})
     setDismissedFwcWarn(false)
   }
@@ -1493,20 +1766,10 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
               {/* MOQ Grouping */}
               <div>
                 <label className="block text-xs font-semibold text-gray-700 mb-1.5">MOQ Grouping</label>
-                <div className="relative">
-                  <select
-                    value={editForm.moqGrouping}
-                    onChange={e => setEditForm(f => ({ ...f, moqGrouping: e.target.value }))}
-                    className="w-full h-9 pl-3 pr-7 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-300 appearance-none"
-                  >
-                    <option value="">Leave unchanged</option>
-                    <option value="SKU">SKU</option>
-                    <option value="Style">Style</option>
-                    <option value="Style × Colour">Style × Colour</option>
-                    <option value="Style × Colour × Size">Style × Colour × Size</option>
-                  </select>
-                  <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+                <div className="h-9 px-3 flex items-center rounded-lg border border-gray-100 bg-gray-50 text-sm text-gray-700">
+                  Style + Colour
                 </div>
+                <p className="mt-1 text-[11px] text-gray-400">Grouping is fixed at style + colour level</p>
               </div>
 
               {/* MOQ Quantity */}
@@ -1525,30 +1788,21 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
                 </div>
               </div>
 
-              {/* Target FWC Range */}
+              {/* Target FWC */}
               <div>
                 <label className="block text-xs font-semibold text-gray-700 mb-1.5">Target Forward Weeks Cover</label>
                 <div className="flex items-center gap-2">
                   <input
                     type="text"
                     inputMode="decimal"
-                    placeholder="Min"
-                    value={editForm.fwcMin}
-                    onChange={e => { setEditForm(f => ({ ...f, fwcMin: e.target.value })); setDismissedFwcWarn(false) }}
-                    className="w-20 h-9 px-3 rounded-lg border border-gray-200 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-300 text-center placeholder:text-gray-300"
-                  />
-                  <span className="text-xs text-gray-400">to</span>
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    placeholder="Max"
-                    value={editForm.fwcMax}
-                    onChange={e => { setEditForm(f => ({ ...f, fwcMax: e.target.value })); setDismissedFwcWarn(false) }}
-                    className="w-20 h-9 px-3 rounded-lg border border-gray-200 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-300 text-center placeholder:text-gray-300"
+                    placeholder="Leave unchanged"
+                    value={editForm.fwc}
+                    onChange={e => { setEditForm(f => ({ ...f, fwc: e.target.value })); setDismissedFwcWarn(false) }}
+                    className={`w-32 h-9 px-3 rounded-lg border text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-300 placeholder:text-gray-300 ${formErrors.fwc ? 'border-red-300' : 'border-gray-200'}`}
                   />
                   <span className="text-xs text-gray-400 shrink-0">weeks</span>
                 </div>
-                {formErrors.fwcRange && <p className="mt-1 text-[11px] text-red-600">{formErrors.fwcRange}</p>}
+                {formErrors.fwc && <p className="mt-1 text-[11px] text-red-600">{formErrors.fwc}</p>}
                 {formErrors.fwcWarn && !dismissedFwcWarn && (
                   <div className="mt-1.5 flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
                     <AlertCircle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
@@ -1659,16 +1913,16 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
         {/* KPI summary */}
         <div className="grid grid-cols-5 gap-4 mb-5">
           <div className="bg-white border border-gray-100 rounded-xl px-5 py-4 shadow-sm">
-            <div className="text-2xl font-bold text-gray-900">{invTotal.toLocaleString()} <span className="text-sm font-normal text-gray-400">Products</span></div>
+            <div className="text-2xl font-bold text-gray-900">{INV_DEMO_TOTAL.toLocaleString()} <span className="text-sm font-normal text-gray-400">Products</span></div>
             <div className="mt-2 flex h-2 rounded-full overflow-hidden gap-px">
               <div className="bg-emerald-400" style={{ width: invPct(onTargetCount) }} />
               <div className="bg-amber-400"   style={{ width: invPct(overstockedCount) }} />
               <div className="bg-red-400 flex-1" />
             </div>
             <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1.5 text-[9px] text-gray-500">
-              <span className="flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />On Target: {onTargetCount.toLocaleString()}</span>
-              <span className="flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-amber-400 inline-block" />Overstocked: {overstockedCount.toLocaleString()}</span>
-              <span className="flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-red-400 inline-block" />Low Stock: {lowStockCount.toLocaleString()}</span>
+              <span className="flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />On Target: {dispOnTarget.toLocaleString()}</span>
+              <span className="flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-amber-400 inline-block" />Overstocked: {dispOverstocked.toLocaleString()}</span>
+              <span className="flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-red-400 inline-block" />Low Stock: {dispLowStock.toLocaleString()}</span>
             </div>
           </div>
           <div className="bg-white border border-gray-100 rounded-xl px-5 py-4 shadow-sm">
@@ -1708,6 +1962,13 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
             <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
           </div>
           <div className="relative">
+            <select className="h-9 pl-3 pr-7 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none" value={supplier} onChange={e => setSupplier(e.target.value)}>
+              <option value="">All suppliers</option>
+              {supplierOptions.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+          </div>
+          <div className="relative">
             <select className="h-9 pl-3 pr-7 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none" value={status} onChange={e => setStatus(e.target.value)}>
               <option value="">All stock levels</option>
               <option value="on-target">On Target</option>
@@ -1720,6 +1981,19 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
             <span className="text-xs font-semibold text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-full border border-indigo-100">{selectedIds.size} selected</span>
           )}
           <span className="ml-auto text-xs text-gray-400">{rows.length} of {INVENTORY_PRODUCTS.length} products</span>
+          <button
+            onClick={() => setConfigMode(!configMode)}
+            className={`h-9 px-3 flex items-center gap-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+              configMode
+                ? 'bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700'
+                : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
+            }`}
+          >
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+              <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/>
+            </svg>
+            Configure products
+          </button>
           <button className="h-9 px-3 flex items-center gap-1.5 text-xs font-semibold text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50">
             <Download className="w-3.5 h-3.5" /> Export
           </button>
@@ -1737,7 +2011,7 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
                   </th>
                 )}
                 <th className="px-4 py-3 w-14" />
-                {['Product', 'Category', 'Stock Status', 'Cost £', 'Margin', 'Wk Sales', 'Fwd Weeks Cover', 'MOQ Level', 'MOQ Unit Value', 'Size'].map(h => (
+                {['Product', 'Category', 'Supplier', 'Stock Status', 'Cost £', 'Margin', 'Wk Sales', 'Fwd Weeks Cover', 'MOQ Level', 'MOQ Unit Value', 'Size'].map(h => (
                   <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">{h}</th>
                 ))}
                 {configMode && <th className="px-3 py-3 w-8" />}
@@ -1750,7 +2024,7 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
                 const isFlashing = flashIds.has(p.id)
                 const ov         = productOverrides[p.id]
                 const displayMoqQty = ov?.moqQty ?? p.minOrderQty
-                const displayFwc    = ov?.fwcMin != null ? `${ov.fwcMin}–${ov.fwcMax} wks` : null
+
                 const hasAudit      = (auditLog[p.id] ?? []).length > 0
                 return (
                   <tr
@@ -1767,8 +2041,8 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
                           className="w-3.5 h-3.5 rounded border-gray-300 text-indigo-600 cursor-pointer accent-indigo-600" />
                       </td>
                     )}
-                    <td className="px-4 py-2">
-                      <img src={p.imageUrl} className="w-10 h-10 rounded object-cover" alt={p.name} />
+                    <td className="px-4 py-2" style={{ width: 56, minWidth: 56 }}>
+                      <img src={p.imageUrl} className="rounded object-cover block" style={{ width: 40, height: 40, minWidth: 40 }} alt={p.name} />
                     </td>
                     <td className="px-4 py-3">
                       <div className="text-xs font-semibold text-gray-900">{p.name}</div>
@@ -1777,6 +2051,7 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
                     <td className="px-4 py-3">
                       <span className="inline-flex px-2 py-0.5 rounded-full text-[10px] font-semibold bg-gray-100 text-gray-600">{p.category}</span>
                     </td>
+                    <td className="px-4 py-3 text-xs text-gray-600 whitespace-nowrap max-w-[160px] truncate" title={p.supplier}>{p.supplier}</td>
                     <td className="px-4 py-3">
                       <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border ${sc.bg} ${sc.text} ${sc.border}`}>
                         <span className={`w-1.5 h-1.5 rounded-full ${sc.dot}`} />{sc.label}
@@ -1786,10 +2061,10 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
                     <td className="px-4 py-3 text-xs font-medium text-gray-700">{(p.marginPct * 100).toFixed(0)}%</td>
                     <td className="px-4 py-3 text-xs text-gray-700">{p.weeklySales.toLocaleString()}</td>
                     <td className="px-4 py-3">
-                      <div className="text-xs font-bold text-gray-900 whitespace-nowrap">{p.forwardWeeksCover.toFixed(1)} wks</div>
-                      {displayFwc && (
-                        <div className="text-[10px] text-indigo-600 font-medium mt-0.5">Target: {displayFwc}</div>
-                      )}
+                      <div className={`text-xs font-bold whitespace-nowrap ${ov?.fwcMin != null ? 'text-amber-600' : 'text-gray-900'}`}>
+                        {(ov?.fwcMin ?? p.forwardWeeksCover).toFixed(1)} wks
+                        {ov?.fwcMin != null && <span className="ml-1 text-[9px] font-normal text-amber-500">edited</span>}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-xs text-gray-700 text-right">{ov?.moqGrouping ? <span className="font-semibold text-indigo-700">{ov.moqGrouping}</span> : p.packSize}</td>
                     <td className="px-4 py-3 text-xs text-gray-700 text-right">
@@ -2001,15 +2276,16 @@ const NEG_STATUS_CFG: Record<NegotiationStatus, { label: string; bg: string; tex
 
 // ── Inquiry Drawer ────────────────────────────────────────────────────────────
 function InquiryDrawer({
-  rec, thread, onClose, onUpdate, isManager, onApprove, onReject,
+  rec, thread, onClose, onUpdate, isManager, onApprove, onReject, globalCpRules,
 }: {
-  rec:       typeof REORDER_RECOMMENDATIONS[0]
-  thread:    InquiryThread | undefined
-  onClose:   () => void
-  onUpdate:  (t: InquiryThread) => void
-  isManager?: boolean
-  onApprove?: () => void
-  onReject?:  () => void
+  rec:            typeof REORDER_RECOMMENDATIONS[0]
+  thread:         InquiryThread | undefined
+  onClose:        () => void
+  onUpdate:       (t: InquiryThread) => void
+  isManager?:     boolean
+  onApprove?:     () => void
+  onReject?:      () => void
+  globalCpRules:  CpRulesState
 }) {
   const ff      = getFitFamily(rec.id)
   const status: NegotiationStatus = thread?.status ?? 'idle'
@@ -2028,6 +2304,8 @@ function InquiryDrawer({
   const [alertSent,         setAlertSent]         = useState(false)
   const [appliedToBuySheet, setAppliedToBuySheet] = useState(false)
   const [mgrComment,        setMgrComment]        = useState('')
+  const [cpEditing,         setCpEditing]         = useState(false)
+  const [cpOverride,        setCpOverride]        = useState<CpRulesState | null>(null)
 
   // Auto-generate draft on open
   useEffect(() => {
@@ -2160,17 +2438,30 @@ function InquiryDrawer({
   const exFactoryStr = exFactory.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
   const todayStr     = today.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
 
+  const effectiveCpRules = cpOverride ?? globalCpRules
+
   const cpDeltaPct   = lastReply ? ((lastReply.offeredCP - rec.costPrice) / rec.costPrice * 100) : 0
   const cpDeltaLabel = cpDeltaPct >= 0 ? `+${cpDeltaPct.toFixed(1)}%` : `${cpDeltaPct.toFixed(1)}%`
-  const cpDeltaColor = cpDeltaPct <= 0 ? 'text-green-700' : cpDeltaPct < ESCALATION_RULES.cpMaxDeltaPct * 100 ? 'text-amber-700' : 'text-red-700'
+  const cpDeltaColor = cpDeltaPct <= 0 ? 'text-green-700' : cpDeltaPct < effectiveCpRules.escalateIfPct ? 'text-amber-700' : 'text-red-700'
 
   const currentMarginPct  = ((rec.sellingPrice - rec.costPrice) / rec.sellingPrice * 100).toFixed(1)
   const agreedMarginPct   = thread?.agreedCP ? ((rec.sellingPrice - thread.agreedCP) / rec.sellingPrice * 100).toFixed(1) : null
 
-  const pipelineStage = getPipelineStage(
-    thread?.status === 'agreed' ? 'Approved' : 'Draft',
-    thread,
-  )
+  const pipelineStage = getPipelineStage(thread?.status === 'agreed' ? 'Approved' : 'Draft')
+
+  const negStatusLabel =
+    status === 'agreed'          ? 'Closed — Agreed' :
+    status === 'escalated'       ? 'Escalated' :
+    status === 'replied'         ? `Round ${lastRound?.roundNumber ?? 1} — Reply received` :
+    status === 'sent'            ? `Round ${lastRound?.roundNumber ?? 1} — Sent` :
+    status === 'awaiting_reply'  ? `Round ${lastRound?.roundNumber ?? 1} — Awaiting` :
+    'Draft'
+  const negStatusPillCls =
+    status === 'agreed'    ? 'bg-green-100 text-green-700' :
+    status === 'escalated' ? 'bg-red-100 text-red-700' :
+    status === 'replied'   ? 'bg-amber-100 text-amber-700' :
+    status === 'draft'     ? 'bg-gray-100 text-gray-500' :
+    'bg-blue-100 text-blue-700'
 
   return (
     <div className="fixed inset-0 z-50 flex">
@@ -2181,10 +2472,10 @@ function InquiryDrawer({
         <div className="flex items-start justify-between px-5 pt-4 pb-3 border-b border-gray-100 shrink-0">
           <div className="min-w-0 flex-1 pr-2">
             <div className="flex items-center gap-2 flex-wrap mb-1">
-              <span className="text-sm font-bold text-gray-900">{rec.name}</span>
-            </div>
-            <div className="mb-1.5">
-              <PipelineStepper stage={pipelineStage} />
+              <span className="text-sm font-bold text-gray-900 truncate">{rec.name}</span>
+              <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold shrink-0 ${negStatusPillCls}`}>
+                {negStatusLabel}
+              </span>
             </div>
             <div className="text-xs text-gray-400">{rec.supplier} · {rec.sku}</div>
           </div>
@@ -2196,92 +2487,9 @@ function InquiryDrawer({
         {/* Scrollable body */}
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
 
-          {/* [1] Context accordion — collapsed by default */}
-          <div className="border border-gray-200 rounded-xl overflow-hidden">
-            <button
-              onClick={() => setContextOpen(o => !o)}
-              className="w-full flex items-center justify-between px-4 py-2.5 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
-            >
-              <span className="text-xs font-semibold text-gray-600">Context</span>
-              <ChevronDown className={`w-3.5 h-3.5 text-gray-400 transition-transform ${contextOpen ? 'rotate-180' : ''}`} />
-            </button>
-            {contextOpen && (
-              <div className="px-4 py-3 space-y-3 bg-white">
-                {/* Leverage card */}
-                <div className="bg-gray-50 rounded-xl p-3.5 border border-gray-100">
-                  <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">Leverage & context</div>
-                  <div className="grid grid-cols-3 gap-3">
-                    <div className="text-center">
-                      <div className="text-[10px] text-gray-400">Line value</div>
-                      <div className="text-xs font-bold text-gray-800 mt-0.5">{lineValue}</div>
-                    </div>
-                    <div className="text-center">
-                      <div className="text-[10px] text-gray-400">Relationship</div>
-                      <span className={`mt-0.5 inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold ${relColors}`}>{relTier}</span>
-                    </div>
-                    <div className="text-center">
-                      <div className="text-[10px] text-gray-400">Fit family</div>
-                      <div className="text-xs font-bold text-gray-800 mt-0.5">{ff ? ff.label : '—'}</div>
-                    </div>
-                  </div>
-                  {ff && (
-                    <div className="mt-2 pt-2 border-t border-gray-200 text-[11px] text-gray-500">
-                      Combined MOQ across family: <span className="font-semibold text-gray-700">{ff.sharedMOQ.toLocaleString()} units</span>
-                    </div>
-                  )}
-                </div>
-
-                {/* Key dates bar */}
-                <div className="bg-white rounded-xl p-3.5 border border-gray-100">
-                  <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-3">Key dates</div>
-                  <div className="relative flex items-start">
-                    <div className="absolute top-1 left-[16.5%] right-[16.5%] h-0.5 bg-gray-100" />
-                    {[
-                      { label: 'Today',        date: todayStr,     color: 'bg-gray-400'   },
-                      { label: 'Buy decision', date: buyDlStr,     color: 'bg-amber-400'  },
-                      { label: 'Ex-factory',   date: exFactoryStr, color: 'bg-indigo-400' },
-                    ].map((item, i) => (
-                      <div key={i} className="flex-1 flex flex-col items-center gap-1 relative z-10">
-                        <div className={`w-2.5 h-2.5 rounded-full ${item.color} ring-2 ring-white`} />
-                        <div className="text-[11px] font-semibold text-gray-600 text-center">{item.date}</div>
-                        <div className="text-[9px] text-gray-400 text-center">{item.label}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* CP Rule Engine */}
-                <div className="bg-indigo-50 rounded-xl p-3.5 border border-indigo-100">
-                  <div className="text-[10px] font-semibold text-indigo-400 uppercase tracking-wide mb-2">CP Rule Engine</div>
-                  <div className="grid grid-cols-3 gap-2 text-center">
-                    <div>
-                      <div className="text-[10px] text-indigo-400">Opening ask</div>
-                      <div className="text-xs font-bold text-indigo-700">–{Math.round((1 - CP_RULES.openingAsk) * 100)}%</div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] text-indigo-400">Escalate if &gt;</div>
-                      <div className="text-xs font-bold text-indigo-700">+{Math.round(ESCALATION_RULES.cpMaxDeltaPct * 100)}%</div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] text-indigo-400">Max rounds</div>
-                      <div className="text-xs font-bold text-indigo-700">{CP_RULES.maxRounds}</div>
-                    </div>
-                  </div>
-                  <div className="mt-2 pt-2 border-t border-indigo-100 flex justify-between text-[10px]">
-                    <span className="text-indigo-400">Current CP</span>
-                    <span className="font-semibold text-indigo-700">£{rec.costPrice.toFixed(2)}</span>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* [2] Negotiation thread — always visible */}
-
-          {/* Sent rounds history */}
+          {/* [1] Negotiation timeline — primary content */}
           {thread && thread.rounds.map((round, ri) => (
             <div key={ri} className="space-y-2">
-              {/* Sent round */}
               {round.sentAt && (
                 <RoundSentBlock
                   roundNumber={round.roundNumber}
@@ -2290,7 +2498,6 @@ function InquiryDrawer({
                   emailBody={round.emailBody}
                 />
               )}
-              {/* Supplier reply for this round */}
               {round.supplierReply && (
                 <ReplyBlock
                   reply={round.supplierReply}
@@ -2358,44 +2565,6 @@ function InquiryDrawer({
             </div>
           )}
 
-          {/* Structured reply card */}
-          {lastReply && (status === 'replied' || status === 'agreed' || status === 'escalated') && (
-            <div className={`rounded-xl p-3.5 border space-y-3 ${
-              status === 'agreed'    ? 'bg-green-50 border-green-200' :
-              status === 'escalated' ? 'bg-red-50 border-red-200'     :
-                                       'bg-amber-50 border-amber-200'
-            }`}>
-              <div className="flex items-center justify-between">
-                <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Supplier reply</div>
-                <span className="text-[10px] text-gray-400">{lastReply.receivedAt}</span>
-              </div>
-              <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-                <div>
-                  <div className="text-[10px] text-gray-400">CP offered</div>
-                  <div className="flex items-baseline gap-1.5">
-                    <span className="text-sm font-bold text-gray-800">£{lastReply.offeredCP.toFixed(2)}</span>
-                    <span className={`text-[11px] font-semibold ${cpDeltaColor}`}>{cpDeltaLabel}</span>
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[10px] text-gray-400">MOQ</div>
-                  <div className="text-sm font-bold text-gray-800">{lastReply.moqOffered.toLocaleString()}</div>
-                </div>
-                <div>
-                  <div className="text-[10px] text-gray-400">Lead time</div>
-                  <div className="text-xs font-semibold text-gray-700">{lastReply.leadTimeWeeks} wks</div>
-                </div>
-                <div>
-                  <div className="text-[10px] text-gray-400">Delivery window</div>
-                  <div className="text-xs font-semibold text-gray-700">{lastReply.deliveryWindow}</div>
-                </div>
-              </div>
-              <div className="pt-1 border-t border-gray-200 text-[10px] text-gray-500 leading-relaxed line-clamp-2">
-                {lastReply.rawText.split('\n').filter(l => l.trim()).slice(2, 4).join(' ')}
-              </div>
-            </div>
-          )}
-
           {/* Scenario A: accepted → margin impact */}
           {status === 'replied' && scenario === 'accepted' && lastReply && (
             <div className="bg-green-50 rounded-xl p-3.5 border border-green-200 space-y-1.5">
@@ -2419,11 +2588,11 @@ function InquiryDrawer({
                   onClick={() => { setAppliedToBuySheet(true); handleAccept() }}
                   className="w-full h-8 rounded-lg bg-green-600 text-white text-xs font-semibold hover:bg-green-700 transition-colors flex items-center justify-center gap-1.5"
                 >
-                  <Check className="w-3.5 h-3.5" /> Apply to Buy Sheet
+                  <Check className="w-3.5 h-3.5" /> Apply to Purchase Order
                 </button>
               ) : (
                 <div className="flex items-center justify-center gap-1.5 text-xs font-semibold text-green-700 py-1">
-                  <Check className="w-3.5 h-3.5" /> Applied to Buy Sheet
+                  <Check className="w-3.5 h-3.5" /> Applied to Purchase Order
                 </div>
               )}
             </div>
@@ -2479,7 +2648,7 @@ function InquiryDrawer({
                 </div>
                 <div className="bg-red-100 rounded-lg p-2 text-center">
                   <div className="text-[10px] text-red-500">CP max delta</div>
-                  <div className="text-xs font-bold text-red-700">+{Math.round(ESCALATION_RULES.cpMaxDeltaPct * 100)}%</div>
+                  <div className="text-xs font-bold text-red-700">+{effectiveCpRules.escalateIfPct}%</div>
                 </div>
               </div>
               {!alertSent ? (
@@ -2524,7 +2693,7 @@ function InquiryDrawer({
             </div>
           )}
 
-          {/* [3] Internal notes */}
+          {/* Internal notes */}
           {thread && (
             <div>
               <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1.5">
@@ -2542,6 +2711,143 @@ function InquiryDrawer({
               />
             </div>
           )}
+
+          {/* [2] Context — collapsed by default, at the bottom */}
+          <div className="border border-gray-200 rounded-xl overflow-hidden">
+            <button
+              onClick={() => setContextOpen(o => !o)}
+              className="w-full flex items-center justify-between px-4 py-2.5 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
+            >
+              <span className="text-xs font-semibold text-gray-600">Context — Leverage, Key Dates, CP Rules</span>
+              <ChevronDown className={`w-3.5 h-3.5 text-gray-400 transition-transform ${contextOpen ? 'rotate-180' : ''}`} />
+            </button>
+            {contextOpen && (
+              <div className="px-4 py-3 space-y-3 bg-white">
+                {/* Leverage */}
+                <div>
+                  <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">Leverage & context</div>
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="text-center">
+                      <div className="text-[10px] text-gray-400">Line value</div>
+                      <div className="text-xs font-bold text-gray-800 mt-0.5">{lineValue}</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-[10px] text-gray-400">Relationship</div>
+                      <span className={`mt-0.5 inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold ${relColors}`}>{relTier}</span>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-[10px] text-gray-400">Fit family</div>
+                      <div className="text-xs font-bold text-gray-800 mt-0.5">{ff ? ff.label : '—'}</div>
+                    </div>
+                  </div>
+                  {ff && (
+                    <div className="mt-2 pt-2 border-t border-gray-200 text-[11px] text-gray-500">
+                      Combined MOQ across family: <span className="font-semibold text-gray-700">{ff.sharedMOQ.toLocaleString()} units</span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="border-t border-gray-100" />
+
+                {/* Key dates */}
+                <div>
+                  <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-3">Key dates</div>
+                  <div className="relative flex items-start">
+                    <div className="absolute top-1 left-[16.5%] right-[16.5%] h-0.5 bg-gray-100" />
+                    {[
+                      { label: 'Today',        date: todayStr,     color: 'bg-gray-400'   },
+                      { label: 'Buy decision', date: buyDlStr,     color: 'bg-amber-400'  },
+                      { label: 'Ex-factory',   date: exFactoryStr, color: 'bg-indigo-400' },
+                    ].map((item, i) => (
+                      <div key={i} className="flex-1 flex flex-col items-center gap-1 relative z-10">
+                        <div className={`w-2.5 h-2.5 rounded-full ${item.color} ring-2 ring-white`} />
+                        <div className="text-[11px] font-semibold text-gray-600 text-center">{item.date}</div>
+                        <div className="text-[9px] text-gray-400 text-center">{item.label}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="border-t border-gray-100" />
+
+                {/* CP Rule Engine — editable */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-[10px] font-semibold text-indigo-500 uppercase tracking-wide">CP Rule Engine</div>
+                    <div className="flex items-center gap-2">
+                      {cpOverride && (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-600 font-semibold border border-amber-200">modified</span>
+                      )}
+                      <button
+                        onClick={() => setCpEditing(o => !o)}
+                        className="text-[10px] text-indigo-500 hover:text-indigo-700 font-medium"
+                      >
+                        {cpEditing ? 'Done' : 'Edit'}
+                      </button>
+                      {cpOverride && (
+                        <button
+                          onClick={() => { setCpOverride(null); setCpEditing(false) }}
+                          className="text-[10px] text-gray-400 hover:text-gray-600"
+                        >
+                          Reset
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {cpEditing ? (
+                    <div className="grid grid-cols-3 gap-2">
+                      <div>
+                        <div className="text-[10px] text-indigo-400 mb-1">Opening ask (–%)</div>
+                        <input
+                          type="number" min={0} max={30}
+                          value={(cpOverride ?? globalCpRules).openingAskPct}
+                          onChange={e => setCpOverride(prev => ({ ...(prev ?? globalCpRules), openingAskPct: Number(e.target.value) }))}
+                          className="w-full h-7 rounded-lg border border-indigo-200 px-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
+                        />
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-indigo-400 mb-1">Escalate if &gt; (%)</div>
+                        <input
+                          type="number" min={0} max={50}
+                          value={(cpOverride ?? globalCpRules).escalateIfPct}
+                          onChange={e => setCpOverride(prev => ({ ...(prev ?? globalCpRules), escalateIfPct: Number(e.target.value) }))}
+                          className="w-full h-7 rounded-lg border border-indigo-200 px-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
+                        />
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-indigo-400 mb-1">Max rounds</div>
+                        <input
+                          type="number" min={1} max={10}
+                          value={(cpOverride ?? globalCpRules).maxRounds}
+                          onChange={e => setCpOverride(prev => ({ ...(prev ?? globalCpRules), maxRounds: Number(e.target.value) }))}
+                          className="w-full h-7 rounded-lg border border-indigo-200 px-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-3 gap-2 text-center">
+                      <div>
+                        <div className="text-[10px] text-indigo-400">Opening ask</div>
+                        <div className="text-xs font-bold text-indigo-700">–{effectiveCpRules.openingAskPct}%</div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-indigo-400">Escalate if &gt;</div>
+                        <div className="text-xs font-bold text-indigo-700">+{effectiveCpRules.escalateIfPct}%</div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-indigo-400">Max rounds</div>
+                        <div className="text-xs font-bold text-indigo-700">{effectiveCpRules.maxRounds}</div>
+                      </div>
+                    </div>
+                  )}
+                  <div className="mt-2 pt-2 border-t border-indigo-100 flex justify-between text-[10px]">
+                    <span className="text-indigo-400">Current CP</span>
+                    <span className="font-semibold text-indigo-700">£{rec.costPrice.toFixed(2)}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Sticky footer — action bar */}
@@ -2587,7 +2893,7 @@ function InquiryDrawer({
             </p>
           )}
           {status === 'replied' && scenario === 'accepted' && (
-            <p className="text-center text-xs text-green-600 font-medium">Review margin impact above and apply to Buy Sheet.</p>
+            <p className="text-center text-xs text-green-600 font-medium">Review margin impact above and apply to Purchase Order.</p>
           )}
           {status === 'replied' && scenario === 'counter' && (
             <p className="text-center text-xs text-violet-600 font-medium">Review follow-up draft above and send when ready.</p>
@@ -2642,19 +2948,18 @@ function ReplyBlock({ reply, rec, cpDeltaColor, cpDeltaLabel, currentMarginPct }
 }) {
   const [expanded, setExpanded] = useState(false)
   const newGP = ((rec.sellingPrice - reply.offeredCP) / rec.sellingPrice * 100).toFixed(1)
+  const gpDeltaUp = parseFloat(newGP) >= parseFloat(currentMarginPct)
   return (
-    <div className="border border-amber-200 rounded-xl overflow-hidden bg-amber-50/30">
-      <button
-        onClick={() => setExpanded(o => !o)}
-        className="w-full flex items-center justify-between px-3.5 py-2.5 bg-amber-50 hover:bg-amber-100 transition-colors text-left"
-      >
-        <span className="text-[11px] font-semibold text-amber-700">Reply — Received {reply.receivedAt}</span>
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] text-gray-500">GP% {currentMarginPct}% → {newGP}%</span>
-          <ChevronDown className={`w-3.5 h-3.5 text-amber-500 transition-transform ${expanded ? 'rotate-180' : ''}`} />
-        </div>
-      </button>
-      <div className="px-3.5 py-2.5 grid grid-cols-2 gap-x-4 gap-y-1.5">
+    <div className="border border-amber-200 rounded-xl overflow-hidden">
+      {/* Header — always visible, not a toggle */}
+      <div className="flex items-center justify-between px-3.5 py-2.5 bg-amber-50 border-b border-amber-100">
+        <span className="text-[11px] font-semibold text-amber-700">Supplier Reply — {reply.receivedAt}</span>
+        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${gpDeltaUp ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+          GP% {currentMarginPct}% → {newGP}%
+        </span>
+      </div>
+      {/* Summary row — always visible */}
+      <div className="px-3.5 py-2.5 grid grid-cols-2 gap-x-4 gap-y-1.5 bg-white">
         <div>
           <div className="text-[10px] text-gray-400">CP offered</div>
           <div className="flex items-baseline gap-1.5">
@@ -2664,7 +2969,7 @@ function ReplyBlock({ reply, rec, cpDeltaColor, cpDeltaLabel, currentMarginPct }
         </div>
         <div>
           <div className="text-[10px] text-gray-400">MOQ</div>
-          <div className="text-xs font-bold text-gray-800">{reply.moqOffered.toLocaleString()}</div>
+          <div className="text-sm font-bold text-gray-800">{reply.moqOffered.toLocaleString()}</div>
         </div>
         <div>
           <div className="text-[10px] text-gray-400">Lead time</div>
@@ -2675,25 +2980,38 @@ function ReplyBlock({ reply, rec, cpDeltaColor, cpDeltaLabel, currentMarginPct }
           <div className="text-xs font-semibold text-gray-700">{reply.deliveryWindow}</div>
         </div>
       </div>
-      {expanded && (
-        <div className="px-3.5 pb-3 bg-white border-t border-amber-100">
-          <pre className="text-[10px] text-gray-600 font-mono leading-relaxed whitespace-pre-wrap mt-2">{reply.rawText}</pre>
-        </div>
-      )}
+      {/* Expandable full reply */}
+      <div className="border-t border-amber-100">
+        <button
+          onClick={() => setExpanded(o => !o)}
+          className="w-full flex items-center justify-between px-3.5 py-1.5 hover:bg-amber-50/60 transition-colors text-left"
+        >
+          <span className="text-[10px] text-amber-600 font-medium">{expanded ? 'Hide full reply' : 'View full reply'}</span>
+          <ChevronDown className={`w-3 h-3 text-amber-400 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+        </button>
+        {expanded && (
+          <div className="px-3.5 pb-3 bg-white border-t border-amber-100">
+            <pre className="text-[10px] text-gray-600 font-mono leading-relaxed whitespace-pre-wrap mt-2">{reply.rawText}</pre>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
 
 // ── Active Negotiations View ──────────────────────────────────────────────────
 function ActiveNegotiationsView({
-  negNeedsResponse, negAwaiting, negReady, inquiries, onOpenInquiry,
+  negNeedsResponse, negAwaiting, negReady, inquiries, onOpenInquiry, cpRules, onUpdateCpRules,
 }: {
   negNeedsResponse: typeof REORDER_RECOMMENDATIONS
   negAwaiting:      typeof REORDER_RECOMMENDATIONS
   negReady:         typeof REORDER_RECOMMENDATIONS
   inquiries:        Record<string, InquiryThread>
   onOpenInquiry:    (id: string) => void
+  cpRules:          CpRulesState
+  onUpdateCpRules:  (r: CpRulesState) => void
 }) {
+  const [cpSettingsOpen, setCpSettingsOpen] = useState(false)
   const sections = [
     {
       key: 'needs',
@@ -2732,6 +3050,52 @@ function ActiveNegotiationsView({
 
   return (
     <div className="space-y-6">
+
+      {/* CP Rule Defaults settings */}
+      <div className="border border-indigo-100 rounded-xl overflow-hidden">
+        <button
+          onClick={() => setCpSettingsOpen(o => !o)}
+          className="w-full flex items-center justify-between px-4 py-2.5 bg-indigo-50 hover:bg-indigo-100 transition-colors text-left"
+        >
+          <span className="text-xs font-semibold text-indigo-600">CP Rule Defaults</span>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-indigo-400">–{cpRules.openingAskPct}% ask · +{cpRules.escalateIfPct}% escalate · {cpRules.maxRounds} rounds</span>
+            <ChevronDown className={`w-3.5 h-3.5 text-indigo-400 transition-transform ${cpSettingsOpen ? 'rotate-180' : ''}`} />
+          </div>
+        </button>
+        {cpSettingsOpen && (
+          <div className="px-4 py-3 bg-white grid grid-cols-3 gap-3">
+            <div>
+              <label className="text-[10px] text-indigo-400 block mb-1">Opening ask (–%)</label>
+              <input
+                type="number" min={0} max={30}
+                value={cpRules.openingAskPct}
+                onChange={e => onUpdateCpRules({ ...cpRules, openingAskPct: Number(e.target.value) })}
+                className="w-full h-7 rounded-lg border border-indigo-200 px-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] text-indigo-400 block mb-1">Escalate if &gt; (%)</label>
+              <input
+                type="number" min={0} max={50}
+                value={cpRules.escalateIfPct}
+                onChange={e => onUpdateCpRules({ ...cpRules, escalateIfPct: Number(e.target.value) })}
+                className="w-full h-7 rounded-lg border border-indigo-200 px-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] text-indigo-400 block mb-1">Max rounds</label>
+              <input
+                type="number" min={1} max={10}
+                value={cpRules.maxRounds}
+                onChange={e => onUpdateCpRules({ ...cpRules, maxRounds: Number(e.target.value) })}
+                className="w-full h-7 rounded-lg border border-indigo-200 px-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
       {sections.map(sec => (
         <div key={sec.key}>
           <div className={`flex items-center gap-2 mb-3 px-1`}>
@@ -2766,7 +3130,7 @@ function ActiveNegotiationsView({
                     </div>
                     {/* Row 2 */}
                     <div className="flex items-center gap-3 mb-1 text-[10px] text-gray-500">
-                      <span>Round {lastRound?.roundNumber ?? 1} of {CP_RULES.maxRounds} max</span>
+                      <span>Round {lastRound?.roundNumber ?? 1} of {cpRules.maxRounds} max</span>
                       <span>·</span>
                       <span>CP: £{p.costPrice.toFixed(2)} → target £{calcRequestedCP(p.costPrice, 1).toFixed(2)}</span>
                       {sentDays !== null && sec.key === 'awaiting' && (
@@ -2801,29 +3165,32 @@ function ActiveNegotiationsView({
 
 // ── Reorder Recommendations View ──────────────────────────────────────────────
 type ReorderFilter = ApprovalStatus | 'All'
-type PipelineStage = 'draft' | 'inquiry_sent' | 'reply_received' | 'pending_approval' | 'approved' | 'pushed' | 'rejected'
-const PIPELINE_ORDER: PipelineStage[] = ['draft', 'inquiry_sent', 'reply_received', 'pending_approval', 'approved', 'pushed']
+type PipelineStage = 'draft' | 'pending_approval' | 'approved' | 'pushed' | 'rejected'
+const PIPELINE_ORDER: PipelineStage[] = ['draft', 'pending_approval', 'approved', 'pushed']
 const PIPELINE_STAGE_LABELS: Record<PipelineStage, string> = {
   draft:            'Draft',
-  inquiry_sent:     'Inquiry sent',
-  reply_received:   'Reply received',
   pending_approval: 'Pending approval',
   approved:         'Approved',
-  pushed:           'Pushed to Order App',
+  pushed:           'Sent to Order App',
   rejected:         'Rejected',
 }
 
-function getPipelineStage(
-  approvalStatus: ApprovalStatus,
-  thread: InquiryThread | undefined,
-): PipelineStage {
+// Seeded rejection metadata for pre-rejected POs in demo data
+const REJECTION_META: Record<string, { manager: string; date: string }> = {
+  'REC-003': { manager: 'Sarah Chen', date: '21 Apr 2026' },
+  'REC-008': { manager: 'Sarah Chen', date: '24 Apr 2026' },
+}
+
+// Module-level set so the manager view (separate component) sees a "Resubmitted" pill
+// on POs the merchandiser has resubmitted within the same session.
+const _sharedResubmits = new Set<string>()
+
+function getPipelineStage(approvalStatus: ApprovalStatus): PipelineStage {
   if (approvalStatus === 'Sent')             return 'pushed'
   if (approvalStatus === 'Approved')         return 'approved'
   if (approvalStatus === 'Pending Approval') return 'pending_approval'
   if (approvalStatus === 'Rejected')         return 'rejected'
-  if (!thread || thread.status === 'idle' || thread.status === 'draft') return 'draft'
-  if (thread.status === 'sent' || thread.status === 'awaiting_reply')   return 'inquiry_sent'
-  return 'reply_received'
+  return 'draft'
 }
 
 function PipelineStepper({ stage }: { stage: PipelineStage }) {
@@ -2865,18 +3232,39 @@ function Toast({ message, onDone }: { message: string; onDone: () => void }) {
 }
 
 // ── Stock Levels Chart (30-week inventory model) ─────────────────────────────
-function StockLevelsChart({ productId: _pid, timeRange }: { productId: string; timeRange: '1m' | '6m' | '1y' }) {
+function StockLevelsChart({ productId, timeRange }: { productId: string; timeRange: '1m' | '6m' | '1y' }) {
+  const [chartUnit, setChartUnit] = useState<'units' | 'value' | 'cover'>('units')
   const TODAY = 18, TOTAL = 52
-  const MIN_LVL = 800, MAX_LVL = 1600, SAFETY = 400
-  const SP = 24.99, CP = 8.99
-  const demands = [78,82,79,83,80,77,81,79,80,82,79,83,80,77,81,79,82,78,80,80,83,81,78,82,79,80,83,77,81,79,82,80,78,83,81,79,80,82,78,81,79,83,80,77,81,82,82,78,80,83,80,78]
-  const POS = [
-    { placed: 4,  delivered: 8,  qty: 869 },
-    { placed: 15, delivered: 19, qty: 881 },
-    { placed: 25, delivered: 29, qty: 803 },
-    { placed: 35, delivered: 39, qty: 804 },
-    { placed: 45, delivered: 49, qty: 805 },
-  ]
+
+  // Derive simulation parameters from the product — fall back to a neutral demo SKU
+  const prod = REORDER_RECOMMENDATIONS.find(p => p.id === productId)
+  const X  = prod?.weeklySales  ?? 200
+  const S  = prod?.safetyStock  ?? 300
+  const CP = prod?.costPrice    ?? 12
+  const SP = prod?.sellingPrice ?? 40
+
+  // Inventory model: LT=8wks, FWC(review cycle)=4wks
+  // intake_units = X × FWC  →  every cycle replenishes exactly one cycle of demand
+  // MIN = S + X×LT  (net-inv reorder trigger)
+  // MAX = MIN + X×FWC  (net-inv immediately after order is placed in the intake week)
+  const FWC    = 4
+  const LT     = 8
+  const INTAKE  = X * FWC
+  const SAFETY  = S
+  const MIN_LVL = S + X * LT
+  const MAX_LVL = MIN_LVL + X * FWC
+  const AVG_DEM = X
+
+  // Flat demand — exactly X every week → clean 4-week sawtooth
+  const demands = Array.from({ length: TOTAL }, () => X)
+
+  // POs every FWC weeks, each placed LT weeks before delivery
+  // placed<0 = pre-chart history; only placed>=0 show ↑ORD markers
+  const POS = Array.from({ length: 13 }, (_, k) => ({
+    placed:    (k - 2) * FWC,
+    delivered: k * FWC,
+    qty:       INTAKE,
+  }))
 
   const BASE = new Date('2026-04-21').getTime()
   const MO   = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
@@ -2884,22 +3272,28 @@ function StockLevelsChart({ productId: _pid, timeRange }: { productId: string; t
   const ds   = (i: number) => { const d = new Date(BASE + (i - TODAY) * 7 * 86_400_000); return `${String(d.getDate()).padStart(2,'0')}-${String(d.getMonth()+1).padStart(2,'0')}-${d.getFullYear()}` }
   const wn   = (i: number) => { const d = new Date(BASE + (i - TODAY) * 7 * 86_400_000); const u = new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate())); const dy = u.getUTCDay()||7; u.setUTCDate(u.getUTCDate()+4-dy); const y1=new Date(Date.UTC(u.getUTCFullYear(),0,1)); return Math.ceil((((u.getTime()-y1.getTime())/86400000)+1)/7) }
 
-  let st = 1450
+  // Start at trough (safety stock) — first intake at W0 immediately restores to peak
+  let st = S
   const allRows = Array.from({ length: TOTAL }, (_, i) => {
     const open  = st
     const dem   = demands[i]
     const intk  = POS.find(p => p.delivered === i)?.qty ?? 0
-    const close = open + intk - dem
+    const close = Math.max(0, open + intk - dem)
+    // on_order = all POs placed on or before this week that haven't arrived yet
     const onOrd = POS.filter(p => p.placed <= i && p.delivered > i).reduce((acc, p) => acc + p.qty, 0)
+    // At intake weeks use beginning-of-period stock so netInv hits MAX exactly;
+    // at other weeks use end-of-period so netInv hits MIN exactly at the trough.
+    const netInv = intk > 0 ? (open + intk + onOrd) : (close + onOrd)
     const act   = i <= TODAY
     st = close
     const revenue = Math.round(dem * SP)
     const grossProfit = Math.round(dem * (SP - CP))
     const gpPct = Math.round((SP - CP) / SP * 100)
     const coverWeeks = dem > 0 ? Math.round(close / dem * 10) / 10 : 0
-    return { wk: wk(i), dateStr: ds(i), weekNum: wn(i), wi: i, open, dem, intk, close, onOrd,
+    return { wk: wk(i), dateStr: ds(i), weekNum: wn(i), wi: i, open, dem, intk, close, onOrd, netInv,
       closeAct: act ? close : null, onOrdAct: act ? onOrd : null,
       closeFc: !act ? close : null, onOrdFc: !act ? onOrd : null,
+      netInvAct: act ? netInv : null, netInvFc: !act ? netInv : null,
       isActual: act, revenue, grossProfit, gpPct, coverWeeks }
   })
 
@@ -2915,39 +3309,77 @@ function StockLevelsChart({ productId: _pid, timeRange }: { productId: string; t
   const displayRows = timeRange === '1m' ? rows.slice(12, 25)
                    : timeRange === '6m' ? rows.slice(0, 30)
                    : rows
+
+  const SAFETY_COV = SAFETY / AVG_DEM   // 5 wks
+  const MIN_COV    = MIN_LVL / AVG_DEM  // 13 wks
+  const MAX_COV    = MAX_LVL / AVG_DEM  // 16 wks
+  const chartRows  = chartUnit === 'units' ? displayRows : displayRows.map(r => {
+    const scale = chartUnit === 'cover' ? (r.dem > 0 ? 1 / r.dem : 0) : CP
+    const dp    = chartUnit === 'cover' ? 1 : 0
+    return {
+      ...r,
+      closeAct:  r.closeAct  != null ? +( r.closeAct  * scale).toFixed(dp) : null,
+      onOrdAct:  r.onOrdAct  != null ? +( r.onOrdAct  * scale).toFixed(dp) : null,
+      closeFc:   r.closeFc   != null ? +( r.closeFc   * scale).toFixed(dp) : null,
+      onOrdFc:   r.onOrdFc   != null ? +( r.onOrdFc   * scale).toFixed(dp) : null,
+      netInvAct: r.netInvAct != null ? +( r.netInvAct * scale).toFixed(dp) : null,
+      netInvFc:  r.netInvFc  != null ? +( r.netInvFc  * scale).toFixed(dp) : null,
+    }
+  })
+
   const dispWks = new Set(displayRows.map(r => r.wi))
   const todayWk = wk(TODAY)
-  const riskEndWk = wk(19)
+  const riskEndWk = wk(TODAY + 8)  // lead-time window from today
 
   const SLC_Tip = ({ active, payload, label }: any) => {
     if (!active || !payload?.length) return null
     const row = displayRows.find(r => r.wk === label); if (!row) return null
-    const fc    = row.wi > TODAY
+    const fc  = row.wi > TODAY
+    const isCov = chartUnit === 'cover'
+    const isVal = chartUnit === 'value'
+    const fmt = (v: number) =>
+      isCov ? `${+(v / row.dem).toFixed(1)} wks` : isVal ? `£${Math.round(v * CP).toLocaleString()}` : v.toLocaleString()
     const stCls = row.close >= MAX_LVL ? 'text-violet-700' : row.close >= MIN_LVL ? 'text-green-700' : row.close >= SAFETY ? 'text-amber-700' : 'text-red-700'
     const stTxt = row.close >= MAX_LVL ? 'Above max' : row.close >= MIN_LVL ? 'Healthy' : row.close >= SAFETY ? 'Below min — reorder!' : 'Below safety!'
     return (
       <div className="bg-white border border-gray-200 rounded-xl shadow-lg p-3 text-[11px] min-w-[190px]">
         <div className="font-bold text-gray-900 mb-2">{label}{fc && <span className="text-violet-500 ml-1 font-normal">(forecast)</span>}</div>
         <div className="space-y-0.5">
-          <div className="flex justify-between gap-4"><span className="text-gray-400">Opening</span><span>{row.open.toLocaleString()}</span></div>
-          <div className="flex justify-between gap-4"><span className="text-gray-400">Demand</span><span className="text-slate-700">−{row.dem}</span></div>
-          {row.intk > 0 && <div className="flex justify-between gap-4"><span className="text-gray-400">Intake (PO)</span><span className="text-emerald-700 font-medium">+{row.intk.toLocaleString()}</span></div>}
+          <div className="flex justify-between gap-4"><span className="text-gray-400">Opening</span><span>{fmt(row.open)}</span></div>
+          {!isCov && <div className="flex justify-between gap-4"><span className="text-gray-400">Demand</span><span className="text-slate-700">−{row.dem}</span></div>}
+          {row.intk > 0 && <div className="flex justify-between gap-4"><span className="text-gray-400">Intake (PO)</span><span className="text-emerald-700 font-medium">+{fmt(row.intk)}</span></div>}
           <div className="border-t border-gray-100 my-1" />
-          <div className="flex justify-between gap-4"><span className="text-gray-600 font-medium">Closing stock</span><span className="font-bold text-indigo-900">{row.close.toLocaleString()}</span></div>
-          {row.onOrd > 0 && <div className="flex justify-between gap-4"><span className="text-gray-400">On order</span><span className="text-violet-600">{row.onOrd.toLocaleString()}</span></div>}
+          <div className="flex justify-between gap-4"><span className="text-gray-600 font-medium">{isCov ? 'Available cover' : 'Closing stock'}</span><span className="font-bold text-indigo-900">{fmt(row.close)}</span></div>
+          {row.onOrd > 0 && <div className="flex justify-between gap-4"><span className="text-gray-400">{isCov ? 'On-order cover' : 'On order'}</span><span className="text-violet-600">{fmt(row.onOrd)}</span></div>}
           <div className="pt-1 border-t border-gray-100 mt-1"><span className={`font-semibold ${stCls}`}>{stTxt}</span></div>
         </div>
       </div>
     )
   }
 
+  // Build a week-index → PO-number map for past intakes (shared by chart markers and table)
+  const PAST_PO_NUMS = ['PO-44821','PO-45603','PO-46287','PO-47194','PO-47852']
+  const poNumByWeek: Record<number, string> = {}
+  let pastIntakeIdx = 0
+  POS.forEach(po => {
+    if (po.delivered < TODAY) poNumByWeek[po.delivered] = PAST_PO_NUMS[pastIntakeIdx++] ?? ''
+  })
+
   const pctCls = (v: number | null) => v == null ? 'text-gray-400' : v > 0 ? 'text-green-600' : v < 0 ? 'text-red-500' : 'text-gray-500'
   const pct    = (v: number | null) => v == null ? '—' : `${v > 0 ? '+' : ''}${v}%`
 
   return (
     <div>
+      <div className="flex justify-end mb-2">
+        <div className="flex items-center bg-gray-100 rounded-lg p-0.5 gap-0.5">
+          {(['Units', 'Value', 'Cover'] as const).map(u => (
+            <button key={u} onClick={() => setChartUnit(u.toLowerCase() as 'units' | 'value' | 'cover')}
+              className={`h-6 px-3 rounded-md text-xs font-semibold transition-colors ${chartUnit === u.toLowerCase() ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'}`}>{u}</button>
+          ))}
+        </div>
+      </div>
       <ResponsiveContainer width="100%" height={280}>
-        <ComposedChart data={displayRows} margin={{ top: 8, right: 16, left: 0, bottom: 20 }} barCategoryGap="20%">
+        <ComposedChart data={chartRows} margin={{ top: 8, right: 16, left: 0, bottom: 20 }} barCategoryGap="20%">
           <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" vertical={false} />
           {/* PO transit bands */}
           {POS.filter(po => dispWks.has(po.placed) || dispWks.has(po.delivered)).map(po => (
@@ -2961,8 +3393,11 @@ function StockLevelsChart({ productId: _pid, timeRange }: { productId: string; t
             interval={Math.max(0, Math.floor(displayRows.length / 8) - 1)}
             label={{ value: 'Period (weeks)', position: 'insideBottom', offset: -12, fontSize: 10, fill: '#9ca3af' }} />
           <YAxis tick={{ fontSize: 8, fill: '#9ca3af' }} tickLine={false} axisLine={false}
-            tickFormatter={v => v >= 1000 ? `${(v/1000).toFixed(1)}k` : `${v}`}
-            label={{ value: 'Stock (units)', angle: -90, position: 'insideLeft', offset: 16, fontSize: 10, fill: '#9ca3af' }} />
+            tickFormatter={v =>
+              chartUnit === 'cover' ? `${v}` :
+              chartUnit === 'value' ? (v >= 1000 ? `£${(v/1000).toFixed(0)}k` : `£${v}`) :
+              (v >= 1000 ? `${(v/1000).toFixed(1)}k` : `${v}`)}
+            label={{ value: chartUnit === 'cover' ? 'Cover (wks)' : chartUnit === 'value' ? 'Stock (£)' : 'Stock (units)', angle: -90, position: 'insideLeft', offset: 16, fontSize: 10, fill: '#9ca3af' }} />
           <Tooltip content={(props: any) => <SLC_Tip {...props} />} />
 
           {/* Actual bars */}
@@ -2974,23 +3409,45 @@ function StockLevelsChart({ productId: _pid, timeRange }: { productId: string; t
           <Bar dataKey="onOrdFc" stackId="s" name="onOrdFc" maxBarSize={28} isAnimationActive={false}
             shape={(props: any) => { const {x=0,y=0,width=0,height=0}=props; if(!width||height<=0)return null; return(<g><defs><pattern id="slc-oo-fc" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)"><rect width="3.5" height="6" fill="#ddd6fe"/></pattern></defs><rect x={x} y={y} width={width} height={height} fill="url(#slc-oo-fc)" stroke="#a5b4fc" strokeWidth={0.4}/></g>) }} />
 
-          {/* Demand line */}
-          <Line type="monotone" dataKey="dem" stroke="#1e293b" strokeWidth={1.5} dot={false} isAnimationActive={false} legendType="none" />
+          {/* Demand line — hidden in cover/value modes (different scale) */}
+          <Line type="monotone" dataKey="dem" stroke="#1e293b" strokeWidth={1.5} dot={false} isAnimationActive={false} legendType="none" hide={chartUnit !== 'units'} />
+          {/* Net inventory line — sawtooths between Min and Max */}
+          <Line type="monotone" dataKey="netInvAct" stroke="#6366f1" strokeWidth={2} dot={false} isAnimationActive={false} legendType="none" connectNulls={false} />
+          <Line type="monotone" dataKey="netInvFc"  stroke="#6366f1" strokeWidth={2} strokeDasharray="4 2" dot={false} isAnimationActive={false} legendType="none" connectNulls={false} />
 
-          {/* Reference lines */}
-          <ReferenceLine y={SAFETY}  stroke="#f59e0b" strokeDasharray="5 3" strokeWidth={1.5} />
-          <ReferenceLine y={MIN_LVL} stroke="#94a3b8" strokeDasharray="3 3" strokeWidth={1} />
-          <ReferenceLine y={MAX_LVL} stroke="#94a3b8" strokeDasharray="3 3" strokeWidth={1} />
+          {/* Reference lines — scale with chartUnit */}
+          <ReferenceLine y={chartUnit === 'cover' ? SAFETY_COV : chartUnit === 'value' ? SAFETY * CP : SAFETY}  stroke="#f59e0b" strokeDasharray="5 3" strokeWidth={1.5} />
+          <ReferenceLine y={chartUnit === 'cover' ? MIN_COV : chartUnit === 'value' ? MIN_LVL * CP : MIN_LVL} stroke="#94a3b8" strokeDasharray="3 3" strokeWidth={1} />
+          <ReferenceLine y={chartUnit === 'cover' ? MAX_COV : chartUnit === 'value' ? MAX_LVL * CP : MAX_LVL} stroke="#94a3b8" strokeDasharray="3 3" strokeWidth={1} />
           {dispWks.has(TODAY) && <ReferenceLine x={todayWk} stroke="#6366f1" strokeDasharray="4 3" strokeWidth={1.5}
             label={{ value: 'Today', position: 'insideTopLeft', fontSize: 9, fill: '#6366f1', dy: -4 }} />}
-          {POS.filter(po => dispWks.has(po.placed)).map(po => (
-            <ReferenceLine key={`po${po.placed}`} x={wk(po.placed)} stroke="#f59e0b" strokeDasharray="3 2" strokeWidth={1.5}
-              label={{ value: '▼ PO', position: 'insideTopRight', fontSize: 7, fill: '#92400e' }} />
+          {POS.filter(po => po.placed >= 0 && dispWks.has(po.placed)).map(po => (
+            <ReferenceLine key={`po${po.placed}`} x={wk(po.placed)} stroke="#3b82f6" strokeDasharray="3 2" strokeWidth={1.5}
+              label={{ value: '↑ ORD', position: 'insideTopRight', fontSize: 7, fill: '#1d4ed8' }} />
           ))}
-          {POS.filter(po => dispWks.has(po.delivered)).map(po => (
-            <ReferenceLine key={`in${po.delivered}`} x={wk(po.delivered)} stroke="#10b981" strokeDasharray="3 2" strokeWidth={1.5}
-              label={{ value: '▲ IN', position: 'insideTopLeft', fontSize: 7, fill: '#065f46' }} />
-          ))}
+          {(() => {
+            return POS.filter(po => dispWks.has(po.delivered)).map(po => {
+              const isPast = po.delivered < TODAY
+              const poNum  = poNumByWeek[po.delivered] ?? null
+              return (
+                <ReferenceLine key={`in${po.delivered}`} x={wk(po.delivered)}
+                  stroke={isPast ? '#10b981' : '#86efac'}
+                  strokeDasharray="3 2" strokeWidth={isPast ? 1.5 : 1}
+                  label={(props: any) => {
+                    const vb = props?.viewBox ?? {}
+                    const lx = (vb.x ?? 0) + 3
+                    const ly = vb.y ?? 0
+                    return (
+                      <g>
+                        <text x={lx} y={ly + 11} fontSize={7} fill={isPast ? '#065f46' : '#86efac'} fontFamily="inherit">▲ IN</text>
+                        {poNum && <text x={lx} y={ly + 21} fontSize={6} fill="#059669" fontFamily="inherit">{poNum}</text>}
+                      </g>
+                    )
+                  }}
+                />
+              )
+            })
+          })()}
         </ComposedChart>
       </ResponsiveContainer>
 
@@ -2999,9 +3456,10 @@ function StockLevelsChart({ productId: _pid, timeRange }: { productId: string; t
         <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-indigo-200 inline-block" />On Order</span>
         <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm inline-block" style={{ background: 'repeating-linear-gradient(45deg,#818cf8,#818cf8 2px,#e0e7ff 2px,#e0e7ff 4px)' }} />Forecast</span>
         <span className="flex items-center gap-1.5"><span className="w-5 border-t border-slate-800 inline-block" />Demand</span>
+        <span className="flex items-center gap-1.5"><span className="w-5 border-t-2 border-indigo-500 inline-block" />Net inv.</span>
         <span className="flex items-center gap-1.5"><span className="w-5 border-t-2 border-dashed border-amber-400 inline-block" />Safety Stock</span>
-        <span className="flex items-center gap-1.5"><span className="w-5 border-t border-dashed border-slate-400 inline-block" />Target levels</span>
-        <span className="flex items-center gap-1.5 text-amber-800 font-medium">▼ PO placed</span>
+        <span className="flex items-center gap-1.5"><span className="w-5 border-t border-dashed border-slate-400 inline-block" />Min / Max</span>
+        <span className="flex items-center gap-1.5 text-blue-700 font-medium">↑ ORD placed</span>
         <span className="flex items-center gap-1.5 text-emerald-700 font-medium">▲ Intake</span>
       </div>
 
@@ -3025,7 +3483,12 @@ function StockLevelsChart({ productId: _pid, timeRange }: { productId: string; t
                   <td className="px-2 py-1.5 text-right text-gray-500">{w.weekNum}</td>
                   <td className="px-2 py-1.5 text-right text-gray-700">{w.open.toLocaleString()}</td>
                   <td className="px-2 py-1.5 text-right text-gray-700">{w.coverWeeks}</td>
-                  <td className="px-2 py-1.5 text-right text-gray-700">{w.intk > 0 ? w.intk.toLocaleString() : '0'}</td>
+                  <td className="px-2 py-1.5 text-right text-gray-700">
+                    {w.intk > 0 ? w.intk.toLocaleString() : '0'}
+                    {w.intk > 0 && poNumByWeek[w.wi] && (
+                      <div className="text-[9px] text-emerald-600 font-medium mt-0.5">{poNumByWeek[w.wi]}</div>
+                    )}
+                  </td>
                   <td className="px-2 py-1.5 text-right font-medium text-gray-900">{w.close.toLocaleString()}</td>
                   <td className="px-2 py-1.5 text-right text-gray-500">{MIN_LVL}–{MAX_LVL}</td>
                   <td className="px-2 py-1.5 text-right text-gray-700">{w.dem.toLocaleString()}</td>
@@ -3061,12 +3524,14 @@ function ReorderView() {
   const [toast, setToast]                       = useState<string | null>(null)
   const [inquiries, setInquiries]               = useState<Record<string, InquiryThread>>({})
   const [openInquiryId, setOpenInquiryId]       = useState<string | null>(null)
+  const [globalCpRules, setGlobalCpRules]       = useState<CpRulesState>(DEFAULT_CP_RULES)
   const [editQty, setEditQty]                   = useState(0)
   const [editExFactory, setEditExFactory]       = useState('')
   const [editCostPrice, setEditCostPrice]       = useState(0)
   const [sendMgrModalIds, setSendMgrModalIds]   = useState<string[]>([])
   const [sendMgrMsg, setSendMgrMsg]             = useState('')
   const [pushModalIds, setPushModalIds]         = useState<string[]>([])
+  const [poHistory, setPoHistory]               = useState<Record<string, Array<{ action: string; by: string; date: string }>>>({})
 
   const effStatus  = (p: typeof REORDER_RECOMMENDATIONS[0]): ApprovalStatus =>
     statusOverrides[p.id] ?? p.approvalStatus
@@ -3126,12 +3591,29 @@ function ReorderView() {
 
     const chartTabs = ['stock', ...(p.sizeCurve ? ['size-curve'] : []), 'availability'] as ('stock' | 'availability' | 'size-curve')[]
 
+    const rejMeta   = REJECTION_META[p.id]
+    const rejReason = p.rejectionReason
+
     return (
       <div className="flex-1 overflow-y-auto">
         <div className="p-6 space-y-4">
           <button onClick={() => setSelectedProduct(null)} className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-800">
             ← Back to Reorder
           </button>
+
+          {/* Rejection banner — shown above everything when PO is rejected */}
+          {curStatus === 'Rejected' && (
+            <div className="bg-red-50 border border-red-200 rounded-xl px-5 py-4 flex items-start gap-3">
+              <span className="text-red-500 text-base shrink-0 mt-0.5">●</span>
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-bold text-red-700 mb-0.5">
+                  Rejected{rejMeta ? ` by ${rejMeta.manager}, ${rejMeta.date}` : ''}
+                </div>
+                {rejReason && <div className="text-xs text-red-600 italic mb-1">"{rejReason}"</div>}
+                <div className="text-xs text-red-600">Edit the recommendation below and resubmit for approval.</div>
+              </div>
+            </div>
+          )}
 
           {/* Top card */}
           <div className="bg-white border border-gray-100 rounded-xl p-5 shadow-sm flex items-start gap-5">
@@ -3147,16 +3629,36 @@ function ReorderView() {
                   {p.stockoutRisk} Risk
                 </span>
               </div>
-              <div className="flex gap-2">
+              <div className="flex gap-2 items-center">
                 {curStatus === 'Draft' && (
                   <button onClick={() => {
                     if (isOverrideFreight && !freightReasons[p.id]?.trim()) {
                       showToast('Please add a reason for the freight override before sending.'); return
                     }
                     setStatusOverrides(o => ({ ...o, [p.id]: 'Pending Approval' }))
+                    setPoHistory(h => ({ ...h, [p.id]: [...(h[p.id] ?? []), { action: 'Sent to manager', by: 'Emma (Merchandiser)', date: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) }] }))
                     showToast(`${p.name} sent to manager for approval.`)
                   }} className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors">
                     Send to Manager
+                  </button>
+                )}
+                {curStatus === 'Rejected' && (
+                  <button onClick={() => {
+                    if (isOverrideFreight && !freightReasons[p.id]?.trim()) {
+                      showToast('Please add a reason for the freight override before sending.'); return
+                    }
+                    const changes: string[] = []
+                    if (editQty > 0 && editQty !== p.recommendedReorderQty) changes.push(`Qty: ${p.recommendedReorderQty} → ${editQty}`)
+                    if (editCostPrice > 0 && editCostPrice !== p.costPrice) changes.push(`Cost price: £${p.costPrice} → £${editCostPrice}`)
+                    if (editExFactory && editExFactory !== p.exFactoryDate) changes.push(`Ex-Factory: ${p.exFactoryDate} → ${editExFactory}`)
+                    const changeStr = changes.length > 0 ? changes.join(', ') : 'no fields changed'
+                    const today = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+                    setStatusOverrides(o => ({ ...o, [p.id]: 'Pending Approval' }))
+                    setPoHistory(h => ({ ...h, [p.id]: [...(h[p.id] ?? []), { action: `Resubmitted with changes: ${changeStr}`, by: 'Emma (Merchandiser)', date: today }] }))
+                    _sharedResubmits.add(p.id)
+                    showToast(`${p.name} resubmitted for approval.`)
+                  }} className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors">
+                    Resubmit to Manager
                   </button>
                 )}
                 {curStatus === 'Approved' && (
@@ -3167,6 +3669,12 @@ function ReorderView() {
                     Push to Order App
                   </button>
                 )}
+                {/* Send inquiry — always available as secondary action */}
+                <button onClick={() => setOpenInquiryId(p.id)}
+                  className="h-7 px-2.5 text-[10px] font-medium rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 transition-colors flex items-center gap-1"
+                  title="Send supplier inquiry">
+                  <Mail className="w-3 h-3" />Inquire
+                </button>
               </div>
             </div>
             <div className="space-y-1.5 shrink-0">
@@ -3343,75 +3851,131 @@ function ReorderView() {
               <p className="text-sm text-gray-400 mt-4">Coming soon</p>
             )}
 
-            {chartTab === 'size-curve' && p.sizeCurve && (
-              <>
-                <ResponsiveContainer width="100%" height={280}>
-                  <ComposedChart data={p.sizeCurve} margin={{ top: 8, right: 16, left: 0, bottom: 20 }} barCategoryGap="15%">
-                    <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" vertical={false} />
-                    <XAxis dataKey="size" tick={{ fontSize: 9, fill: '#9ca3af' }} tickLine={false} axisLine={{ stroke: '#e5e7eb' }}
-                      label={{ value: 'Size', position: 'insideBottom', offset: -12, fontSize: 10, fill: '#9ca3af' }} />
-                    <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} tickLine={false} axisLine={false}
-                      tickFormatter={v => v >= 1000 ? `${(v/1000).toFixed(1)}k` : `${v}`}
-                      label={{ value: 'Stock Units', angle: -90, position: 'insideLeft', offset: 16, fontSize: 10, fill: '#9ca3af' }} />
-                    <Tooltip contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #e5e7eb', padding: '6px 10px' }}
-                      labelStyle={{ fontWeight: 600, marginBottom: 4 }}
-                      formatter={(value, name) => {
-                        const labels: Record<string, string> = { available: 'Available stock', onOrder: 'On order stock', recommended: 'Recommended order' }
-                        return [typeof value === 'number' ? value.toLocaleString() : value, labels[name as string] ?? name]
-                      }} />
-                    <Bar dataKey="available"    stackId="s" fill="#4338ca" name="available"    radius={0} isAnimationActive={false} />
-                    <Bar dataKey="onOrder"      stackId="s" fill="#c7d2fe" name="onOrder"      radius={0} isAnimationActive={false} />
-                    <Bar dataKey="recommended"  stackId="s" name="recommended" radius={[3,3,0,0]} isAnimationActive={false}
-                      shape={(props: any) => {
-                        const { x=0, y=0, width=0, height=0 } = props
-                        if (!width || height <= 0) return null
-                        return (<g><defs><pattern id="sc-rec" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)"><rect width="3.5" height="6" fill="#818cf8" /></pattern></defs><rect x={x} y={y} width={width} height={height} fill="url(#sc-rec)" stroke="#6366f1" strokeWidth={0.4} /></g>)
-                      }} />
-                    <Line dataKey="targetMax" type="monotone" stroke="#64748b" strokeWidth={1.5} strokeDasharray="5 3"
-                      dot={{ fill: '#64748b', r: 3 }} name="Target stock level" legendType="none" />
-                  </ComposedChart>
-                </ResponsiveContainer>
-                <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 mt-2 mb-3 text-[10px] text-gray-500 justify-center">
-                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-indigo-700 inline-block" />Available stock</span>
-                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-indigo-200 inline-block" />On order stock</span>
-                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm inline-block" style={{ background: 'repeating-linear-gradient(45deg,#818cf8,#818cf8 2px,#e0e7ff 2px,#e0e7ff 4px)' }} />Recommended order</span>
-                  <span className="flex items-center gap-1.5"><span className="w-5 border-t-2 border-dashed border-slate-400 inline-block" />Target stock level</span>
-                </div>
-                <div className="overflow-x-auto border border-gray-100 rounded-lg">
-                  <table className="w-full text-[10px]">
-                    <thead className="bg-gray-50">
-                      <tr className="border-b border-gray-200">
-                        <th className="px-3 py-2 text-left font-semibold text-gray-500">Size</th>
-                        <th className="px-3 py-2 text-right font-semibold text-gray-500">Available stock<br/><span className="font-normal text-gray-400">Units</span></th>
-                        <th className="px-3 py-2 text-right font-semibold text-gray-500">On order stock</th>
-                        <th className="px-3 py-2 text-right font-semibold text-indigo-700 bg-indigo-50 border-x border-indigo-100">Recommended order</th>
-                        <th className="px-3 py-2 text-right font-semibold text-gray-500">Avail. stock cover<br/><span className="font-normal text-gray-400">Weeks</span></th>
-                        <th className="px-3 py-2 text-right font-semibold text-gray-500">Target stock range</th>
-                        <th className="px-3 py-2 text-right font-semibold text-gray-500">Sales this week<br/><span className="font-normal text-gray-400">Units</span></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {p.sizeCurve.map((row: SizeCurveEntry, i: number) => {
-                        const cover = row.sales > 0 ? (row.available / row.sales).toFixed(1) : '—'
-                        return (
-                          <tr key={row.size} className={`border-b border-gray-100 ${i % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}`}>
-                            <td className="px-3 py-1.5 font-semibold text-gray-800">{row.size}</td>
-                            <td className="px-3 py-1.5 text-right text-gray-700">{row.available.toLocaleString()}</td>
-                            <td className="px-3 py-1.5 text-right text-gray-700">{row.onOrder.toLocaleString()}</td>
-                            <td className="px-3 py-1.5 text-right font-bold text-indigo-700 bg-indigo-50/50 border-x border-indigo-100">{row.recommended.toLocaleString()}</td>
-                            <td className="px-3 py-1.5 text-right text-amber-600 font-semibold">{cover}</td>
-                            <td className="px-3 py-1.5 text-right text-gray-500">{row.targetMin.toLocaleString()}–{row.targetMax.toLocaleString()}</td>
-                            <td className="px-3 py-1.5 text-right text-gray-700">{row.sales.toLocaleString()}</td>
-                          </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </>
-            )}
+            {chartTab === 'size-curve' && p.sizeCurve && (() => {
+              // Derive totals from the same inventory model used by StockLevelsChart
+              // FWC=4wks, LT=8wks, sawtooth at week TODAY=18 (2 weeks after last intake)
+              const SC_FWC = 4, SC_LT = 8
+              const scX = p.weeklySales, scS = p.safetyStock
+              const modelAvail  = scS + scX                    // closing stock at week 18
+              const modelOnOrd  = 2 * scX * SC_FWC             // 2 POs in-flight (placed wk12→del20, placed wk16→del24)
+              const modelRecm   = scX * SC_FWC                 // one replenishment cycle (INTAKE)
+              const modelSales  = scX
+              const modelMin    = scS + scX * SC_LT             // MIN_LVL
+              const modelMax    = modelMin + scX * SC_FWC       // MAX_LVL
+
+              const rawAvail = p.sizeCurve.reduce((s: number, r: SizeCurveEntry) => s + r.available,   0)
+              const rawOnOrd = p.sizeCurve.reduce((s: number, r: SizeCurveEntry) => s + r.onOrder,     0)
+              const rawRecm  = p.sizeCurve.reduce((s: number, r: SizeCurveEntry) => s + r.recommended, 0)
+              const rawSales = p.sizeCurve.reduce((s: number, r: SizeCurveEntry) => s + r.sales,       0)
+              const rawMin   = p.sizeCurve.reduce((s: number, r: SizeCurveEntry) => s + r.targetMin,   0)
+              const rawMax   = p.sizeCurve.reduce((s: number, r: SizeCurveEntry) => s + r.targetMax,   0)
+
+              // Scale each size row proportionally so totals match the model
+              const scaledCurve: SizeCurveEntry[] = p.sizeCurve.map((row: SizeCurveEntry) => ({
+                ...row,
+                available:   rawAvail > 0 ? Math.round(row.available   / rawAvail * modelAvail)  : 0,
+                onOrder:     rawOnOrd > 0 ? Math.round(row.onOrder     / rawOnOrd * modelOnOrd)  : 0,
+                recommended: rawRecm  > 0 ? Math.round(row.recommended / rawRecm  * modelRecm)   : 0,
+                sales:       rawSales > 0 ? Math.round(row.sales       / rawSales * modelSales)  : 0,
+                targetMin:   rawMin   > 0 ? Math.round(row.targetMin   / rawMin   * modelMin)    : 0,
+                targetMax:   rawMax   > 0 ? Math.round(row.targetMax   / rawMax   * modelMax)    : 0,
+              }))
+
+              return (
+                <>
+                  <ResponsiveContainer width="100%" height={280}>
+                    <ComposedChart data={scaledCurve} margin={{ top: 8, right: 16, left: 0, bottom: 20 }} barCategoryGap="15%">
+                      <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" vertical={false} />
+                      <XAxis dataKey="size" tick={{ fontSize: 9, fill: '#9ca3af' }} tickLine={false} axisLine={{ stroke: '#e5e7eb' }}
+                        label={{ value: 'Size', position: 'insideBottom', offset: -12, fontSize: 10, fill: '#9ca3af' }} />
+                      <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} tickLine={false} axisLine={false}
+                        tickFormatter={v => v >= 1000 ? `${(v/1000).toFixed(1)}k` : `${v}`}
+                        label={{ value: 'Stock Units', angle: -90, position: 'insideLeft', offset: 16, fontSize: 10, fill: '#9ca3af' }} />
+                      <Tooltip contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #e5e7eb', padding: '6px 10px' }}
+                        labelStyle={{ fontWeight: 600, marginBottom: 4 }}
+                        formatter={(value, name) => {
+                          const labels: Record<string, string> = { available: 'Available stock', onOrder: 'On order stock', recommended: 'Recommended order' }
+                          return [typeof value === 'number' ? value.toLocaleString() : value, labels[name as string] ?? name]
+                        }} />
+                      <Bar dataKey="available"    stackId="s" fill="#4338ca" name="available"    radius={0} isAnimationActive={false} />
+                      <Bar dataKey="onOrder"      stackId="s" fill="#c7d2fe" name="onOrder"      radius={0} isAnimationActive={false} />
+                      <Bar dataKey="recommended"  stackId="s" name="recommended" radius={[3,3,0,0]} isAnimationActive={false}
+                        shape={(props: any) => {
+                          const { x=0, y=0, width=0, height=0 } = props
+                          if (!width || height <= 0) return null
+                          return (<g><defs><pattern id="sc-rec" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)"><rect width="3.5" height="6" fill="#818cf8" /></pattern></defs><rect x={x} y={y} width={width} height={height} fill="url(#sc-rec)" stroke="#6366f1" strokeWidth={0.4} /></g>)
+                        }} />
+                      <Line dataKey="targetMax" type="monotone" stroke="#64748b" strokeWidth={1.5} strokeDasharray="5 3"
+                        dot={{ fill: '#64748b', r: 3 }} name="Target stock level" legendType="none" />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                  <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 mt-2 mb-3 text-[10px] text-gray-500 justify-center">
+                    <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-indigo-700 inline-block" />Available stock</span>
+                    <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-indigo-200 inline-block" />On order stock</span>
+                    <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm inline-block" style={{ background: 'repeating-linear-gradient(45deg,#818cf8,#818cf8 2px,#e0e7ff 2px,#e0e7ff 4px)' }} />Recommended order</span>
+                    <span className="flex items-center gap-1.5"><span className="w-5 border-t-2 border-dashed border-slate-400 inline-block" />Target stock level</span>
+                  </div>
+                  <div className="overflow-x-auto border border-gray-100 rounded-lg">
+                    <table className="w-full text-[10px]">
+                      <thead className="bg-gray-50">
+                        <tr className="border-b border-gray-200">
+                          <th className="px-3 py-2 text-left font-semibold text-gray-500">Size</th>
+                          <th className="px-3 py-2 text-right font-semibold text-gray-500">Available stock<br/><span className="font-normal text-gray-400">Units</span></th>
+                          <th className="px-3 py-2 text-right font-semibold text-gray-500">On order stock</th>
+                          <th className="px-3 py-2 text-right font-semibold text-indigo-700 bg-indigo-50 border-x border-indigo-100">Recommended order</th>
+                          <th className="px-3 py-2 text-right font-semibold text-gray-500">Avail. stock cover<br/><span className="font-normal text-gray-400">Weeks</span></th>
+                          <th className="px-3 py-2 text-right font-semibold text-gray-500">Target stock range</th>
+                          <th className="px-3 py-2 text-right font-semibold text-gray-500">Sales this week<br/><span className="font-normal text-gray-400">Units</span></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {scaledCurve.map((row: SizeCurveEntry, i: number) => {
+                          const cover = row.sales > 0 ? (row.available / row.sales).toFixed(1) : '—'
+                          return (
+                            <tr key={row.size} className={`border-b border-gray-100 ${i % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}`}>
+                              <td className="px-3 py-1.5 font-semibold text-gray-800">{row.size}</td>
+                              <td className="px-3 py-1.5 text-right text-gray-700">{row.available.toLocaleString()}</td>
+                              <td className="px-3 py-1.5 text-right text-gray-700">{row.onOrder.toLocaleString()}</td>
+                              <td className="px-3 py-1.5 text-right font-bold text-indigo-700 bg-indigo-50/50 border-x border-indigo-100">{row.recommended.toLocaleString()}</td>
+                              <td className="px-3 py-1.5 text-right text-amber-600 font-semibold">{cover}</td>
+                              <td className="px-3 py-1.5 text-right text-gray-500">{row.targetMin.toLocaleString()}–{row.targetMax.toLocaleString()}</td>
+                              <td className="px-3 py-1.5 text-right text-gray-700">{row.sales.toLocaleString()}</td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )
+            })()}
           </div>
         </div>
+
+        {/* PO history log — shows audit trail of actions (resubmissions, sends, etc.) */}
+        {(poHistory[p.id]?.length ?? 0) > 0 && (
+          <div className="bg-white border border-gray-100 rounded-xl p-5 shadow-sm">
+            <div className="text-sm font-semibold text-gray-800 mb-3">Activity log</div>
+            <div className="space-y-2">
+              {/* Seed initial rejection entry for pre-rejected POs */}
+              {REJECTION_META[p.id] && (
+                <div className="flex items-start gap-3 text-xs text-gray-500">
+                  <span className="w-1.5 h-1.5 rounded-full bg-red-400 shrink-0 mt-1" />
+                  <span><span className="font-semibold text-gray-700">Rejected by {REJECTION_META[p.id].manager}</span> · {REJECTION_META[p.id].date}
+                    {p.rejectionReason && <span className="italic text-gray-400"> — "{p.rejectionReason}"</span>}
+                  </span>
+                </div>
+              )}
+              {(poHistory[p.id] ?? []).map((entry, idx) => (
+                <div key={idx} className="flex items-start gap-3 text-xs text-gray-500">
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 shrink-0 mt-1" />
+                  <span><span className="font-semibold text-gray-700">{entry.action}</span> · {entry.by} · {entry.date}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {toast && <Toast message={toast} onDone={() => setToast(null)} />}
       </div>
     )
@@ -3595,7 +4159,8 @@ function ReorderView() {
                     </th>
                     <th className="sticky z-20 bg-gray-50 text-left px-3 py-3 font-semibold text-gray-500 whitespace-nowrap" style={{ left: 40, minWidth: 196 }}>Product</th>
                     <th className="sticky z-20 bg-gray-50 text-left px-3 py-3 font-semibold text-gray-500 whitespace-nowrap" style={{ left: 236, minWidth: 104 }}>Category</th>
-                    <th className="sticky z-20 bg-indigo-50 text-right px-3 py-3 font-bold text-indigo-700 whitespace-nowrap border-x border-indigo-100" style={{ left: 340, minWidth: 100, boxShadow: '2px 0 4px -1px rgba(0,0,0,0.06)' }}>Reorder qty</th>
+                    <th className="sticky z-20 bg-indigo-50 text-right px-3 py-3 font-bold text-indigo-700 whitespace-nowrap border-l border-indigo-100" style={{ left: 340, minWidth: 100 }}>Reorder qty</th>
+                    <th className="sticky z-20 bg-indigo-50 text-right px-3 py-3 font-bold text-indigo-700 whitespace-nowrap border-x border-indigo-100" style={{ left: 440, minWidth: 130, boxShadow: '2px 0 4px -1px rgba(0,0,0,0.06)' }}>Total reorder cost</th>
                     <th className="text-left px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Freight</th>
                     <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Selling Price</th>
                     <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Cost Price</th>
@@ -3606,7 +4171,6 @@ function ReorderView() {
                     <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">On order stock</th>
                     <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Avail. cover</th>
                     <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Target levels</th>
-                    <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Total cost</th>
                     <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Min order qty</th>
                     <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Lead time</th>
                     <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Availability<br/><span className="font-normal text-gray-400">Target</span></th>
@@ -3619,8 +4183,7 @@ function ReorderView() {
                   {filteredRows.map((p, i) => {
                     const curSt = effStatus(p)
                     const curFr = effFreight(p)
-                    const ac = APPROVAL_CFG[curSt]
-                    const stage = getPipelineStage(curSt, inquiries[p.id])
+                    const stage = getPipelineStage(curSt)
                     const seed = p.sku.split('').reduce((a, c) => a + c.charCodeAt(0), 0)
                     const revWow = ((seed * 11 + i * 7) % 20) - 8
                     const salesWow = ((seed * 9 + i * 5) % 20) - 8
@@ -3648,8 +4211,11 @@ function ReorderView() {
                           </div>
                         </td>
                         <td className="sticky z-10 px-3 py-2 text-gray-600 whitespace-nowrap" style={{ left: 236, backgroundColor: stickyBg }}>{p.category}</td>
-                        <td className="sticky z-10 px-3 py-2 text-right font-bold text-indigo-700 text-sm" style={{ left: 340, backgroundColor: stickyBg, boxShadow: '2px 0 4px -1px rgba(0,0,0,0.06)' }}>
+                        <td className="sticky z-10 px-3 py-2 text-right font-bold text-indigo-700 text-sm" style={{ left: 340, backgroundColor: stickyBg }}>
                           {p.recommendedReorderQty.toLocaleString()}
+                        </td>
+                        <td className="sticky z-10 px-3 py-2 text-right font-bold text-indigo-700 text-sm" style={{ left: 440, backgroundColor: stickyBg, boxShadow: '2px 0 4px -1px rgba(0,0,0,0.06)' }}>
+                          £{p.totalCost.toLocaleString()}
                         </td>
                         <td className="px-3 py-2">
                           <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border whitespace-nowrap ${
@@ -3676,7 +4242,6 @@ function ReorderView() {
                           <span className="font-bold text-amber-600">{p.weeksOfStock.toFixed(1)}</span>
                         </td>
                         <td className="px-3 py-2 text-right text-gray-700">{fmtK(p.minLevel)}–{fmtK(p.maxLevel)}</td>
-                        <td className="px-3 py-2 text-right text-gray-700">£{p.totalCost.toLocaleString()}</td>
                         <td className="px-3 py-2 text-right text-gray-700">{p.minOrderQty.toLocaleString()}</td>
                         <td className="px-3 py-2 text-right text-gray-700">{p.leadTime}</td>
                         <td className="px-3 py-2 text-right">
@@ -3691,47 +4256,61 @@ function ReorderView() {
                           <PipelineStepper stage={stage} />
                         </td>
                         {/* Next action column */}
-                        <td className="sticky right-0 z-10 px-3 py-2 border-l border-gray-100" style={{ backgroundColor: stickyBg, boxShadow: '-2px 0 4px -1px rgba(0,0,0,0.06)', minWidth: 160 }} onClick={e => e.stopPropagation()}>
-                          {stage === 'draft' && (
-                            <button onClick={() => setOpenInquiryId(p.id)}
-                              className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors flex items-center gap-1">
-                              <Mail className="w-3 h-3" />Send inquiry
-                            </button>
-                          )}
-                          {stage === 'inquiry_sent' && (
-                            <button onClick={() => setOpenInquiryId(p.id)}
-                              className="h-7 px-3 text-[10px] font-semibold rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors">
-                              View thread
-                            </button>
-                          )}
-                          {stage === 'reply_received' && (
-                            <button onClick={() => setOpenInquiryId(p.id)}
-                              className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-amber-500 text-white hover:bg-amber-600 transition-colors">
-                              Review reply
-                            </button>
-                          )}
-                          {stage === 'pending_approval' && (
-                            <button onClick={() => setSendMgrModalIds([p.id])}
-                              className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors">
-                              Send to manager
-                            </button>
-                          )}
-                          {stage === 'approved' && (
-                            <button onClick={() => setPushModalIds([p.id])}
-                              className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors">
-                              Push to Order App
-                            </button>
-                          )}
-                          {stage === 'pushed' && (
-                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border ${ac.bg} ${ac.text} ${ac.border}`}>
-                              <span className={`w-1.5 h-1.5 rounded-full ${ac.dot}`} />{curSt}
-                            </span>
-                          )}
-                          {stage === 'rejected' && (
-                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border ${ac.bg} ${ac.text} ${ac.border}`}>
-                              <span className={`w-1.5 h-1.5 rounded-full ${ac.dot}`} />{curSt}
-                            </span>
-                          )}
+                        <td className="sticky right-0 z-10 px-3 py-2 border-l border-gray-100" style={{ backgroundColor: stickyBg, boxShadow: '-2px 0 4px -1px rgba(0,0,0,0.06)', minWidth: 180 }} onClick={e => e.stopPropagation()}>
+                          <div className="flex flex-col gap-1">
+                            {/* Primary next-step action */}
+                            {stage === 'draft' && (
+                              <button onClick={() => setSendMgrModalIds([p.id])}
+                                className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors">
+                                Send to manager
+                              </button>
+                            )}
+                            {stage === 'pending_approval' && (
+                              <span className="text-[10px] text-gray-400 font-medium py-0.5">Awaiting approval</span>
+                            )}
+                            {stage === 'approved' && (
+                              <button onClick={() => setPushModalIds([p.id])}
+                                className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors">
+                                Push to Order App
+                              </button>
+                            )}
+                            {stage === 'pushed' && (
+                              <span className="text-[10px] text-gray-400 font-medium py-0.5">Sent to Order App</span>
+                            )}
+                            {stage === 'rejected' && (() => {
+                              const meta = REJECTION_META[p.id]
+                              const reason = p.rejectionReason ?? '—'
+                              const tooltip = meta
+                                ? `Rejected by ${meta.manager}, ${meta.date} — "${reason}"`
+                                : `Rejected — "${reason}"`
+                              return (
+                                <button
+                                  onClick={() => { setEditQty(0); setEditExFactory(''); setEditCostPrice(0); setSelectedProduct(p) }}
+                                  title={tooltip}
+                                  className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors">
+                                  Review &amp; resubmit
+                                </button>
+                              )
+                            })()}
+                            {/* Inquiry indicator + side-action button (all statuses) */}
+                            <div className="flex items-center gap-1.5 mt-0.5">
+                              <button
+                                onClick={() => setOpenInquiryId(p.id)}
+                                className="h-6 px-2 text-[10px] font-medium rounded-md border border-gray-200 text-gray-500 hover:bg-gray-50 transition-colors flex items-center gap-1"
+                                title="Send supplier inquiry"
+                              >
+                                <Mail className="w-2.5 h-2.5" />Inquire
+                              </button>
+                              {inquiries[p.id] && inquiries[p.id].status !== 'idle' && (() => {
+                                const nsCfg = NEG_STATUS_CFG[inquiries[p.id].status]
+                                return (
+                                  <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-semibold border ${nsCfg.bg} ${nsCfg.text} ${nsCfg.border}`} title="Open inquiry">
+                                    <span className={`w-1.5 h-1.5 rounded-full ${nsCfg.dot}`} />1
+                                  </span>
+                                )
+                              })()}
+                            </div>
+                          </div>
                         </td>
                       </tr>
                     )
@@ -3750,6 +4329,8 @@ function ReorderView() {
             negReady={negReady}
             inquiries={inquiries}
             onOpenInquiry={id => setOpenInquiryId(id)}
+            cpRules={globalCpRules}
+            onUpdateCpRules={setGlobalCpRules}
           />
         )}
       </div>
@@ -3764,6 +4345,7 @@ function ReorderView() {
             thread={inquiries[openInquiryId]}
             onClose={() => setOpenInquiryId(null)}
             onUpdate={t => setInquiries(prev => ({ ...prev, [t.recId]: t }))}
+            globalCpRules={globalCpRules}
           />
         )
       })()}
@@ -3904,6 +4486,7 @@ function ManagerReorderView() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [mgrToast, setMgrToast] = useState<string | null>(null)
   const [inquiries,     setInquiries]     = useState<Record<string, InquiryThread>>({})
+  const [mgrCpRules,   setMgrCpRules]    = useState<CpRulesState>(DEFAULT_CP_RULES)
   const [openInquiryId, setOpenInquiryId] = useState<string | null>(null)
   const [bulkRejectModal, setBulkRejectModal] = useState(false)
   const [bulkRejectComment, setBulkRejectComment] = useState('')
@@ -4030,6 +4613,34 @@ function ManagerReorderView() {
               </div>
             </div>
           )}
+
+          {/* Resubmission context — shown when merchandiser resubmitted a rejected PO */}
+          {_sharedResubmits.has(p.id) && status === 'Pending Approval' && (() => {
+            const meta = REJECTION_META[p.id]
+            const originalReason = p.rejectionReason
+            return (
+              <details className="bg-amber-50 border border-amber-200 rounded-xl">
+                <summary className="flex items-center gap-2 px-5 py-3 cursor-pointer list-none">
+                  <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
+                  <span className="text-xs font-semibold text-amber-800">Resubmission — see previous rejection and what changed</span>
+                  <span className="ml-auto text-[10px] text-amber-600">▾ expand</span>
+                </summary>
+                <div className="px-5 pb-4 space-y-2 border-t border-amber-200 pt-3">
+                  <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Previous rejection</div>
+                  <div className="bg-white rounded-lg border border-red-100 px-3 py-2 text-xs">
+                    <span className="font-semibold text-red-700">
+                      Rejected{meta ? ` by ${meta.manager}, ${meta.date}` : ''}
+                    </span>
+                    {originalReason && <div className="text-gray-500 italic mt-0.5">"{originalReason}"</div>}
+                  </div>
+                  <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mt-2">Merchandiser response</div>
+                  <div className="bg-white rounded-lg border border-gray-100 px-3 py-2 text-xs text-gray-700">
+                    Resubmitted by Emma (Merchandiser) — see editable fields below for current values.
+                  </div>
+                </div>
+              </details>
+            )
+          })()}
 
           {/* Freight override notice (if buyer overrode the recommended freight) */}
           {p.freightChoice && p.freightChoice !== p.recommendedFreight && (
@@ -4373,7 +4984,8 @@ function ManagerReorderView() {
                 </th>
                 <th className="sticky z-20 bg-gray-50 text-left px-3 py-3 font-semibold text-gray-500 whitespace-nowrap" style={{ left: 40, minWidth: 196 }}>Product</th>
                 <th className="sticky z-20 bg-gray-50 text-left px-3 py-3 font-semibold text-gray-500 whitespace-nowrap" style={{ left: 236, minWidth: 104 }}>Category</th>
-                <th className="sticky z-20 bg-indigo-50 text-right px-3 py-3 font-bold text-indigo-700 whitespace-nowrap border-x border-indigo-100" style={{ left: 340, minWidth: 100, boxShadow: '2px 0 4px -1px rgba(0,0,0,0.06)' }}>Reorder qty</th>
+                <th className="sticky z-20 bg-indigo-50 text-right px-3 py-3 font-bold text-indigo-700 whitespace-nowrap border-l border-indigo-100" style={{ left: 340, minWidth: 100 }}>Reorder qty</th>
+                <th className="sticky z-20 bg-indigo-50 text-right px-3 py-3 font-bold text-indigo-700 whitespace-nowrap border-x border-indigo-100" style={{ left: 440, minWidth: 130, boxShadow: '2px 0 4px -1px rgba(0,0,0,0.06)' }}>Total reorder cost</th>
                 <th className="text-left px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Freight</th>
                 <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Selling Price</th>
                 <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Cost Price</th>
@@ -4384,7 +4996,6 @@ function ManagerReorderView() {
                 <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">On order stock</th>
                 <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Avail. cover</th>
                 <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Target levels</th>
-                <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Total cost</th>
                 <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Min order qty</th>
                 <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Lead time</th>
                 <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Availability<br/><span className="font-normal text-gray-400">Target</span></th>
@@ -4424,7 +5035,12 @@ function ManagerReorderView() {
                         <div className="flex items-center gap-2">
                           <img src={p.imageUrl} className="w-8 h-8 rounded object-cover shrink-0" alt="" />
                           <div>
-                            <div className="font-semibold text-gray-900 whitespace-nowrap">{p.name}</div>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="font-semibold text-gray-900 whitespace-nowrap">{p.name}</span>
+                              {_sharedResubmits.has(p.id) && status === 'Pending Approval' && (
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-50 text-amber-700 border border-amber-200 whitespace-nowrap">Resubmitted</span>
+                              )}
+                            </div>
                             <div className="text-[10px] text-gray-400">{p.sku}</div>
                           </div>
                         </div>
@@ -4432,8 +5048,12 @@ function ManagerReorderView() {
                       {/* Category */}
                       <td className="sticky z-10 px-3 py-2 text-gray-600 whitespace-nowrap" style={{ left: 236, backgroundColor: stickyBg }}>{p.category}</td>
                       {/* Reorder qty */}
-                      <td className="sticky z-10 px-3 py-2 text-right font-bold text-indigo-700 text-sm" style={{ left: 340, backgroundColor: stickyBg, boxShadow: '2px 0 4px -1px rgba(0,0,0,0.06)' }}>
+                      <td className="sticky z-10 px-3 py-2 text-right font-bold text-indigo-700 text-sm" style={{ left: 340, backgroundColor: stickyBg }}>
                         {p.recommendedReorderQty.toLocaleString()}
+                      </td>
+                      {/* Total reorder cost */}
+                      <td className="sticky z-10 px-3 py-2 text-right font-bold text-indigo-700 text-sm" style={{ left: 440, backgroundColor: stickyBg, boxShadow: '2px 0 4px -1px rgba(0,0,0,0.06)' }}>
+                        £{p.totalCost.toLocaleString()}
                       </td>
                       {/* Freight */}
                       <td className="px-3 py-2">
@@ -4470,8 +5090,6 @@ function ManagerReorderView() {
                       </td>
                       {/* Target levels */}
                       <td className="px-3 py-2 text-right text-gray-700">{fmtK(p.minLevel)}–{fmtK(p.maxLevel)}</td>
-                      {/* Total cost */}
-                      <td className="px-3 py-2 text-right text-gray-700">£{p.totalCost.toLocaleString()}</td>
                       {/* Min order qty */}
                       <td className="px-3 py-2 text-right text-gray-700">{p.minOrderQty.toLocaleString()}</td>
                       {/* Lead time */}
@@ -4512,7 +5130,8 @@ function ManagerReorderView() {
                           <div className="flex items-center gap-1.5">
                             <button
                               onClick={() => setOpenInquiryId(p.id)}
-                              className="h-6 px-2 text-[10px] font-semibold rounded-md bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm transition-colors flex items-center gap-1"
+                              className="h-6 px-2 text-[10px] font-medium rounded-md border border-gray-200 text-gray-500 hover:bg-gray-50 transition-colors flex items-center gap-1"
+                              title="Send supplier inquiry"
                             >
                               <Mail className="w-2.5 h-2.5" />Inquire
                             </button>
@@ -4575,6 +5194,8 @@ function ManagerReorderView() {
             negReady={mgrNegReady}
             inquiries={inquiries}
             onOpenInquiry={id => setOpenInquiryId(id)}
+            cpRules={mgrCpRules}
+            onUpdateCpRules={setMgrCpRules}
           />
         )}
       </div>
@@ -4588,6 +5209,7 @@ function ManagerReorderView() {
             onClose={() => setOpenInquiryId(null)}
             onUpdate={t => setInquiries(prev => ({ ...prev, [t.recId]: t }))}
             isManager={true}
+            globalCpRules={mgrCpRules}
             onApprove={() => {
               approve(rec.id)
               setOpenInquiryId(null)
@@ -5357,6 +5979,8 @@ function POMonitoringView() {
   const [sendModal,        setSendModal]        = useState<{ supplierId: string; poIds: string[] } | null>(null)
   const [emailDraft,       setEmailDraft]       = useState('')
   const [poSearch,         setPoSearch]         = useState('')
+  const [chaseThreads,     setChaseThreads]     = useState<Record<string, ChaseThread>>({})
+  const [expandedMsgIds,   setExpandedMsgIds]   = useState<Set<string>>(new Set())
   const [poStatusFilter,   setPoStatusFilter]   = useState('all')
   const [poSupFilter,      setPoSupFilter]      = useState('all')
   const [settingsAccordion, setSettingsAccordion] = useState<string | null>(null)
@@ -5383,7 +6007,7 @@ function POMonitoringView() {
   const daysOverdue = (po: PO) => Math.ceil((today.getTime() - new Date(po.expectedDelivery).getTime()) / 86400000)
   const daysUntil   = (po: PO) => Math.ceil((new Date(po.expectedDelivery).getTime() - today.getTime()) / 86400000)
 
-  interface ActionGroup { supplierId: string; type: 'overdue' | 'at_risk' | 'late_dc'; pos: PO[] }
+  // ActionGroup is declared at module level — see below
   const makeGroups = (pos: PO[], type: ActionGroup['type']): ActionGroup[] => {
     const bySupplier = pos.reduce((acc, po) => { acc[po.supplierId] = [...(acc[po.supplierId] ?? []), po]; return acc }, {} as Record<string, PO[]>)
     return Object.entries(bySupplier).map(([supplierId, ps]) => ({ supplierId, type, pos: ps }))
@@ -5409,6 +6033,117 @@ function POMonitoringView() {
       return `Dear ${sup.name} Team,\n\nWe are writing regarding date change requests for the following purchase orders:\n\n${poList}\n\nPlease provide:\n1. Root cause of the delay\n2. Confirmation of revised delivery schedule\n3. Mitigation actions being taken\n\nPlease respond within 48 hours.\n\nKind regards,\nDebenhams Buying Team`
     }
     return `Dear ${sup.name} Team,\n\nPre-dispatch chase for the following orders due for delivery shortly:\n\n${poList}\n\nPlease confirm:\n1. Goods packed and ready for collection\n2. Freight forwarder booking reference\n3. Expected handover date\n\nKind regards,\nDebenhams Buying Team`
+  }
+
+  // ── Thread helpers ──────────────────────────────────────────────────────────
+  const getThreadKey = (g: ActionGroup) => `${g.supplierId}-${g.type}`
+
+  const generateSupplierReply = (g: ActionGroup): string => {
+    const sup = getSupplier(g.supplierId)
+    const ref  = `DB-${String(Math.floor(100000 + Math.random() * 900000))}`
+    const revDate = new Date(today); revDate.setDate(today.getDate() + 9)
+    const handDate = new Date(today); handDate.setDate(today.getDate() + 3)
+    const revStr  = revDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+    const handStr = handDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+    const name = sup?.name ?? g.supplierId
+
+    if (g.type === 'overdue') {
+      const poLines = g.pos.map(p => `  - ${p.id} (${p.product}): QC complete. Revised ex-factory date: ${revStr}.`).join('\n')
+      return `Dear Debenhams Buying Team,\n\nThank you for your email. We sincerely apologise for the delays on the following orders:\n\n${poLines}\n\nWe are arranging freight booking as a priority and will confirm booking references by ${handStr}.\n\nPlease accept our apologies for any disruption to your intake planning.\n\nKind regards,\n${name} Team`
+    }
+    if (g.type === 'at_risk') {
+      const poLines = g.pos.map(p => {
+        const rev = p.revisedDelivery
+          ? new Date(p.revisedDelivery).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+          : revStr
+        return `  - ${p.id} (${p.product}): Revised delivery ${rev}.`
+      }).join('\n')
+      return `Dear Debenhams Buying Team,\n\nThank you for your email. To confirm our date change request:\n\n${poLines}\n\nRoot cause: Raw material supply delays from our primary fabric supplier impacted production scheduling.\nMitigation: We are expediting QC and finishing processes to minimise further slippage.\n\nWe are committed to no further extensions on these orders.\n\nKind regards,\n${name} Team`
+    }
+    // late_dc
+    const poLines = g.pos.map(p => `  - ${p.id} (${p.product}): Packed and ready. Freight forwarder: DB Schenker. Booking ref: ${ref}. Handover: ${handStr}.`).join('\n')
+    return `Dear Debenhams Buying Team,\n\nThank you for your pre-dispatch chase. Confirming dispatch status:\n\n${poLines}\n\nPlease let us know if you require any further documentation.\n\nKind regards,\n${name} Team`
+  }
+
+  const getFollowUpEmailType = (g: ActionGroup) =>
+    g.type === 'late_dc'  ? 'Pre-Dispatch Chase' :
+    g.type === 'at_risk'  ? 'Date Change Request' :
+    'Ex-Factory Delay — Escalation'
+
+  const generateFollowUp = (g: ActionGroup): string => {
+    const sup = getSupplier(g.supplierId)
+    const name = sup?.name ?? g.supplierId
+    const cutDate = new Date(today); cutDate.setDate(today.getDate() + 5)
+    const cutStr = cutDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+
+    if (g.type === 'overdue') {
+      return `Dear ${name} Team,\n\nThank you for confirming the revised ex-factory dates.\n\nPlease note this represents a significant delay to our intake plan. We require:\n1. Daily status updates until goods are confirmed dispatched\n2. Freight booking references confirmed no later than ${cutStr}\n3. Written confirmation that air freight will be arranged at your cost if dispatch slips further\n\nThis matter has been escalated to our Head of Buying.\n\nPlease confirm receipt and acceptance of these terms.\n\nKind regards,\nDebenhams Buying Team`
+    }
+    if (g.type === 'at_risk') {
+      return `Dear ${name} Team,\n\nThank you for confirming the revised delivery schedule and explaining the root cause.\n\nWe can accept the revised dates on the following conditions:\n1. No further extensions will be granted on these orders\n2. Air freight at your cost if revised dates slip by more than 3 days\n3. Weekly production updates until dispatch is confirmed\n\nPlease confirm your acceptance of these terms in writing within 24 hours.\n\nKind regards,\nDebenhams Buying Team`
+    }
+    // late_dc (auto-send)
+    return `Dear ${name} Team,\n\nThank you for confirming the freight booking details. We have updated our systems accordingly.\n\nWe will monitor progress and will be in touch if any issues arise at our DC.\n\nKind regards,\nDebenhams Buying Team`
+  }
+
+  const handleStartThread = (group: ActionGroup) => {
+    const key  = getThreadKey(group)
+    const body = generateDraftEmail(group)
+    const msgId = `msg-${Date.now()}`
+    const thread: ChaseThread = {
+      status: 'awaiting-reply',
+      startedAt: new Date().toISOString(),
+      messages: [{ id: msgId, sender: 'you', timestamp: new Date().toISOString(), body, status: 'sent' }],
+    }
+    setChaseThreads(prev => ({ ...prev, [key]: thread }))
+    setExpandedMsgIds(new Set())  // collapse all; latest auto-expands
+    addPOEvent(group.pos[0].id, { id: `ev-${Date.now()}`, type: 'chase_sent', timestamp: new Date().toISOString(), body: `Chase email sent to ${getSupplier(group.supplierId)?.name}.`, author: 'agent' })
+  }
+
+  const handleSimulateReply = (group: ActionGroup) => {
+    const key = getThreadKey(group)
+    const replyBody = generateSupplierReply(group)
+    const emailType = getFollowUpEmailType(group)
+    const cfg = CHASE_CONFIGS.find(c => c.label === emailType)
+    const followUpBody = generateFollowUp(group)
+    const replyId   = `msg-${Date.now()}`
+    const followId  = `msg-${Date.now() + 1}`
+    const sup = getSupplier(group.supplierId)
+    const replyMsg: ChaseThreadMsg  = { id: replyId,  sender: sup?.name ?? group.supplierId, timestamp: new Date().toISOString(), body: replyBody, status: 'received' }
+    const followMsg: ChaseThreadMsg = { id: followId, sender: 'agent', timestamp: new Date().toISOString(), body: followUpBody, status: cfg?.autoSend ? 'auto-sent' : 'awaiting-review', emailType }
+
+    setChaseThreads(prev => {
+      const cur = prev[key]
+      if (!cur) return prev
+      return { ...prev, [key]: { ...cur, status: 'reply-received', messages: [...cur.messages, replyMsg, followMsg] } }
+    })
+    setExpandedMsgIds(new Set())  // latest auto-expands
+  }
+
+  const handleSendFollowUp = (group: ActionGroup, msgId: string) => {
+    const key = getThreadKey(group)
+    setChaseThreads(prev => {
+      const cur = prev[key]
+      if (!cur) return prev
+      return { ...prev, [key]: { ...cur, status: 'resolved', messages: cur.messages.map(m => m.id === msgId ? { ...m, status: 'sent' as const } : m) } }
+    })
+  }
+
+  const handleDismissFollowUp = (group: ActionGroup, msgId: string) => {
+    const key = getThreadKey(group)
+    setChaseThreads(prev => {
+      const cur = prev[key]
+      if (!cur) return prev
+      return { ...prev, [key]: { ...cur, messages: cur.messages.map(m => m.id === msgId ? { ...m, status: 'dismissed' as const } : m) } }
+    })
+  }
+
+  const toggleExpandMsg = (msgId: string) => {
+    setExpandedMsgIds(prev => {
+      const next = new Set(prev)
+      if (next.has(msgId)) next.delete(msgId); else next.add(msgId)
+      return next
+    })
   }
 
   const AGENT_LOG: AgentLogEntry[] = [
@@ -5668,27 +6403,51 @@ function POMonitoringView() {
                       ))}
                     </div>
 
-                    {/* Draft email panel */}
-                    <div className="w-[280px] shrink-0 bg-white border border-gray-100 rounded-2xl shadow-sm flex flex-col overflow-hidden">
-                      <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-2">
-                        <Mail className="w-3.5 h-3.5 text-indigo-500" />
-                        <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Draft Chase Email</span>
-                      </div>
-                      <div className="px-4 pt-3 pb-1 flex-1 overflow-y-auto">
-                        <div className="text-[10px] text-gray-400 mb-2">To: {SUPPLIER_EMAILS[selectedGroup.supplierId]}</div>
-                        <pre className="text-[9px] text-gray-600 leading-relaxed whitespace-pre-wrap font-mono bg-gray-50 rounded-lg p-2.5 max-h-64 overflow-y-auto">{generateDraftEmail(selectedGroup)}</pre>
-                      </div>
-                      <div className="p-3 border-t border-gray-100 space-y-2">
-                        <button onClick={() => { const d = generateDraftEmail(selectedGroup); setEmailDraft(d); setSendModal({ supplierId: selectedGroup.supplierId, poIds: selectedGroup.pos.map(p => p.id) }) }}
-                          className="w-full py-2 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 flex items-center justify-center gap-1.5">
-                          <Send className="w-3 h-3" /> Review &amp; Send
-                        </button>
-                        <div className="grid grid-cols-2 gap-2">
-                          <button className="py-1.5 rounded-lg border border-gray-200 text-[10px] font-semibold text-gray-500 hover:bg-gray-50">Snooze 3d</button>
-                          <button className="py-1.5 rounded-lg border border-gray-200 text-[10px] font-semibold text-gray-500 hover:bg-gray-50">Dismiss</button>
+                    {/* Right panel: thread if started, draft if not */}
+                    {(() => {
+                      const threadKey = getThreadKey(selectedGroup)
+                      const thread = chaseThreads[threadKey]
+                      if (thread) {
+                        return (
+                          <div className="w-[300px] shrink-0 bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden flex flex-col">
+                            <ChaseThreadPanel
+                              thread={thread}
+                              group={selectedGroup}
+                              supplier={selectedSupplier ?? undefined}
+                              expandedIds={expandedMsgIds}
+                              onToggleExpand={toggleExpandMsg}
+                              onSimulateReply={() => handleSimulateReply(selectedGroup)}
+                              onSendFollowUp={msgId => handleSendFollowUp(selectedGroup, msgId)}
+                              onDismissFollowUp={msgId => handleDismissFollowUp(selectedGroup, msgId)}
+                            />
+                          </div>
+                        )
+                      }
+                      return (
+                        <div className="w-[280px] shrink-0 bg-white border border-gray-100 rounded-2xl shadow-sm flex flex-col overflow-hidden">
+                          <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-2">
+                            <Mail className="w-3.5 h-3.5 text-indigo-500" />
+                            <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Draft Chase Email</span>
+                          </div>
+                          <div className="px-4 pt-3 pb-1 flex-1 overflow-y-auto">
+                            <div className="text-[10px] text-gray-400 mb-2">To: {SUPPLIER_EMAILS[selectedGroup.supplierId]}</div>
+                            <pre className="text-[9px] text-gray-600 leading-relaxed whitespace-pre-wrap font-mono bg-gray-50 rounded-lg p-2.5 max-h-64 overflow-y-auto">{generateDraftEmail(selectedGroup)}</pre>
+                          </div>
+                          <div className="p-3 border-t border-gray-100 space-y-2">
+                            <button
+                              onClick={() => handleStartThread(selectedGroup)}
+                              className="w-full py-2 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 flex items-center justify-center gap-1.5"
+                            >
+                              <Send className="w-3 h-3" /> Review &amp; Send
+                            </button>
+                            <div className="grid grid-cols-2 gap-2">
+                              <button className="py-1.5 rounded-lg border border-gray-200 text-[10px] font-semibold text-gray-500 hover:bg-gray-50">Snooze 3d</button>
+                              <button className="py-1.5 rounded-lg border border-gray-200 text-[10px] font-semibold text-gray-500 hover:bg-gray-50">Dismiss</button>
+                            </div>
+                          </div>
                         </div>
-                      </div>
-                    </div>
+                      )
+                    })()}
                   </div>
                 </div>
               )}
@@ -6913,15 +7672,6 @@ export default function App() {
               <button className="inline-flex items-center gap-2 h-9 px-3 rounded-lg text-sm font-semibold text-gray-600 bg-white border border-gray-200 hover:bg-gray-50 shadow-sm transition-colors">
                 <RefreshCw className="w-3.5 h-3.5" />Refresh
               </button>
-              {tab === 'inventory' && (
-                <button
-                  onClick={() => setConfigMode(v => !v)}
-                  className={`inline-flex items-center gap-2 h-9 px-4 rounded-lg text-sm font-semibold shadow-sm transition-colors ${configMode ? 'bg-indigo-100 text-indigo-700 border border-indigo-200' : 'text-gray-600 bg-white border border-gray-200 hover:bg-gray-50'}`}
-                >
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
-                  Configure products
-                </button>
-              )}
             </div>
           </div>
         </div>
