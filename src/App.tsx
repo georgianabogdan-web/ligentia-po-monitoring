@@ -5,7 +5,7 @@ import {
   Download, Search, Star, ArrowRight, Building2,
   ChevronDown, RefreshCw, Activity,
   Bot, User, X, Clock, Mail, Check,
-  Calendar, MessageSquare, FileText, Send, ChevronRight, Plus, AlertCircle,
+  Calendar, MessageSquare, FileText, Send, ChevronRight, Plus, AlertCircle, Info,
 } from 'lucide-react'
 import { ComposedChart, LineChart, Cell, Bar, Line, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceArea, ReferenceLine } from 'recharts'
 import { INVENTORY_PRODUCTS, REORDER_RECOMMENDATIONS } from './mockData'
@@ -133,6 +133,20 @@ interface ProductOverride {
   moqQty?: number
   fwcMin?: number
   fwcMax?: number
+  promoPct?: number
+}
+
+// Only a handful of products have a seeded Promo % — others show "—"
+const SEEDED_PROMO_PCT: Record<string, number> = {
+  'INV-001': 22,  // Hydrating Face Serum (Beauty)
+  'INV-003': 14,  // Vitamin C Moisturiser (Beauty)
+  'INV-007': 35,  // Floral Midi Dress (Clothing)
+  'INV-010': 28,  // Jersey Maxi Dress (Clothing)
+  'INV-013': 20,  // Block Heel Ankle Boots (Footwear)
+  'INV-018': 12,  // Leather Crossbody Bag (Accessories)
+}
+function getBasePromoPct(p: { id: string; category: string }): number | null {
+  return SEEDED_PROMO_PCT[p.id] ?? null
 }
 
 interface InvAuditEntry {
@@ -424,6 +438,71 @@ const ESCALATION_RULES = {
 
 type CpRulesState = { openingAskPct: number; escalateIfPct: number; maxRounds: number }
 const DEFAULT_CP_RULES: CpRulesState = { openingAskPct: 6, escalateIfPct: 8, maxRounds: 3 }
+
+const SEED_R1_HYALURONIC = `Subject: CP Inquiry – Hyaluronic Acid Toner – Wk 18
+
+Dear Unilever Ltd team,
+
+We are reviewing our reorder position for Hyaluronic Acid Toner (SKU: SKU-REC002) and would like to discuss cost price for the upcoming replenishment.
+
+Current agreed CP:         £9.50 per unit
+Target CP for this order:  £8.93 per unit (27.3% of selling price)
+
+Order quantity under consideration: 2,840 units
+
+Please confirm your best CP and any MOQ conditions by 5 May 2026.
+
+Best regards,
+[Buyer Name]`
+
+const SEED_R1_COTTONTEE = `Subject: CP Inquiry – Striped Cotton Tee – Wk 18
+
+Dear Next Sourcing team,
+
+We are reviewing our reorder position for Striped Cotton Tee (SKU: SKU-REC006) and would like to discuss cost price for the upcoming replenishment.
+
+Current agreed CP:         £14.50 per unit
+Target CP for this order:  £13.63 per unit (26.3% of selling price)
+
+Order quantity under consideration: 3,130 units
+
+Delivery required by ex-factory date: 27 May 2026
+
+Please confirm your best CP and any MOQ conditions by 5 May 2026.
+
+Best regards,
+[Buyer Name]`
+
+const SEEDED_THREADS: Record<string, InquiryThread> = {
+  'REC-002': {
+    recId: 'REC-002', supplierId: 'Unilever Ltd', status: 'replied', scenario: 'accepted',
+    rounds: [{
+      roundNumber: 1, sentAt: '2026-04-29',
+      emailBody: SEED_R1_HYALURONIC, requestedCP: 8.93,
+      supplierReply: {
+        receivedAt: '2026-04-29', offeredCP: 8.97, moqOffered: 500,
+        leadTimeWeeks: 4, deliveryWindow: '28 May – 11 Jun 2026',
+        accepted: true, scenario: 'accepted',
+        rawText: `Dear Buying Team,\n\nThank you for your inquiry regarding Hyaluronic Acid Toner.\n\nWe are pleased to confirm acceptance of your terms:\n• CP: £8.97 per unit\n• MOQ: 500 units\n• Lead time: 4 weeks\n• Delivery: 28 May – 11 Jun 2026\n\nPlease proceed with the order and we will prioritise production scheduling.\n\nBest regards,\nUnilever Ltd`,
+      },
+    }],
+    agreedCP: null, agreedMOQ: null, flaggedReason: null, internalNotes: '',
+  },
+  'REC-006': {
+    recId: 'REC-006', supplierId: 'Next Sourcing', status: 'replied', scenario: 'counter',
+    rounds: [{
+      roundNumber: 1, sentAt: '2026-04-30',
+      emailBody: SEED_R1_COTTONTEE, requestedCP: 13.63,
+      supplierReply: {
+        receivedAt: '2026-04-30', offeredCP: 15.73, moqOffered: 1500,
+        leadTimeWeeks: 7, deliveryWindow: '18 Jun – 2 Jul 2026',
+        accepted: false, scenario: 'counter',
+        rawText: `Dear Buying Team,\n\nThank you for your inquiry regarding Striped Cotton Tee (SKU-REC006).\n\nWe have reviewed your CP request and unfortunately cannot meet £13.63 due to raw material cost increases (cotton +18% YoY) and freight surcharges.\n\nOur best offer:\n• CP: £15.73 per unit\n• MOQ: 1,500 units (your qty of 3,130 is acceptable)\n• Lead time: 7 weeks from order placement\n• Delivery window: 18 Jun – 2 Jul 2026\n• Partial fulfilment: 1,800 units by 28 May (week 5), balance 1,330 units by 2 Jul (week 9)\n\nWe hope to continue our partnership.\n\nBest regards,\nNext Sourcing`,
+      },
+    }],
+    agreedCP: null, agreedMOQ: null, flaggedReason: null, internalNotes: '',
+  },
+}
 
 // ── Fit Families ──────────────────────────────────────────────────────────────
 const FIT_FAMILIES = [
@@ -1535,14 +1614,36 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
   const [cat,       setCat]      = useState('')
   const [status,    setStatus]   = useState('')
   const [supplier,  setSupplier] = useState('')
+  const [skuChips,  setSkuChips] = useState<string[]>([])
+  const [seasonFilter,   setSeasonFilter]   = useState('')
+  const [leadBandFilter, setLeadBandFilter] = useState('')
+  const [sortCol, setSortCol] = useState<string | null>(null)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
+
+  const toggleSort = (col: string) => {
+    if (sortCol === col) {
+      if (sortDir === 'asc') setSortDir('desc')
+      else { setSortCol(null); setSortDir('asc') }
+    } else { setSortCol(col); setSortDir('asc') }
+  }
+
+  const handleSearchChange = (val: string) => {
+    if (val.includes(',') || val.includes('\n')) {
+      const parsed = val.split(/[,\n]+/).map(s => s.trim()).filter(Boolean)
+      setSkuChips(prev => [...new Set([...prev, ...parsed])])
+      setSearch('')
+    } else {
+      setSearch(val)
+    }
+  }
 
   const supplierOptions = [...new Set(INVENTORY_PRODUCTS.map(p => p.supplier))].sort()
 
   // config mode state
   const [selectedIds,      setSelectedIds]      = useState<Set<string>>(() => new Set())
   const [drawerOpen,       setDrawerOpen]        = useState(false)
-  const [editForm,         setEditForm]          = useState({ moqQty: '', fwc: '', reason: '' })
-  const [formErrors,       setFormErrors]        = useState<{ fwc?: string; fwcWarn?: string; reason?: string }>({})
+  const [editForm,         setEditForm]          = useState({ moqQty: '', fwc: '', promoPct: '', reason: '' })
+  const [formErrors,       setFormErrors]        = useState<{ fwc?: string; fwcWarn?: string; promoPct?: string; reason?: string }>({})
   const [productOverrides, setProductOverrides]  = useState<Record<string, ProductOverride>>({})
   const [auditLog,         setAuditLog]          = useState<Record<string, InvAuditEntry[]>>(() => ({ ...SEEDED_INV_AUDIT }))
   const [flashIds,         setFlashIds]          = useState<Set<string>>(() => new Set())
@@ -1553,10 +1654,15 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
   const [dismissedFwcWarn, setDismissedFwcWarn] = useState(false)
 
   const rows = INVENTORY_PRODUCTS.filter(p =>
-    (!search   || p.name.toLowerCase().includes(search.toLowerCase()) || p.sku.toLowerCase().includes(search.toLowerCase())) &&
+    (skuChips.length > 0
+      ? skuChips.some(c => p.sku.toLowerCase().includes(c.toLowerCase()) || p.name.toLowerCase().includes(c.toLowerCase()))
+      : (!search || p.name.toLowerCase().includes(search.toLowerCase()) || p.sku.toLowerCase().includes(search.toLowerCase()))
+    ) &&
     (!cat      || p.category === cat) &&
     (!status   || p.stockStatus === status) &&
-    (!supplier || p.supplier === supplier)
+    (!supplier || p.supplier === supplier) &&
+    (!seasonFilter   || p.seasonCode === seasonFilter) &&
+    (!leadBandFilter || getLeadTimeBand(p.leadTime) === leadBandFilter)
   )
 
   // Clear selection & drawer when leaving config mode
@@ -1578,6 +1684,21 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
   const dispOnTarget        = Math.round(INV_DEMO_TOTAL * onTargetCount    / invTotal)
   const dispOverstocked     = Math.round(INV_DEMO_TOTAL * overstockedCount / invTotal)
   const dispLowStock        = Math.round(INV_DEMO_TOTAL * lowStockCount    / invTotal)
+
+  // Sorting (Feature 5)
+  const sortedRows = sortCol ? [...rows].sort((a, b) => {
+    const ov_a = productOverrides[a.id]
+    const ov_b = productOverrides[b.id]
+    const vals: Record<string, [number, number]> = {
+      CostPrice: [a.costPrice, b.costPrice],
+      Margin:    [a.marginPct, b.marginPct],
+      WkSales:   [a.weeklySales, b.weeklySales],
+      FwdCover:  [ov_a?.fwcMin ?? a.forwardWeeksCover, ov_b?.fwcMin ?? b.forwardWeeksCover],
+      MoqValue:  [ov_a?.moqQty ?? a.minOrderQty, ov_b?.moqQty ?? b.minOrderQty],
+    }
+    const [va, vb] = vals[sortCol] ?? [0, 0]
+    return sortDir === 'asc' ? va - vb : vb - va
+  }) : rows
 
   // selection helpers
   const allVisibleSelected = rows.length > 0 && rows.every(p => selectedIds.has(p.id))
@@ -1615,9 +1736,13 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
         errs.fwcWarn = v < 1 ? 'FWC is very low (< 1 week) — are you sure?' : 'FWC is unusually high (> 20 weeks) — are you sure?'
       }
     }
+    if (editForm.promoPct) {
+      const v = parseFloat(editForm.promoPct)
+      if (isNaN(v) || v < 0 || v > 100) errs.promoPct = 'Promo % must be between 0 and 100'
+    }
     if (!editForm.reason.trim()) errs.reason = 'Please provide a reason for this change'
     setFormErrors(errs)
-    return !errs.fwc && !errs.reason
+    return !errs.fwc && !errs.promoPct && !errs.reason
   }
 
   const handleApply = () => {
@@ -1629,8 +1754,9 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
 
     // build changes description for audit
     const changeDescs: { field: string; newVal: string }[] = []
-    if (editForm.moqQty) changeDescs.push({ field: 'MOQ Qty',    newVal: `${editForm.moqQty} units` })
-    if (editForm.fwc)    changeDescs.push({ field: 'FWC Target', newVal: `${editForm.fwc} wks` })
+    if (editForm.moqQty)   changeDescs.push({ field: 'MOQ Qty',    newVal: `${editForm.moqQty} units` })
+    if (editForm.fwc)      changeDescs.push({ field: 'FWC Target', newVal: `${editForm.fwc} wks` })
+    if (editForm.promoPct) changeDescs.push({ field: 'Promo %',    newVal: `${editForm.promoPct}%` })
 
     // apply overrides
     setProductOverrides(prev => {
@@ -1638,8 +1764,9 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
       selectedArr.forEach(id => {
         next[id] = {
           ...next[id],
-          ...(editForm.moqQty ? { moqQty: parseInt(editForm.moqQty) }                                           : {}),
-          ...(editForm.fwc    ? { fwcMin: parseFloat(editForm.fwc), fwcMax: parseFloat(editForm.fwc) }          : {}),
+          ...(editForm.moqQty   ? { moqQty: parseInt(editForm.moqQty) }                                      : {}),
+          ...(editForm.fwc      ? { fwcMin: parseFloat(editForm.fwc), fwcMax: parseFloat(editForm.fwc) }     : {}),
+          ...(editForm.promoPct ? { promoPct: parseFloat(editForm.promoPct) }                                 : {}),
         }
       })
       return next
@@ -1654,8 +1781,9 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
         const prevOv = prevSnapshot[id]
         const changes = changeDescs.map(c => {
           let oldVal = '—'
-          if (c.field === 'MOQ Qty')    oldVal = prevOv?.moqQty != null ? `${prevOv.moqQty} units` : (p ? `${p.minOrderQty} units` : '—')
-          if (c.field === 'FWC Target') oldVal = prevOv?.fwcMin != null ? `${prevOv.fwcMin} wks` : '—'
+          if (c.field === 'MOQ Qty')    oldVal = prevOv?.moqQty   != null ? `${prevOv.moqQty} units`   : (p ? `${p.minOrderQty} units` : '—')
+          if (c.field === 'FWC Target') oldVal = prevOv?.fwcMin   != null ? `${prevOv.fwcMin} wks`     : '—'
+          if (c.field === 'Promo %')    oldVal = prevOv?.promoPct != null ? `${prevOv.promoPct}%`       : (p ? (getBasePromoPct(p) != null ? `${getBasePromoPct(p)}%` : '—') : '—')
           return { field: c.field, oldVal, newVal: c.newVal }
         })
         const entry: InvAuditEntry = { id: `aud-${Date.now()}-${id}`, user: 'You', initial: 'Y', date: now, changes, reason: editForm.reason }
@@ -1676,7 +1804,7 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
 
     // close & reset
     setDrawerOpen(false)
-    setEditForm({ moqQty: '', fwc: '', reason: '' })
+    setEditForm({ moqQty: '', fwc: '', promoPct: '', reason: '' })
     setFormErrors({})
     setDismissedFwcWarn(false)
   }
@@ -1812,6 +1940,32 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
                 )}
               </div>
 
+              {/* Planned Promo % */}
+              <div>
+                <div className="flex items-center gap-1.5 mb-1">
+                  <label className="text-xs font-semibold text-gray-700">Planned Promo %</label>
+                  <div className="relative group">
+                    <Info className="w-3.5 h-3.5 text-gray-400 cursor-help" />
+                    <div className="absolute left-full top-1/2 -translate-y-1/2 ml-2 z-50 w-64 bg-gray-900 text-white text-[11px] rounded-lg px-3 py-2 opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity shadow-xl leading-relaxed">
+                      The forecast strips historical promo demand from the baseline, then applies this % as the planned promo allowance. Use this to step down from reactive promotion over time.
+                    </div>
+                  </div>
+                </div>
+                <p className="text-[11px] text-gray-400 mb-2">Share of future demand planned to come from promotional activity. Lower values reduce reorder quantities.</p>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    placeholder="Leave unchanged"
+                    value={editForm.promoPct}
+                    onChange={e => setEditForm(f => ({ ...f, promoPct: e.target.value }))}
+                    className={`w-32 h-9 px-3 rounded-lg border text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-300 placeholder:text-gray-300 ${formErrors.promoPct ? 'border-red-300' : 'border-gray-200'}`}
+                  />
+                  <span className="text-xs text-gray-400 shrink-0">%</span>
+                </div>
+                {formErrors.promoPct && <p className="mt-1 text-[11px] text-red-600">{formErrors.promoPct}</p>}
+              </div>
+
               {/* Live impact preview */}
               <div className="bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-3">
                 <div className="text-[11px] font-bold text-indigo-700 uppercase tracking-wide mb-1.5">Live Impact Preview</div>
@@ -1819,6 +1973,23 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
                   Updating <span className="font-semibold">{updatableSelected.length} product{updatableSelected.length !== 1 ? 's' : ''}</span>.{' '}
                   <span className="font-semibold">{Math.min(updatableSelected.length * 2, 12)} open reorder recommendation{updatableSelected.length !== 1 ? 's' : ''}</span> will be recalculated.
                 </p>
+                {editForm.promoPct && (() => {
+                  const newPct = parseFloat(editForm.promoPct)
+                  const promoSamples = updatableSelected.map(id => {
+                    const prod = INVENTORY_PRODUCTS.find(x => x.id === id)
+                    return productOverrides[id]?.promoPct ?? (prod ? getBasePromoPct(prod) : null)
+                  }).filter((v): v is number => v != null)
+                  const avgCurrent = promoSamples.length > 0
+                    ? promoSamples.reduce((s, v) => s + v, 0) / promoSamples.length
+                    : 20
+                  const lower = !isNaN(newPct) && newPct < avgCurrent
+                  return (
+                    <div className="mt-2 pt-2 border-t border-indigo-100 space-y-1">
+                      <p className="text-xs text-indigo-800">Forecast and reorder recommendations will be recalculated with the updated promo allowance.</p>
+                      {lower && <p className="text-xs text-indigo-800 font-semibold">↓ Lower promo allowance will reduce projected reorder quantities.</p>}
+                    </div>
+                  )
+                })()}
                 {unupdatableSelected.length > 0 && (
                   <div className="mt-2 pt-2 border-t border-indigo-100">
                     <p className="text-[11px] text-indigo-600 font-semibold mb-1">Cannot update {unupdatableSelected.length} product{unupdatableSelected.length !== 1 ? 's' : ''}:</p>
@@ -1948,55 +2119,84 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
         </div>
 
         {/* Filter row */}
-        <div className="flex items-center gap-2 mb-4 flex-wrap">
-          <div className="relative w-52">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
-            <input className="pl-8 h-9 w-full rounded-lg border border-gray-200 bg-white text-sm text-gray-700 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-              placeholder="Search product or SKU…" value={search} onChange={e => setSearch(e.target.value)} />
+        <div className="mb-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="relative w-52">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+              <input className="pl-8 h-9 w-full rounded-lg border border-gray-200 bg-white text-sm text-gray-700 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                placeholder="Search or paste SKU IDs" value={search} onChange={e => handleSearchChange(e.target.value)} />
+            </div>
+            <div className="relative">
+              <select className="h-9 pl-3 pr-7 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none" value={cat} onChange={e => setCat(e.target.value)}>
+                <option value="">All categories</option>
+                {(['Beauty', 'Clothing', 'Footwear', 'Accessories'] as const).map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+            </div>
+            <div className="relative">
+              <select className="h-9 pl-3 pr-7 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none" value={supplier} onChange={e => setSupplier(e.target.value)}>
+                <option value="">All suppliers</option>
+                {supplierOptions.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+              <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+            </div>
+            <div className="relative">
+              <select className="h-9 pl-3 pr-7 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none" value={status} onChange={e => setStatus(e.target.value)}>
+                <option value="">All stock levels</option>
+                <option value="on-target">On Target</option>
+                <option value="low-stock">Low Stock</option>
+                <option value="overstocked">Overstocked</option>
+              </select>
+              <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+            </div>
+            <div className="relative">
+              <select className="h-9 pl-3 pr-7 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none"
+                value={seasonFilter} onChange={e => setSeasonFilter(e.target.value)}>
+                <option value="">All seasons</option>
+                {['Core','SS26','AW26','Clearance'].map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+              <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+            </div>
+            <div className="relative">
+              <select className="h-9 pl-3 pr-7 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none"
+                value={leadBandFilter} onChange={e => setLeadBandFilter(e.target.value)}>
+                <option value="">All regions</option>
+                {['UK <2wk','EU 2-4wk','Far East 8-12wk'].map(b => <option key={b} value={b}>{b}</option>)}
+              </select>
+              <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+            </div>
+            {configMode && selectedIds.size > 0 && (
+              <span className="text-xs font-semibold text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-full border border-indigo-100">{selectedIds.size} selected</span>
+            )}
+            <span className="ml-auto text-xs text-gray-400">{rows.length} of {INVENTORY_PRODUCTS.length} products</span>
+            <button
+              onClick={() => setConfigMode(!configMode)}
+              className={`h-9 px-3 flex items-center gap-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+                configMode
+                  ? 'bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700'
+                  : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
+              }`}
+            >
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/>
+              </svg>
+              Configure products
+            </button>
+            <button className="h-9 px-3 flex items-center gap-1.5 text-xs font-semibold text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50">
+              <Download className="w-3.5 h-3.5" /> Export
+            </button>
           </div>
-          <div className="relative">
-            <select className="h-9 pl-3 pr-7 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none" value={cat} onChange={e => setCat(e.target.value)}>
-              <option value="">All categories</option>
-              {(['Beauty', 'Clothing', 'Footwear', 'Accessories'] as const).map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
-            <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
-          </div>
-          <div className="relative">
-            <select className="h-9 pl-3 pr-7 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none" value={supplier} onChange={e => setSupplier(e.target.value)}>
-              <option value="">All suppliers</option>
-              {supplierOptions.map(s => <option key={s} value={s}>{s}</option>)}
-            </select>
-            <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
-          </div>
-          <div className="relative">
-            <select className="h-9 pl-3 pr-7 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none" value={status} onChange={e => setStatus(e.target.value)}>
-              <option value="">All stock levels</option>
-              <option value="on-target">On Target</option>
-              <option value="low-stock">Low Stock</option>
-              <option value="overstocked">Overstocked</option>
-            </select>
-            <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
-          </div>
-          {configMode && selectedIds.size > 0 && (
-            <span className="text-xs font-semibold text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-full border border-indigo-100">{selectedIds.size} selected</span>
+          {skuChips.length > 0 && (
+            <div className="flex flex-wrap gap-1 mt-2">
+              {skuChips.map(chip => (
+                <span key={chip} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-indigo-100 text-indigo-700">
+                  {chip}
+                  <button onClick={() => setSkuChips(chips => chips.filter(c => c !== chip))} className="hover:text-indigo-900">×</button>
+                </span>
+              ))}
+              <button onClick={() => setSkuChips([])} className="text-xs text-gray-400 hover:text-gray-600 underline">Clear all</button>
+            </div>
           )}
-          <span className="ml-auto text-xs text-gray-400">{rows.length} of {INVENTORY_PRODUCTS.length} products</span>
-          <button
-            onClick={() => setConfigMode(!configMode)}
-            className={`h-9 px-3 flex items-center gap-1.5 text-xs font-semibold rounded-lg border transition-colors ${
-              configMode
-                ? 'bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700'
-                : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
-            }`}
-          >
-            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-              <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/>
-            </svg>
-            Configure products
-          </button>
-          <button className="h-9 px-3 flex items-center gap-1.5 text-xs font-semibold text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50">
-            <Download className="w-3.5 h-3.5" /> Export
-          </button>
         </div>
 
         {/* Table */}
@@ -2011,14 +2211,22 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
                   </th>
                 )}
                 <th className="px-4 py-3 w-14" />
-                {['Product', 'Category', 'Supplier', 'Stock Status', 'Cost £', 'Margin', 'Wk Sales', 'Fwd Weeks Cover', 'MOQ Level', 'MOQ Unit Value', 'Size'].map(h => (
-                  <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">{h}</th>
-                ))}
+                {['Product', 'Category', 'Supplier', 'Stock Status', 'Cost £', 'Margin', 'Wk Sales', 'Fwd Weeks Cover', 'Promo %', 'MOQ Level', 'MOQ Unit Value', 'Size'].map(h => {
+                  const sortKey = ({ 'Cost £': 'CostPrice', 'Margin': 'Margin', 'Wk Sales': 'WkSales', 'Fwd Weeks Cover': 'FwdCover', 'MOQ Unit Value': 'MoqValue' } as Record<string,string>)[h]
+                  const isActive = sortCol === sortKey
+                  return (
+                    <th key={h}
+                      onClick={sortKey ? () => toggleSort(sortKey) : undefined}
+                      className={`text-left px-4 py-3 text-xs font-semibold uppercase tracking-wider whitespace-nowrap ${sortKey ? 'cursor-pointer select-none hover:text-gray-700' : ''} ${isActive ? 'text-indigo-600' : 'text-gray-500'}`}>
+                      {h}{isActive ? (sortDir === 'asc' ? ' ↑' : ' ↓') : (sortKey ? ' ↕' : '')}
+                    </th>
+                  )
+                })}
                 {configMode && <th className="px-3 py-3 w-8" />}
               </tr>
             </thead>
             <tbody>
-              {rows.map((p, i) => {
+              {sortedRows.map((p, i) => {
                 const sc       = STOCK_CFG[p.stockStatus]
                 const isSelected = configMode && selectedIds.has(p.id)
                 const isFlashing = flashIds.has(p.id)
@@ -2065,6 +2273,20 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
                         {(ov?.fwcMin ?? p.forwardWeeksCover).toFixed(1)} wks
                         {ov?.fwcMin != null && <span className="ml-1 text-[9px] font-normal text-amber-500">edited</span>}
                       </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      {(() => {
+                        const base = getBasePromoPct(p)
+                        const value = ov?.promoPct ?? base
+                        const isModified = ov?.promoPct != null
+                        if (value == null) return <span className="text-xs text-gray-300">—</span>
+                        return (
+                          <div className={`text-xs font-bold whitespace-nowrap ${isModified ? 'text-amber-600' : 'text-gray-900'}`}>
+                            {value}%
+                            {isModified && <span className="ml-1 text-[9px] font-normal text-amber-500">edited</span>}
+                          </div>
+                        )
+                      })()}
                     </td>
                     <td className="px-4 py-3 text-xs text-gray-700 text-right">{ov?.moqGrouping ? <span className="font-semibold text-indigo-700">{ov.moqGrouping}</span> : p.packSize}</td>
                     <td className="px-4 py-3 text-xs text-gray-700 text-right">
@@ -2197,30 +2419,68 @@ Best regards,
 [Buyer Name]`
 }
 
-function buildFollowUpEmail(
+function buildCounterMidpointDraft(
   rec: typeof REORDER_RECOMMENDATIONS[0],
   reply: SupplierNegReply,
-  nextRequestedCP: number
+  round1RequestedCP: number,
 ): string {
-  const today    = new Date()
-  const deadline = new Date(today)
-  deadline.setDate(today.getDate() + 3)
-  const dlStr    = deadline.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
-  const deltaPct = (((reply.offeredCP - nextRequestedCP) / rec.costPrice) * 100).toFixed(1)
-  return `Subject: RE: CP Inquiry – ${rec.name} – Follow-up
+  const midpoint = Math.round((round1RequestedCP + reply.offeredCP) / 2 * 100) / 100
+  const today = new Date()
+  const dl = new Date(today); dl.setDate(today.getDate() + 3)
+  const dlStr = dl.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+  const exFactoryDt = rec.exFactoryDate ? new Date(rec.exFactoryDate) : null
+  const weeksToExF = exFactoryDt ? (exFactoryDt.getTime() - today.getTime()) / (7 * 86400000) : null
+  const hasLeadBreach = weeksToExF !== null && reply.leadTimeWeeks > weeksToExF
+  const exFStr = exFactoryDt ? exFactoryDt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : ''
+  const leadTimeBlock = hasLeadBreach
+    ? `\nOn lead time: our ex-factory date is fixed at ${exFStr} and cannot move. We require full delivery of ${rec.recommendedReorderQty.toLocaleString()} units by that date. Alternatively, we can accept a split: 1,800 units by 28 May (firm) with the balance of 1,330 units no later than 2 Jun 2026. Any delay beyond these dates will require a commercial discussion.\n`
+    : ''
+
+  return `Subject: RE: CP Inquiry – ${rec.name} – Round 2
 
 Dear ${rec.supplier} team,
 
-Thank you for your response. We appreciate your offer of £${reply.offeredCP.toFixed(2)} per unit for ${rec.name} (SKU: ${rec.sku}).
+Thank you for your response. We appreciate your transparency on material cost pressures and understand the input cost context.
 
-After internal review, we are able to move to £${nextRequestedCP.toFixed(2)} per unit — a ${deltaPct}% reduction from your last offer — in exchange for confirming the order this week.
+After internal review, we are unable to accept £${reply.offeredCP.toFixed(2)} per unit — this exceeds our cost price approval threshold and would take gross margin below acceptable levels for this range.
 
-Order quantity: ${rec.recommendedReorderQty.toLocaleString()} units
-Delivery window: ${reply.deliveryWindow}
+We propose to meet in the middle at £${midpoint.toFixed(2)} per unit, which represents a fair midpoint between our positions and allows us to maintain viable margins.${leadTimeBlock}
+To support this agreement, we can offer 60-day payment terms (vs our standard 45 days) and are prepared to commit to a repeat order at the same CP for AW26, providing you with forward volume certainty.
 
-We believe this represents a fair position for both parties and hope to reach agreement by ${dlStr}.
+Confirmed order quantity: ${rec.recommendedReorderQty.toLocaleString()} units
 
-Please confirm by return.
+Please confirm by ${dlStr} so we can proceed to purchase order.
+
+Best regards,
+[Buyer Name]`
+}
+
+function buildAcceptSplitDraft(
+  rec: typeof REORDER_RECOMMENDATIONS[0],
+  reply: SupplierNegReply,
+  round1RequestedCP: number,
+): string {
+  const midpoint = Math.round((round1RequestedCP + reply.offeredCP) / 2 * 100) / 100
+  const today = new Date()
+  const dl = new Date(today); dl.setDate(today.getDate() + 3)
+  const dlStr = dl.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+  return `Subject: RE: CP Inquiry – ${rec.name} – Split Delivery Proposal
+
+Dear ${rec.supplier} team,
+
+Thank you for your response and for offering a partial fulfilment option.
+
+We are prepared to accept a split delivery on the following conditions:
+
+• Shipment 1: 1,800 units delivered by 28 May 2026 (firm — no later)
+• Shipment 2: 1,330 units delivered by 2 Jun 2026 (firm — no later)
+• Agreed CP: £${midpoint.toFixed(2)} per unit across both shipments
+
+The first shipment date of 28 May is critical for our range launch and cannot slip. If you are unable to meet this, please advise immediately so we can explore alternatives.
+
+Total order quantity confirmed: ${rec.recommendedReorderQty.toLocaleString()} units
+
+Please confirm both shipment dates and the CP of £${midpoint.toFixed(2)} by ${dlStr}.
 
 Best regards,
 [Buyer Name]`
@@ -2274,6 +2534,13 @@ const NEG_STATUS_CFG: Record<NegotiationStatus, { label: string; bg: string; tex
   escalated:     { label: 'Escalated ⚑',    bg: 'bg-red-50',     text: 'text-red-700',     border: 'border-red-200',   dot: 'bg-red-500'   },
 }
 
+function evalCpDecision(cpDeltaPct: number, lastReply: { offeredCP: number } | null, sellingPrice: number, effectiveCpRules: CpRulesState, currentMarginPct: string, leadTimeBreach?: boolean) {
+  const withinRule        = cpDeltaPct < effectiveCpRules.escalateIfPct
+  const exceedsEscalation = cpDeltaPct >= effectiveCpRules.escalateIfPct
+  const newGP = lastReply ? ((sellingPrice - lastReply.offeredCP) / sellingPrice * 100).toFixed(1) : currentMarginPct
+  return { withinRule, exceedsEscalation, newGP, leadTimeBreach: leadTimeBreach ?? false }
+}
+
 // ── Inquiry Drawer ────────────────────────────────────────────────────────────
 function InquiryDrawer({
   rec, thread, onClose, onUpdate, isManager, onApprove, onReject, globalCpRules,
@@ -2306,6 +2573,7 @@ function InquiryDrawer({
   const [mgrComment,        setMgrComment]        = useState('')
   const [cpEditing,         setCpEditing]         = useState(false)
   const [cpOverride,        setCpOverride]        = useState<CpRulesState | null>(null)
+  const [suggestStrategy,   setSuggestStrategy]   = useState<'counter' | 'split' | 'escalate'>('counter')
 
   // Auto-generate draft on open
   useEffect(() => {
@@ -2375,8 +2643,8 @@ function InquiryDrawer({
     if (status !== 'replied' || !thread) return
     const lastReply = thread.rounds[thread.rounds.length - 1]?.supplierReply
     if (!lastReply || lastReply.scenario !== 'counter' || followUpBody) return
-    const nextCP = calcRequestedCP(rec.costPrice, thread.rounds.length + 1)
-    const body   = buildFollowUpEmail(rec, lastReply, nextCP)
+    const round1CP = thread.rounds[0]?.requestedCP ?? 0
+    const body = buildCounterMidpointDraft(rec, lastReply, round1CP)
     setFollowUpBody(body)
     setFollowUpOriginal(body)
   }, [status, thread?.rounds.length]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -2399,10 +2667,12 @@ function InquiryDrawer({
     if (!latestThread.current) return
     setIsSending(true)
     setTimeout(() => {
-      const cur         = latestThread.current!
-      const ts          = new Date().toISOString()
-      const nextRound   = cur.rounds.length + 1
-      const requestedCP = calcRequestedCP(rec.costPrice, nextRound)
+      const cur       = latestThread.current!
+      const ts        = new Date().toISOString()
+      const nextRound = cur.rounds.length + 1
+      const round1CP  = cur.rounds[0]?.requestedCP ?? 0
+      const replyCP   = cur.rounds[cur.rounds.length - 1]?.supplierReply?.offeredCP ?? rec.costPrice
+      const requestedCP = Math.round((round1CP + replyCP) / 2 * 100) / 100
       setSentAt(ts)
       setIsSending(false)
       onUpdate({
@@ -2447,6 +2717,24 @@ function InquiryDrawer({
   const currentMarginPct  = ((rec.sellingPrice - rec.costPrice) / rec.sellingPrice * 100).toFixed(1)
   const agreedMarginPct   = thread?.agreedCP ? ((rec.sellingPrice - thread.agreedCP) / rec.sellingPrice * 100).toFixed(1) : null
 
+  const exFactoryRecDt   = rec.exFactoryDate ? new Date(rec.exFactoryDate) : null
+  const weeksToExFactory = exFactoryRecDt ? (exFactoryRecDt.getTime() - today.getTime()) / (7 * 86400000) : null
+  const leadTimeBreach   = weeksToExFactory !== null && !!lastReply && (lastReply as SupplierNegReply).leadTimeWeeks > weeksToExFactory
+  const exFactoryDateStr = exFactoryRecDt ? exFactoryRecDt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : ''
+
+  const handleStrategyChange = (s: 'counter' | 'split' | 'escalate') => {
+    setSuggestStrategy(s)
+    if (!lastReply || !thread) return
+    const round1CP = thread.rounds[0]?.requestedCP ?? 0
+    if (s === 'counter') {
+      const body = buildCounterMidpointDraft(rec, lastReply as SupplierNegReply, round1CP)
+      setFollowUpBody(body); setFollowUpOriginal(body)
+    } else if (s === 'split') {
+      const body = buildAcceptSplitDraft(rec, lastReply as SupplierNegReply, round1CP)
+      setFollowUpBody(body); setFollowUpOriginal(body)
+    }
+  }
+
   const pipelineStage = getPipelineStage(thread?.status === 'agreed' ? 'Approved' : 'Draft')
 
   const negStatusLabel =
@@ -2478,6 +2766,20 @@ function InquiryDrawer({
               </span>
             </div>
             <div className="text-xs text-gray-400">{rec.supplier} · {rec.sku}</div>
+            <div className="flex items-center gap-1.5 flex-wrap mt-2">
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-100">
+                CP target −{effectiveCpRules.openingAskPct}%
+              </span>
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-50 text-amber-700 border border-amber-100">
+                Escalate &gt;{effectiveCpRules.escalateIfPct}%
+              </span>
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-gray-100 text-gray-600 border border-gray-200">
+                Buy by {buyDlStr}
+              </span>
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-gray-100 text-gray-600 border border-gray-200">
+                {lineValue}
+              </span>
+            </div>
           </div>
           <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 transition-colors shrink-0 mt-0.5">
             <X className="w-4 h-4" />
@@ -2505,6 +2807,7 @@ function InquiryDrawer({
                   cpDeltaColor={cpDeltaColor}
                   cpDeltaLabel={cpDeltaLabel}
                   currentMarginPct={currentMarginPct}
+                  leadTimeBreach={leadTimeBreach}
                 />
               )}
             </div>
@@ -2598,13 +2901,44 @@ function InquiryDrawer({
             </div>
           )}
 
+          {/* Agent suggestions — counter scenario only */}
+          {status === 'replied' && scenario === 'counter' && (
+            <div className="bg-indigo-50/70 rounded-xl p-3 border border-indigo-100">
+              <div className="text-[10px] font-semibold text-indigo-600 uppercase tracking-wide mb-2">Agent suggestions</div>
+              <div className="flex items-center gap-2 flex-wrap">
+                {(['counter', 'split', 'escalate'] as const).map(s => (
+                  <button
+                    key={s}
+                    onClick={() => s !== 'escalate' && handleStrategyChange(s)}
+                    title={s === 'escalate' ? 'Coming soon' : undefined}
+                    disabled={s === 'escalate'}
+                    className={`h-7 px-3 rounded-full text-[10px] font-semibold transition-colors border ${
+                      suggestStrategy === s
+                        ? 'bg-indigo-600 text-white border-indigo-600'
+                        : s === 'escalate'
+                        ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+                        : 'bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-100'
+                    }`}
+                  >
+                    {s === 'counter' ? 'Counter at midpoint' : s === 'split' ? 'Accept split delivery' : 'Escalate to manager'}
+                    {s === 'escalate' && <span className="ml-1 text-[9px] opacity-70">soon</span>}
+                  </button>
+                ))}
+              </div>
+              <div className="text-[10px] text-indigo-500 mt-1.5">
+                {suggestStrategy === 'counter' && 'Meet at midpoint between our ask and their offer — within CP rules'}
+                {suggestStrategy === 'split' && 'Accept 1,800 units first shipment (by 28 May), balance by firm date'}
+              </div>
+            </div>
+          )}
+
           {/* Scenario B: counter → editable follow-up draft */}
           {status === 'replied' && scenario === 'counter' && followUpBody && (
             <div className="border border-violet-200 rounded-xl overflow-hidden">
               <div className="flex items-center justify-between px-3.5 py-2 bg-violet-50 border-b border-violet-100">
                 <div className="flex items-center gap-2">
                   <Mail className="w-3.5 h-3.5 text-violet-400" />
-                  <span className="text-[11px] font-semibold text-violet-700">AI-drafted follow-up</span>
+                  <span className="text-[11px] font-semibold text-violet-700">AI-drafted follow-up — Round 2</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-[10px] text-violet-400">{followUpBody.length} chars</span>
@@ -2621,7 +2955,46 @@ function InquiryDrawer({
                 value={followUpBody}
                 onChange={e => setFollowUpBody(e.target.value)}
               />
+              {lastReply && (() => {
+                const ev = evalCpDecision(cpDeltaPct, lastReply, rec.sellingPrice, effectiveCpRules, currentMarginPct, leadTimeBreach)
+                const supplyDelivEnd = lastReply.deliveryWindow.split('–').pop()?.trim() ?? lastReply.deliveryWindow
+                return (
+                  <div className="px-3.5 py-2.5 bg-gray-50 border-t border-gray-100 space-y-1">
+                    <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1">Decision signals</div>
+                    <div className={`flex items-start gap-1.5 text-[11px] ${ev.exceedsEscalation ? 'text-red-600' : 'text-green-600'}`}>
+                      <span>{ev.exceedsEscalation ? '⚠' : '✓'}</span>
+                      <span className="font-medium">
+                        {ev.exceedsEscalation
+                          ? `Exceeds escalation threshold (+${cpDeltaPct.toFixed(1)}% vs limit +${effectiveCpRules.escalateIfPct}%)`
+                          : `Within CP rules (+${cpDeltaPct.toFixed(1)}% vs limit +${effectiveCpRules.escalateIfPct}%)`}
+                      </span>
+                    </div>
+                    {ev.leadTimeBreach && (
+                      <div className="flex items-start gap-1.5 text-[11px] text-amber-700">
+                        <span>⚠</span>
+                        <span className="font-medium">Delivery slips past ex-factory ({supplyDelivEnd} vs {exFactoryDateStr})</span>
+                      </div>
+                    )}
+                    <div className="flex items-start gap-1.5 text-[11px] text-gray-600">
+                      <span>→</span>
+                      <span>GP impact <span className="font-semibold">{currentMarginPct}% → {ev.newGP}%</span></span>
+                    </div>
+                  </div>
+                )
+              })()}
               <div className="px-3.5 py-2.5 bg-violet-50 border-t border-violet-100">
+                {lastReply && (() => {
+                  const ev = evalCpDecision(cpDeltaPct, lastReply, rec.sellingPrice, effectiveCpRules, currentMarginPct, leadTimeBreach)
+                  const hasAnyBreach = ev.exceedsEscalation || ev.leadTimeBreach
+                  return (
+                    <div className={`text-[10px] font-medium mb-2 leading-relaxed ${hasAnyBreach ? 'text-red-600' : 'text-amber-700'}`}>
+                      {hasAnyBreach
+                        ? `GP ${currentMarginPct}% → ${ev.newGP}% ✗ · ${ev.exceedsEscalation ? `Exceeds CP rule (+${cpDeltaPct.toFixed(1)}%)` : ''}${ev.exceedsEscalation && ev.leadTimeBreach ? ' · ' : ''}${ev.leadTimeBreach ? 'Delivery slips ex-factory' : ''} ⚠ · Escalation recommended`
+                        : `CP +${cpDeltaPct.toFixed(1)}% — within your +${effectiveCpRules.escalateIfPct}% threshold, safe to send`
+                      }
+                    </div>
+                  )
+                })()}
                 <button
                   onClick={handleSendFollowUp}
                   disabled={isSending}
@@ -2693,32 +3066,13 @@ function InquiryDrawer({
             </div>
           )}
 
-          {/* Internal notes */}
-          {thread && (
-            <div>
-              <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1.5">
-                Internal notes <span className="font-normal normal-case">— {new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
-              </div>
-              <textarea
-                className="w-full text-[11px] text-gray-700 leading-relaxed p-3 rounded-xl border border-gray-200 bg-gray-50 resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-200"
-                rows={3}
-                placeholder="Add notes for the team…"
-                value={internalNotes}
-                onChange={e => {
-                  setInternalNotes(e.target.value)
-                  onUpdate({ ...thread, internalNotes: e.target.value })
-                }}
-              />
-            </div>
-          )}
-
-          {/* [2] Context — collapsed by default, at the bottom */}
+          {/* [2] Deal record — collapsed by default, at the bottom */}
           <div className="border border-gray-200 rounded-xl overflow-hidden">
             <button
               onClick={() => setContextOpen(o => !o)}
               className="w-full flex items-center justify-between px-4 py-2.5 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
             >
-              <span className="text-xs font-semibold text-gray-600">Context — Leverage, Key Dates, CP Rules</span>
+              <span className="text-[11px] text-gray-400">Deal record</span>
               <ChevronDown className={`w-3.5 h-3.5 text-gray-400 transition-transform ${contextOpen ? 'rotate-180' : ''}`} />
             </button>
             {contextOpen && (
@@ -2848,6 +3202,25 @@ function InquiryDrawer({
               </div>
             )}
           </div>
+
+          {/* Internal notes — below Deal record */}
+          {thread && (
+            <div>
+              <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1.5 mt-4">
+                Internal notes <span className="font-normal normal-case">— {new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+              </div>
+              <textarea
+                className="w-full text-[11px] text-gray-700 leading-relaxed p-3 rounded-xl border border-gray-200 bg-gray-50 resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-200"
+                rows={3}
+                placeholder="Add notes for the team…"
+                value={internalNotes}
+                onChange={e => {
+                  setInternalNotes(e.target.value)
+                  onUpdate({ ...thread, internalNotes: e.target.value })
+                }}
+              />
+            </div>
+          )}
         </div>
 
         {/* Sticky footer — action bar */}
@@ -2939,21 +3312,22 @@ function RoundSentBlock({ roundNumber, sentAt, requestedCP, emailBody }: {
   )
 }
 
-function ReplyBlock({ reply, rec, cpDeltaColor, cpDeltaLabel, currentMarginPct }: {
+function ReplyBlock({ reply, rec, cpDeltaColor, cpDeltaLabel, currentMarginPct, leadTimeBreach }: {
   reply: SupplierNegReply
   rec: typeof REORDER_RECOMMENDATIONS[0]
   cpDeltaColor: string
   cpDeltaLabel: string
   currentMarginPct: string
+  leadTimeBreach?: boolean
 }) {
   const [expanded, setExpanded] = useState(false)
   const newGP = ((rec.sellingPrice - reply.offeredCP) / rec.sellingPrice * 100).toFixed(1)
   const gpDeltaUp = parseFloat(newGP) >= parseFloat(currentMarginPct)
   return (
-    <div className="border border-amber-200 rounded-xl overflow-hidden">
+    <div className={`border rounded-xl overflow-hidden ${leadTimeBreach ? 'border-red-200' : 'border-amber-200'}`}>
       {/* Header — always visible, not a toggle */}
-      <div className="flex items-center justify-between px-3.5 py-2.5 bg-amber-50 border-b border-amber-100">
-        <span className="text-[11px] font-semibold text-amber-700">Supplier Reply — {reply.receivedAt}</span>
+      <div className={`flex items-center justify-between px-3.5 py-2.5 border-b ${leadTimeBreach ? 'bg-red-50 border-red-100' : 'bg-amber-50 border-amber-100'}`}>
+        <span className={`text-[11px] font-semibold ${leadTimeBreach ? 'text-red-700' : 'text-amber-700'}`}>Supplier Reply — {reply.receivedAt}</span>
         <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${gpDeltaUp ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
           GP% {currentMarginPct}% → {newGP}%
         </span>
@@ -2973,11 +3347,13 @@ function ReplyBlock({ reply, rec, cpDeltaColor, cpDeltaLabel, currentMarginPct }
         </div>
         <div>
           <div className="text-[10px] text-gray-400">Lead time</div>
-          <div className="text-xs font-semibold text-gray-700">{reply.leadTimeWeeks} wks</div>
+          <div className={`text-xs font-semibold ${leadTimeBreach ? 'text-red-600' : 'text-gray-700'}`}>
+            {reply.leadTimeWeeks} wks{leadTimeBreach && <span className="ml-1 text-[10px] font-normal">⚠ slips ex-fty</span>}
+          </div>
         </div>
         <div>
           <div className="text-[10px] text-gray-400">Delivery window</div>
-          <div className="text-xs font-semibold text-gray-700">{reply.deliveryWindow}</div>
+          <div className={`text-xs font-semibold ${leadTimeBreach ? 'text-red-600' : 'text-gray-700'}`}>{reply.deliveryWindow}</div>
         </div>
       </div>
       {/* Expandable full reply */}
@@ -3184,6 +3560,29 @@ const REJECTION_META: Record<string, { manager: string; date: string }> = {
 // Module-level set so the manager view (separate component) sees a "Resubmitted" pill
 // on POs the merchandiser has resubmitted within the same session.
 const _sharedResubmits = new Set<string>()
+
+// Shared rejection history — populated by manager rejections, read by buyer view
+const _sharedRejectionHistory: Record<string, Array<{ date: string; manager: string; comment: string }>> = {
+  'REC-003': [{ date: '21 Apr 2026', manager: 'Sarah Chen', comment: 'Stock levels still too high at DC. Come back when cover drops below 8w.' }],
+  'REC-008': [{ date: '24 Apr 2026', manager: 'Sarah Chen', comment: 'Margin too thin at this price point. Need supplier discount first.' }],
+}
+
+// Helper: lead time band for Inventory filters
+function getLeadTimeBand(lt: string): string {
+  const weeks = parseInt(lt)
+  if (weeks < 2) return 'UK <2wk'
+  if (weeks <= 4) return 'EU 2-4wk'
+  return 'Far East 8-12wk'
+}
+
+// Helper: gross margin for time window (Feature 6a)
+function getMarginForWindow(marginPct: number, id: string, timeRange: '1m' | '6m' | '1y'): number {
+  const base = Math.round(marginPct * 100)
+  const seed = id.split('').reduce((a, c) => a + c.charCodeAt(0), 0)
+  if (timeRange === '1m') return base
+  if (timeRange === '6m') return Math.max(0, base + ((seed * 3) % 5) - 2)
+  return Math.max(0, base + ((seed * 7) % 8) - 4)
+}
 
 function getPipelineStage(approvalStatus: ApprovalStatus): PipelineStage {
   if (approvalStatus === 'Sent')             return 'pushed'
@@ -3520,9 +3919,10 @@ function ReorderView() {
   const [statusOverrides, setStatusOverrides] = useState<Record<string, ApprovalStatus>>({})
   const [freightOverrides, setFreightOverrides] = useState<Record<string, 'Sea' | 'Air'>>({})
   const [freightReasons, setFreightReasons]     = useState<Record<string, string>>({})
+  const [freightSplits, setFreightSplits]       = useState<Record<string, { air: number; sea: number }>>({})
   const [selectedIds, setSelectedIds]           = useState<Set<string>>(new Set())
   const [toast, setToast]                       = useState<string | null>(null)
-  const [inquiries, setInquiries]               = useState<Record<string, InquiryThread>>({})
+  const [inquiries, setInquiries]               = useState<Record<string, InquiryThread>>(() => ({ ...SEEDED_THREADS }))
   const [openInquiryId, setOpenInquiryId]       = useState<string | null>(null)
   const [globalCpRules, setGlobalCpRules]       = useState<CpRulesState>(DEFAULT_CP_RULES)
   const [editQty, setEditQty]                   = useState(0)
@@ -3532,6 +3932,7 @@ function ReorderView() {
   const [sendMgrMsg, setSendMgrMsg]             = useState('')
   const [pushModalIds, setPushModalIds]         = useState<string[]>([])
   const [poHistory, setPoHistory]               = useState<Record<string, Array<{ action: string; by: string; date: string }>>>({})
+  const [dismissedHistoryBanners, setDismissedHistoryBanners] = useState<Set<string>>(new Set())
 
   const effStatus  = (p: typeof REORDER_RECOMMENDATIONS[0]): ApprovalStatus =>
     statusOverrides[p.id] ?? p.approvalStatus
@@ -3600,6 +4001,24 @@ function ReorderView() {
           <button onClick={() => setSelectedProduct(null)} className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-800">
             ← Back to Reorder
           </button>
+
+          {/* Prior rejection history banner — shown when not currently rejected */}
+          {_sharedRejectionHistory[p.id]?.length > 0 && curStatus !== 'Rejected' && !dismissedHistoryBanners.has(p.id) && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl px-5 py-3 flex items-start gap-3">
+              <Info className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-semibold text-amber-800 mb-0.5">
+                  Previously rejected {_sharedRejectionHistory[p.id][0].date} by {_sharedRejectionHistory[p.id][0].manager}
+                </div>
+                {_sharedRejectionHistory[p.id][0].comment && (
+                  <div className="text-xs text-amber-700 italic">"{_sharedRejectionHistory[p.id][0].comment}"</div>
+                )}
+              </div>
+              <button onClick={() => setDismissedHistoryBanners(s => new Set([...s, p.id]))} className="text-amber-400 hover:text-amber-600 shrink-0">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
 
           {/* Rejection banner — shown above everything when PO is rejected */}
           {curStatus === 'Rejected' && (
@@ -3721,59 +4140,171 @@ function ReorderView() {
             </div>
           </div>
 
-          {/* Freight comparison */}
-          <div className="bg-white border border-gray-100 rounded-xl p-5 shadow-sm">
-            <div className="text-sm font-semibold text-gray-800 mb-3">Freight Method</div>
-            <div className="grid grid-cols-2 gap-3">
-              {(['Sea', 'Air'] as const).map(method => {
-                const opts = freightOpts[method]
-                const isSelected    = curFreight === method
-                const isRecommended = p.recommendedFreight === method
-                return (
-                  <button key={method} onClick={() => setFreightOverrides(o => ({ ...o, [p.id]: method }))}
-                    className={`text-left p-4 rounded-xl border-2 transition-all ${
-                      isSelected
-                        ? isRecommended ? 'border-indigo-500 bg-indigo-50' : 'border-amber-400 bg-amber-50'
-                        : 'border-gray-200 bg-gray-50/40 hover:bg-gray-50'
-                    }`}>
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-sm font-bold text-gray-900">{method === 'Sea' ? '🚢 Sea' : '✈️ Air'}</span>
-                      <div className="flex items-center gap-1.5">
-                        {isRecommended && <span className="px-2 py-0.5 bg-indigo-600 text-white text-[10px] font-bold rounded-full">Recommended</span>}
-                        {isSelected    && <span className="text-[10px] font-semibold text-indigo-600">● Selected</span>}
+          {/* Freight Allocation */}
+          {(() => {
+            const activeMode: 'Sea' | 'Air' | 'Split' = freightSplits[p.id]
+              ? 'Split'
+              : (freightOverrides[p.id] ?? p.recommendedFreight) === 'Air' ? 'Air' : 'Sea'
+            const showOverrideReason = activeMode === 'Split' || (activeMode as string) !== p.recommendedFreight
+            return (
+              <div className="bg-white border border-gray-100 rounded-xl p-5 shadow-sm">
+                <div className="text-sm font-semibold text-gray-800 mb-3">Freight Allocation</div>
+                {/* Mode selector tabs */}
+                <div className="flex items-center bg-gray-100 rounded-lg p-0.5 gap-0.5 mb-4 w-fit">
+                  {(['Sea', 'Air', 'Split'] as const).map(mode => {
+                    const active = activeMode === mode
+                    return (
+                      <button key={mode} onClick={() => {
+                        if (mode === 'Sea') {
+                          setFreightOverrides(o => ({ ...o, [p.id]: 'Sea' }))
+                          setFreightSplits(s => { const n = { ...s }; delete n[p.id]; return n })
+                        } else if (mode === 'Air') {
+                          setFreightOverrides(o => ({ ...o, [p.id]: 'Air' }))
+                          setFreightSplits(s => { const n = { ...s }; delete n[p.id]; return n })
+                        } else {
+                          setFreightSplits(s => ({ ...s, [p.id]: { air: Math.round(qty * 0.3), sea: Math.round(qty * 0.7) } }))
+                        }
+                      }}
+                        className={`h-7 px-3 rounded-md text-xs font-semibold transition-colors ${active ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+                        {mode === 'Sea' ? '🚢 Sea' : mode === 'Air' ? '✈️ Air' : '↔ Split'}
+                      </button>
+                    )
+                  })}
+                </div>
+                {/* Single mode: show both cards */}
+                {activeMode !== 'Split' && (
+                  <div className="grid grid-cols-2 gap-3">
+                    {(['Sea', 'Air'] as const).map(method => {
+                      const opts = freightOpts[method]
+                      const isSelected    = activeMode === method
+                      const isRecommended = p.recommendedFreight === method
+                      return (
+                        <button key={method} onClick={() => {
+                          setFreightOverrides(o => ({ ...o, [p.id]: method }))
+                          setFreightSplits(s => { const n = { ...s }; delete n[p.id]; return n })
+                        }}
+                          className={`text-left p-4 rounded-xl border-2 transition-all ${
+                            isSelected
+                              ? isRecommended ? 'border-indigo-500 bg-indigo-50' : 'border-amber-400 bg-amber-50'
+                              : 'border-gray-200 bg-gray-50/40 hover:bg-gray-50'
+                          }`}>
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-sm font-bold text-gray-900">{method === 'Sea' ? '🚢 Sea' : '✈️ Air'}</span>
+                            <div className="flex items-center gap-1.5">
+                              {isRecommended && <span className="px-2 py-0.5 bg-indigo-600 text-white text-[10px] font-bold rounded-full">Recommended</span>}
+                              {isSelected    && <span className="text-[10px] font-semibold text-indigo-600">● Selected</span>}
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
+                            <div><span className="text-gray-400">Lead time</span><div className="font-semibold text-gray-800">{opts.leadTime}</div></div>
+                            <div><span className="text-gray-400">Ex-Factory</span><div className="font-semibold text-gray-800">{opts.exFactory}</div></div>
+                            <div><span className="text-gray-400">Receipt</span><div className="font-semibold text-gray-800">{opts.receipt}</div></div>
+                            <div><span className="text-gray-400">Unit cost</span><div className="font-semibold text-gray-800">£{opts.unitCost.toFixed(2)}</div></div>
+                            <div><span className="text-gray-400">Total cost</span><div className="font-bold text-gray-900">£{opts.totalCost.toLocaleString()}</div></div>
+                          </div>
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+                {/* Split mode */}
+                {activeMode === 'Split' && freightSplits[p.id] && (() => {
+                  const split = freightSplits[p.id]
+                  const airPct = qty > 0 ? Math.round(split.air / qty * 100) : 0
+                  const airUnitCost = freightOpts.Air.unitCost
+                  const seaUnitCost = freightOpts.Sea.unitCost
+                  const airTotal = Math.round(split.air * airUnitCost)
+                  const seaTotal = Math.round(split.sea * seaUnitCost)
+                  const combinedTotal = airTotal + seaTotal
+                  const splitValid = split.air + split.sea === qty
+                  return (
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="bg-sky-50 border border-sky-200 rounded-xl p-4">
+                          <div className="text-sm font-bold text-sky-700 mb-2">✈️ Air</div>
+                          <label className="text-[11px] text-gray-500 block mb-1">Units by Air</label>
+                          <input type="number" min={0} max={qty} value={split.air}
+                            onChange={e => setFreightSplits(s => ({ ...s, [p.id]: { air: Number(e.target.value), sea: qty - Number(e.target.value) } }))}
+                            className="w-full rounded-lg border border-sky-200 bg-white px-2 py-1 text-xs font-bold text-gray-900 focus:outline-none focus:ring-1 focus:ring-sky-400" />
+                          <div className="text-[11px] text-gray-500 mt-1.5">Unit cost £{freightOpts.Air.unitCost.toFixed(2)}</div>
+                        </div>
+                        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+                          <div className="text-sm font-bold text-blue-700 mb-2">🚢 Sea</div>
+                          <label className="text-[11px] text-gray-500 block mb-1">Units by Sea</label>
+                          <input type="number" min={0} max={qty} value={split.sea}
+                            onChange={e => setFreightSplits(s => ({ ...s, [p.id]: { sea: Number(e.target.value), air: qty - Number(e.target.value) } }))}
+                            className="w-full rounded-lg border border-blue-200 bg-white px-2 py-1 text-xs font-bold text-gray-900 focus:outline-none focus:ring-1 focus:ring-blue-400" />
+                          <div className="text-[11px] text-gray-500 mt-1.5">Unit cost £{freightOpts.Sea.unitCost.toFixed(2)}</div>
+                        </div>
                       </div>
+                      {!splitValid && (
+                        <div className="text-xs text-red-600 font-semibold">Air + Sea units must equal total order qty ({qty.toLocaleString()})</div>
+                      )}
+                      <div className="h-2 rounded-full bg-blue-100 overflow-hidden">
+                        <div className="h-full bg-sky-500 rounded-full transition-all" style={{ width: `${airPct}%` }} />
+                      </div>
+                      <div className="flex justify-between text-[10px] text-gray-500">
+                        <span>✈️ Air {airPct}%</span><span>🚢 Sea {100 - airPct}%</span>
+                      </div>
+                      {splitValid && (
+                        <div className="space-y-2">
+                          <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Raising 2 POs simultaneously</div>
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className="bg-sky-50 border border-sky-200 rounded-xl px-4 py-3 text-[11px]">
+                              <div className="font-bold text-sky-700 mb-2">✈️ Air PO</div>
+                              <div className="space-y-1">
+                                <div className="flex justify-between"><span className="text-gray-400">Units</span><span className="font-semibold text-gray-900">{split.air.toLocaleString()}</span></div>
+                                <div className="flex justify-between"><span className="text-gray-400">Unit cost</span><span className="font-semibold text-gray-900">£{airUnitCost.toFixed(2)}</span></div>
+                                <div className="flex justify-between border-t border-sky-100 pt-1 mt-1"><span className="text-gray-500 font-semibold">Total</span><span className="font-bold text-sky-800">£{airTotal.toLocaleString()}</span></div>
+                                <div className="flex justify-between"><span className="text-gray-400">Receipt</span><span className="font-semibold text-gray-900">{freightOpts.Air.receipt}</span></div>
+                              </div>
+                            </div>
+                            <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-[11px]">
+                              <div className="font-bold text-blue-700 mb-2">🚢 Sea PO</div>
+                              <div className="space-y-1">
+                                <div className="flex justify-between"><span className="text-gray-400">Units</span><span className="font-semibold text-gray-900">{split.sea.toLocaleString()}</span></div>
+                                <div className="flex justify-between"><span className="text-gray-400">Unit cost</span><span className="font-semibold text-gray-900">£{seaUnitCost.toFixed(2)}</span></div>
+                                <div className="flex justify-between border-t border-blue-100 pt-1 mt-1"><span className="text-gray-500 font-semibold">Total</span><span className="font-bold text-blue-800">£{seaTotal.toLocaleString()}</span></div>
+                                <div className="flex justify-between"><span className="text-gray-400">Receipt</span><span className="font-semibold text-gray-900">{freightOpts.Sea.receipt}</span></div>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex justify-end items-center gap-2 text-xs text-gray-500 pt-1">
+                            <span>Combined total</span>
+                            <span className="font-bold text-gray-900 text-sm">£{combinedTotal.toLocaleString()}</span>
+                          </div>
+                        </div>
+                      )}
                     </div>
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
-                      <div><span className="text-gray-400">Lead time</span><div className="font-semibold text-gray-800">{opts.leadTime}</div></div>
-                      <div><span className="text-gray-400">Ex-Factory</span><div className="font-semibold text-gray-800">{opts.exFactory}</div></div>
-                      <div><span className="text-gray-400">Receipt</span><div className="font-semibold text-gray-800">{opts.receipt}</div></div>
-                      <div><span className="text-gray-400">Unit cost</span><div className="font-semibold text-gray-800">£{opts.unitCost.toFixed(2)}</div></div>
-                      <div><span className="text-gray-400">Total cost</span><div className="font-bold text-gray-900">£{opts.totalCost.toLocaleString()}</div></div>
-                    </div>
-                  </button>
-                )
-              })}
-            </div>
-            {isOverrideFreight && (
-              <div className="mt-3">
-                <label className="text-xs font-semibold text-amber-700 block mb-1">
-                  Reason for override <span className="text-gray-400 font-normal">(required before sending to manager)</span>
-                </label>
-                <textarea rows={2} placeholder="Why are you overriding the recommended freight method?"
-                  value={freightReasons[p.id] ?? ''}
-                  onChange={e => setFreightReasons(r => ({ ...r, [p.id]: e.target.value }))}
-                  className="w-full rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-gray-700 resize-none focus:outline-none focus:ring-1 focus:ring-amber-400 placeholder:text-gray-400"
-                />
+                  )
+                })()}
+                {/* Override reason */}
+                {showOverrideReason && (
+                  <div className="mt-3">
+                    <label className="text-xs font-semibold text-amber-700 block mb-1">
+                      Reason for override <span className="text-gray-400 font-normal">(required before sending to manager)</span>
+                    </label>
+                    <textarea rows={2} placeholder="Why are you overriding the recommended freight method?"
+                      value={freightReasons[p.id] ?? ''}
+                      onChange={e => setFreightReasons(r => ({ ...r, [p.id]: e.target.value }))}
+                      className="w-full rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-gray-700 resize-none focus:outline-none focus:ring-1 focus:ring-amber-400 placeholder:text-gray-400"
+                    />
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            )
+          })()}
 
           {/* KPI strip */}
+          {(() => {
+            const gm = getMarginForWindow(p.marginPct, p.id, timeRange)
+            const gmBorderCls = gm > 25 ? 'border-l-green-400' : gm >= 10 ? 'border-l-amber-400' : 'border-l-red-400'
+            const gmTextCls   = gm > 25 ? 'text-green-700'    : gm >= 10 ? 'text-amber-700'    : 'text-red-700'
+            return (
           <div className="grid grid-cols-5 gap-3">
             {[
               { label: 'Stock Value',     value: `£${p.stockValue.toLocaleString()}`, pop: '↓ -3.2% vs last month', popCls: 'text-red-400' },
               { label: 'Weeks of Stock',  value: `${p.weeksOfStock.toFixed(1)}w`,     pop: '↑ +0.4w vs last week',  popCls: 'text-green-600' },
-              { label: 'Gross Margin',    value: `${(p.marginPct * 100).toFixed(0)}%`, pop: '→ flat vs last month', popCls: 'text-gray-400' },
               { label: 'Monthly Revenue', value: `£${(p.monthlyRevenue / 1000).toFixed(1)}k`, pop: '↑ +7.1% vs last month', popCls: 'text-green-600' },
               { label: 'Stockout Risk',   value: p.stockoutRisk, badge: riskCls },
             ].map(({ label, value, badge, pop, popCls }) => (
@@ -3784,7 +4315,14 @@ function ReorderView() {
                 {pop && <div className={`text-[9px] mt-0.5 ${popCls}`}>{pop}</div>}
               </div>
             ))}
+            <div className={`bg-white border border-gray-100 rounded-xl px-4 py-3 shadow-sm text-center border-l-4 ${gmBorderCls}`}>
+              <div className={`text-lg font-bold ${gmTextCls}`}>{gm}%</div>
+              <div className="text-[10px] text-gray-400 mt-1">Gross Margin</div>
+              <div className="text-[9px] text-gray-400 mt-0.5">{timeRange === '1m' ? 'Last 4 wks' : timeRange === '6m' ? 'Last 6 mo' : 'Last 12 mo'}</div>
+            </div>
           </div>
+            )
+          })()}
 
           {/* Two panels */}
           <div className="grid grid-cols-2 gap-4">
@@ -3974,6 +4512,27 @@ function ReorderView() {
               ))}
             </div>
           </div>
+        )}
+
+        {/* Rejection history expandable */}
+        {_sharedRejectionHistory[p.id]?.length > 0 && (
+          <details className="bg-red-50 border border-red-200 rounded-xl">
+            <summary className="flex items-center gap-2 px-5 py-3 cursor-pointer list-none">
+              <span className="w-2 h-2 rounded-full bg-red-400 shrink-0" />
+              <span className="text-xs font-semibold text-red-800">
+                Rejection history ({_sharedRejectionHistory[p.id].length})
+              </span>
+              <span className="ml-auto text-[10px] text-red-500">▾ expand</span>
+            </summary>
+            <div className="px-5 pb-4 space-y-3 border-t border-red-100 pt-3">
+              {_sharedRejectionHistory[p.id].map((entry, i) => (
+                <div key={i} className="bg-white rounded-lg border border-red-100 px-3 py-2 text-xs">
+                  <div className="font-semibold text-red-700 mb-0.5">Rejected by {entry.manager} · {entry.date}</div>
+                  {entry.comment ? <div className="text-gray-500 italic">"{entry.comment}"</div> : <div className="text-gray-400">No reason given</div>}
+                </div>
+              ))}
+            </div>
+          </details>
         )}
 
         {toast && <Toast message={toast} onDone={() => setToast(null)} />}
@@ -4227,7 +4786,9 @@ function ReorderView() {
                         </td>
                         <td className="px-3 py-2 text-right text-gray-700">£{p.sellingPrice.toFixed(2)}</td>
                         <td className="px-3 py-2 text-right text-gray-700">£{p.costPrice.toFixed(2)}</td>
-                        <td className="px-3 py-2 text-right text-gray-700">{grossMargin}%</td>
+                        <td className={`px-3 py-2 text-right font-semibold ${
+                          grossMargin > 25 ? 'text-green-700' : grossMargin >= 10 ? 'text-amber-700' : 'text-red-600'
+                        }`}>{grossMargin}%</td>
                         <td className="px-3 py-2 text-right">
                           <div className="text-gray-700">£{weeklyRevenue.toLocaleString()}</div>
                           <div className={`text-[10px] font-semibold ${revWow >= 0 ? 'text-green-600' : 'text-red-500'}`}>{revWow >= 0 ? '+' : ''}{revWow}%</div>
@@ -4485,12 +5046,13 @@ function ManagerReorderView() {
   const [editCostPrice, setEditCostPrice] = useState(0)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [mgrToast, setMgrToast] = useState<string | null>(null)
-  const [inquiries,     setInquiries]     = useState<Record<string, InquiryThread>>({})
+  const [inquiries,     setInquiries]     = useState<Record<string, InquiryThread>>(() => ({ ...SEEDED_THREADS }))
   const [mgrCpRules,   setMgrCpRules]    = useState<CpRulesState>(DEFAULT_CP_RULES)
   const [openInquiryId, setOpenInquiryId] = useState<string | null>(null)
   const [bulkRejectModal, setBulkRejectModal] = useState(false)
   const [bulkRejectComment, setBulkRejectComment] = useState('')
   const [mgrSubView, setMgrSubView] = useState<'recommendations' | 'negotiations'>('recommendations')
+  const [lowMarginOnly, setLowMarginOnly] = useState(false)
 
   const effStatus = (p: typeof REORDER_RECOMMENDATIONS[0]): ApprovalStatus =>
     (overrides[p.id]?.status ?? p.approvalStatus) as ApprovalStatus
@@ -4502,6 +5064,12 @@ function ManagerReorderView() {
   const confirmReject = (id: string) => {
     setOverrides(o => ({ ...o, [id]: { status: 'Rejected', comment: rejectDraft[id] ?? '' } }))
     setRejectOpen(o => ({ ...o, [id]: false }))
+    const entry = {
+      date: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }),
+      manager: 'Sarah Chen',
+      comment: rejectDraft[id] ?? '',
+    }
+    _sharedRejectionHistory[id] = [entry, ...(_sharedRejectionHistory[id] ?? [])]
   }
   const undo = (id: string) =>
     setOverrides(o => { const n = { ...o }; delete n[id]; return n })
@@ -4716,11 +5284,15 @@ function ManagerReorderView() {
           </div>
 
           {/* KPI strip */}
+          {(() => {
+            const gm = getMarginForWindow(p.marginPct, p.id, timeRange)
+            const gmBorderCls = gm > 25 ? 'border-l-green-400' : gm >= 10 ? 'border-l-amber-400' : 'border-l-red-400'
+            const gmTextCls   = gm > 25 ? 'text-green-700'    : gm >= 10 ? 'text-amber-700'    : 'text-red-700'
+            return (
           <div className="grid grid-cols-5 gap-3">
             {[
               { label: 'Stock Value',     value: `£${p.stockValue.toLocaleString()}`, pop: '↓ -3.2% vs last month', popCls: 'text-red-400' },
               { label: 'Weeks of Stock',  value: `${p.weeksOfStock.toFixed(1)}w`,     pop: '↑ +0.4w vs last week',  popCls: 'text-green-600' },
-              { label: 'Gross Margin',    value: `${(p.marginPct * 100).toFixed(0)}%`, pop: '→ flat vs last month', popCls: 'text-gray-400' },
               { label: 'Monthly Revenue', value: `£${(p.monthlyRevenue / 1000).toFixed(1)}k`, pop: '↑ +7.1% vs last month', popCls: 'text-green-600' },
               { label: 'Stockout Risk',   value: p.stockoutRisk, badge: rCls },
             ].map(({ label, value, badge, pop, popCls }) => (
@@ -4733,7 +5305,14 @@ function ManagerReorderView() {
                 {pop && <div className={`text-[9px] mt-0.5 ${popCls}`}>{pop}</div>}
               </div>
             ))}
+            <div className={`bg-white border border-gray-100 rounded-xl px-4 py-3 shadow-sm text-center border-l-4 ${gmBorderCls}`}>
+              <div className={`text-lg font-bold ${gmTextCls}`}>{gm}%</div>
+              <div className="text-[10px] text-gray-400 mt-1">Gross Margin</div>
+              <div className="text-[9px] text-gray-400 mt-0.5">{timeRange === '1m' ? 'Last 4 wks' : timeRange === '6m' ? 'Last 6 mo' : 'Last 12 mo'}</div>
+            </div>
           </div>
+            )
+          })()}
 
           {/* Two panels */}
           <div className="grid grid-cols-2 gap-4">
@@ -4809,7 +5388,8 @@ function ManagerReorderView() {
       p.name.toLowerCase().includes(search.toLowerCase()) ||
       p.sku.toLowerCase().includes(search.toLowerCase())
     const matchFilter = filter === 'All' || effStatus(p) === filter
-    return matchSearch && matchFilter
+    const matchMargin = !lowMarginOnly || Math.round((p.sellingPrice - p.costPrice) / p.sellingPrice * 100) < 10
+    return matchSearch && matchFilter && matchMargin
   })
 
   const pendingEligible = [...selectedIds].filter(id => effStatus(REORDER_RECOMMENDATIONS.find(r => r.id === id)!) === 'Pending Approval').length
@@ -4914,22 +5494,31 @@ function ManagerReorderView() {
         </div>
 
         {/* Filter tabs */}
-        <div className="flex items-center bg-gray-100 rounded-xl p-1 mb-4 w-fit gap-0.5">
-          {FILTER_TABS.map(f => {
-            const active = filter === f
-            const cfg = filterCfg[f]
-            return (
-              <button key={f} onClick={() => setFilter(f)}
-                className={`flex items-center gap-2 h-8 px-4 rounded-lg text-xs font-semibold transition-colors ${
-                  active ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'
-                }`}>
-                {f}
-                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${active ? `${cfg.bg} ${cfg.text}` : 'bg-gray-200 text-gray-500'}`}>
-                  {counts[f]}
-                </span>
-              </button>
-            )
-          })}
+        <div className="flex items-center gap-2 mb-4 flex-wrap">
+          <div className="flex items-center bg-gray-100 rounded-xl p-1 gap-0.5">
+            {FILTER_TABS.map(f => {
+              const active = filter === f
+              const cfg = filterCfg[f]
+              return (
+                <button key={f} onClick={() => setFilter(f)}
+                  className={`flex items-center gap-2 h-8 px-4 rounded-lg text-xs font-semibold transition-colors ${
+                    active ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'
+                  }`}>
+                  {f}
+                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${active ? `${cfg.bg} ${cfg.text}` : 'bg-gray-200 text-gray-500'}`}>
+                    {counts[f]}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+          <button
+            onClick={() => setLowMarginOnly(v => !v)}
+            className={`h-8 px-3 text-xs font-semibold rounded-full border transition-colors ${
+              lowMarginOnly ? 'bg-red-100 text-red-700 border-red-200' : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'
+            }`}>
+            ↓ Low margin
+          </button>
         </div>
 
         {/* Search */}
@@ -5069,7 +5658,9 @@ function ManagerReorderView() {
                       {/* Cost Price */}
                       <td className="px-3 py-2 text-right text-gray-700">£{p.costPrice.toFixed(2)}</td>
                       {/* Gross Margin */}
-                      <td className="px-3 py-2 text-right text-gray-700">{grossMargin}%</td>
+                      <td className={`px-3 py-2 text-right font-semibold ${
+                        grossMargin > 25 ? 'text-green-700' : grossMargin >= 10 ? 'text-amber-700' : 'text-red-600'
+                      }`}>{grossMargin}%</td>
                       {/* Revenue */}
                       <td className="px-3 py-2 text-right">
                         <div className="text-gray-700">£{weeklyRevenue.toLocaleString()}</div>
@@ -5136,10 +5727,23 @@ function ManagerReorderView() {
                               <Mail className="w-2.5 h-2.5" />Inquire
                             </button>
                             {inquiries[p.id] && inquiries[p.id].status !== 'idle' && (() => {
-                              const nsCfg = NEG_STATUS_CFG[inquiries[p.id].status]
+                              const t = inquiries[p.id]
+                              const nsCfg = NEG_STATUS_CFG[t.status]
+                              let label = nsCfg.label
+                              let bg = nsCfg.bg, text = nsCfg.text, border = nsCfg.border, dot = nsCfg.dot
+                              if (t.status === 'replied') {
+                                const rn = t.rounds.length
+                                if (t.scenario === 'counter') {
+                                  label = `Negotiating · Rd ${rn}`
+                                  bg = 'bg-amber-50'; text = 'text-amber-700'; border = 'border-amber-200'; dot = 'bg-amber-400'
+                                } else if (t.scenario === 'accepted') {
+                                  label = 'Reply rcvd · apply to PO'
+                                  bg = 'bg-green-50'; text = 'text-green-700'; border = 'border-green-200'; dot = 'bg-green-500'
+                                }
+                              }
                               return (
-                                <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold border ${nsCfg.bg} ${nsCfg.text} ${nsCfg.border}`}>
-                                  <span className={`w-1.5 h-1.5 rounded-full ${nsCfg.dot}`} />{nsCfg.label}
+                                <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold border ${bg} ${text} ${border}`}>
+                                  <span className={`w-1.5 h-1.5 rounded-full ${dot}`} />{label}
                                 </span>
                               )
                             })()}
@@ -5981,6 +6585,8 @@ function POMonitoringView() {
   const [poSearch,         setPoSearch]         = useState('')
   const [chaseThreads,     setChaseThreads]     = useState<Record<string, ChaseThread>>({})
   const [expandedMsgIds,   setExpandedMsgIds]   = useState<Set<string>>(new Set())
+  const [chaseDraftMap,    setChaseDraftMap]    = useState<Record<string, string>>({})
+  const [chaseHistoryOpen, setChaseHistoryOpen] = useState(false)
   const [poStatusFilter,   setPoStatusFilter]   = useState('all')
   const [poSupFilter,      setPoSupFilter]      = useState('all')
   const [settingsAccordion, setSettingsAccordion] = useState<string | null>(null)
@@ -6086,9 +6692,9 @@ function POMonitoringView() {
     return `Dear ${name} Team,\n\nThank you for confirming the freight booking details. We have updated our systems accordingly.\n\nWe will monitor progress and will be in touch if any issues arise at our DC.\n\nKind regards,\nDebenhams Buying Team`
   }
 
-  const handleStartThread = (group: ActionGroup) => {
+  const handleStartThread = (group: ActionGroup, editedBody?: string) => {
     const key  = getThreadKey(group)
-    const body = generateDraftEmail(group)
+    const body = editedBody ?? generateDraftEmail(group)
     const msgId = `msg-${Date.now()}`
     const thread: ChaseThread = {
       status: 'awaiting-reply',
@@ -6096,7 +6702,7 @@ function POMonitoringView() {
       messages: [{ id: msgId, sender: 'you', timestamp: new Date().toISOString(), body, status: 'sent' }],
     }
     setChaseThreads(prev => ({ ...prev, [key]: thread }))
-    setExpandedMsgIds(new Set())  // collapse all; latest auto-expands
+    setExpandedMsgIds(new Set())
     addPOEvent(group.pos[0].id, { id: `ev-${Date.now()}`, type: 'chase_sent', timestamp: new Date().toISOString(), body: `Chase email sent to ${getSupplier(group.supplierId)?.name}.`, author: 'agent' })
   }
 
@@ -6365,14 +6971,6 @@ function POMonitoringView() {
                         </div>
                       ))}
                     </div>
-                    <div className="mt-4 border border-red-200 bg-red-50 rounded-xl p-3">
-                      <div className="text-[10px] font-bold text-red-500 uppercase tracking-widest mb-1">Suggested Action</div>
-                      <p className="text-xs text-red-800 leading-relaxed">
-                        {selectedGroup.type === 'overdue'      && `Send urgent escalation email to ${selectedSupplier.name} for ${selectedGroup.pos.length} overdue PO${selectedGroup.pos.length > 1 ? 's' : ''}. Request immediate dispatch confirmation and revised ex-factory date.`}
-                        {selectedGroup.type === 'at_risk'      && `Review date change proposals from ${selectedSupplier.name}. Approve or reject within 48 hours to avoid further delays to intake planning.`}
-                        {selectedGroup.type === 'late_dc' && `Confirm dispatch readiness with ${selectedSupplier.name} for ${selectedGroup.pos.length} PO${selectedGroup.pos.length > 1 ? 's' : ''} due within 7 days. Request freight booking reference.`}
-                      </p>
-                    </div>
                   </div>
 
                   {/* PO cards ← → Draft email split */}
@@ -6423,30 +7021,134 @@ function POMonitoringView() {
                           </div>
                         )
                       }
-                      return (
-                        <div className="w-[280px] shrink-0 bg-white border border-gray-100 rounded-2xl shadow-sm flex flex-col overflow-hidden">
-                          <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-2">
-                            <Mail className="w-3.5 h-3.5 text-indigo-500" />
-                            <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Draft Chase Email</span>
-                          </div>
-                          <div className="px-4 pt-3 pb-1 flex-1 overflow-y-auto">
-                            <div className="text-[10px] text-gray-400 mb-2">To: {SUPPLIER_EMAILS[selectedGroup.supplierId]}</div>
-                            <pre className="text-[9px] text-gray-600 leading-relaxed whitespace-pre-wrap font-mono bg-gray-50 rounded-lg p-2.5 max-h-64 overflow-y-auto">{generateDraftEmail(selectedGroup)}</pre>
-                          </div>
-                          <div className="p-3 border-t border-gray-100 space-y-2">
-                            <button
-                              onClick={() => handleStartThread(selectedGroup)}
-                              className="w-full py-2 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 flex items-center justify-center gap-1.5"
-                            >
-                              <Send className="w-3 h-3" /> Review &amp; Send
-                            </button>
-                            <div className="grid grid-cols-2 gap-2">
-                              <button className="py-1.5 rounded-lg border border-gray-200 text-[10px] font-semibold text-gray-500 hover:bg-gray-50">Snooze 3d</button>
-                              <button className="py-1.5 rounded-lg border border-gray-200 text-[10px] font-semibold text-gray-500 hover:bg-gray-50">Dismiss</button>
+                      {/* ── InquiryDrawer-style chase panel ── */}
+                      {(() => {
+                        const draftKey      = threadKey
+                        const defaultDraft  = generateDraftEmail(selectedGroup)
+                        const currentDraft  = chaseDraftMap[draftKey] ?? defaultDraft
+                        const isDirty       = currentDraft !== defaultDraft
+                        const actionLabels  = { overdue: 'Handover / dispatch', at_risk: 'Date change chase', late_dc: 'Booking-in confirmation' }
+                        const maxOverdue    = selectedGroup.type === 'overdue' ? Math.max(...selectedGroup.pos.map(p => daysOverdue(p))) : 0
+                        const sup           = selectedSupplier
+                        const otrColor      = sup.onTimeRate >= 80 ? 'bg-green-50 text-green-700 border-green-100' : sup.onTimeRate >= 70 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'
+                        const delayColor    = sup.avgDelayDays > 7 ? 'bg-red-50 text-red-700 border-red-100' : sup.avgDelayDays > 3 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-gray-100 text-gray-600 border-gray-200'
+                        const pillCls       = selectedGroup.type === 'overdue' ? 'bg-red-100 text-red-700' : selectedGroup.type === 'at_risk' ? 'bg-orange-100 text-orange-700' : 'bg-amber-100 text-amber-700'
+                        const pillLabel     = selectedGroup.type === 'overdue' ? `${maxOverdue}d overdue` : selectedGroup.type === 'at_risk' ? 'Date change' : 'Late DC booking'
+                        const auditColor    = selectedGroup.type === 'overdue' ? 'text-red-600' : 'text-amber-700'
+                        const auditText     = selectedGroup.type === 'overdue'
+                          ? `Overdue by up to ${maxOverdue}d · OTR ${sup.onTimeRate}% ↓ · Urgent escalation recommended`
+                          : selectedGroup.type === 'at_risk'
+                          ? `${selectedGroup.pos.length} date change${selectedGroup.pos.length > 1 ? 's' : ''} pending · Approve or reject within 48h`
+                          : `DC booking overdue · ${selectedGroup.pos.length} line${selectedGroup.pos.length > 1 ? 's' : ''} at risk · Confirm freight forwarder`
+                        return (
+                          <div className="w-[340px] shrink-0 bg-white border border-gray-100 rounded-2xl shadow-sm flex flex-col overflow-hidden">
+                            {/* Header */}
+                            <div className="px-5 pt-4 pb-3 border-b border-gray-100 shrink-0">
+                              <div className="flex items-center gap-2 flex-wrap mb-1">
+                                <span className="text-sm font-bold text-gray-900 truncate">{sup.name}</span>
+                                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold shrink-0 ${pillCls}`}>{pillLabel}</span>
+                              </div>
+                              <div className="text-xs text-gray-400">{SUPPLIER_EMAILS[selectedGroup.supplierId]} · {selectedGroup.pos.length} PO{selectedGroup.pos.length > 1 ? 's' : ''}</div>
+                              {/* Context strip chips */}
+                              <div className="flex items-center gap-1.5 flex-wrap mt-2">
+                                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border ${otrColor}`}>
+                                  OTR {sup.onTimeRate}%
+                                </span>
+                                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border ${delayColor}`}>
+                                  Avg delay {sup.avgDelayDays}d
+                                </span>
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-gray-100 text-gray-600 border border-gray-200">
+                                  {sup.openPOs} open POs
+                                </span>
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-100">
+                                  Lead {sup.contractualLeadTimeDays}d
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Scrollable body */}
+                            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+                              {/* Agent insight */}
+                              <div className="bg-indigo-50/70 rounded-xl p-3 border border-indigo-100">
+                                <div className="text-[10px] font-semibold text-indigo-600 uppercase tracking-wide mb-1">Agent suggestion</div>
+                                <p className="text-[11px] text-indigo-900 leading-relaxed">
+                                  {selectedGroup.type === 'overdue' && `Send urgent escalation to ${sup.name}. Request dispatch confirmation and revised ex-factory date for ${selectedGroup.pos.length} overdue PO${selectedGroup.pos.length > 1 ? 's' : ''}.`}
+                                  {selectedGroup.type === 'at_risk' && `Review date change proposals from ${sup.name}. Approve or reject within 48h to protect intake planning.`}
+                                  {selectedGroup.type === 'late_dc' && `Confirm dispatch readiness with ${sup.name} for ${selectedGroup.pos.length} PO${selectedGroup.pos.length > 1 ? 's' : ''} due within 7 days. Request freight booking reference.`}
+                                </p>
+                              </div>
+
+                              {/* Editable draft */}
+                              <div className="border border-violet-200 rounded-xl overflow-hidden">
+                                <div className="flex items-center justify-between px-3.5 py-2 bg-violet-50 border-b border-violet-100">
+                                  <div className="flex items-center gap-2">
+                                    <Mail className="w-3.5 h-3.5 text-violet-400" />
+                                    <span className="text-[11px] font-semibold text-violet-700">Draft — {actionLabels[selectedGroup.type]}</span>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-[10px] text-violet-400">{currentDraft.length} chars</span>
+                                    {isDirty && (
+                                      <button
+                                        onClick={() => setChaseDraftMap(p => ({ ...p, [draftKey]: defaultDraft }))}
+                                        className="text-[10px] text-violet-600 hover:text-violet-800 font-medium"
+                                      >Revert</button>
+                                    )}
+                                  </div>
+                                </div>
+                                <textarea
+                                  className="w-full text-[11px] text-gray-700 font-mono leading-relaxed p-3.5 resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-violet-200"
+                                  rows={11}
+                                  value={currentDraft}
+                                  onChange={e => setChaseDraftMap(p => ({ ...p, [draftKey]: e.target.value }))}
+                                />
+                              </div>
+
+                              {/* Chase history accordion */}
+                              <div className="border border-gray-200 rounded-xl overflow-hidden">
+                                <button
+                                  onClick={() => setChaseHistoryOpen(o => !o)}
+                                  className="w-full flex items-center justify-between px-4 py-2.5 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
+                                >
+                                  <span className="text-[11px] text-gray-400">Chase history</span>
+                                  <ChevronDown className={`w-3.5 h-3.5 text-gray-400 transition-transform ${chaseHistoryOpen ? 'rotate-180' : ''}`} />
+                                </button>
+                                {chaseHistoryOpen && (
+                                  <div className="px-4 py-3 bg-white">
+                                    {(poEventsMap.get(selectedGroup.pos[0]?.id) ?? []).filter(e => e.type === 'chase_sent').length === 0
+                                      ? <p className="text-[11px] text-gray-400 italic">No previous chases for this supplier.</p>
+                                      : (poEventsMap.get(selectedGroup.pos[0]?.id) ?? []).filter(e => e.type === 'chase_sent').map((ev, i) => (
+                                          <div key={i} className="flex items-start gap-2 py-1.5 border-b border-gray-50 last:border-0">
+                                            <div className="w-1.5 h-1.5 rounded-full bg-gray-300 mt-1.5 shrink-0" />
+                                            <div>
+                                              <div className="text-[10px] text-gray-500 font-medium">{new Date(ev.timestamp).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</div>
+                                              <div className="text-[10px] text-gray-400">{ev.body}</div>
+                                            </div>
+                                          </div>
+                                        ))
+                                    }
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Sticky footer */}
+                            <div className="px-5 py-4 border-t border-gray-100 shrink-0 space-y-2.5">
+                              <div className={`text-[10px] font-medium leading-relaxed ${auditColor}`}>{auditText}</div>
+                              <button
+                                onClick={() => handleStartThread(selectedGroup, currentDraft)}
+                                className="w-full h-8 rounded-lg bg-violet-600 text-white text-xs font-semibold hover:bg-violet-700 transition-colors flex items-center justify-center gap-1.5"
+                              >
+                                <Send className="w-3.5 h-3.5" /> Send via Outlook
+                              </button>
+                              <div className="flex gap-3 justify-center">
+                                <button className="text-[11px] text-gray-400 hover:text-gray-600 font-medium transition-colors">Snooze 3d</button>
+                                <span className="text-[11px] text-gray-300">·</span>
+                                <button className="text-[11px] text-gray-400 hover:text-gray-600 font-medium transition-colors">Dismiss</button>
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      )
+                        )
+                      })()}
                     })()}
                   </div>
                 </div>

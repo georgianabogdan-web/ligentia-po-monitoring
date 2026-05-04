@@ -50,6 +50,7 @@ export interface InventoryProduct {
   leadTime:         string
   minOrderQty:      number
   packSize:         number
+  seasonCode?:      'Core' | 'SS26' | 'AW26' | 'Clearance'
 }
 
 export interface ReorderRecommendation {
@@ -126,7 +127,8 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
     "orderFrequency": "4 weeks",
     "leadTime": "8 weeks",
     "minOrderQty": 500,
-    "packSize": 1
+    "packSize": 1,
+    "seasonCode": "Core"
   },
   {
     "id": "INV-002",
@@ -161,7 +163,8 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
     "orderFrequency": "4 weeks",
     "leadTime": "8 weeks",
     "minOrderQty": 500,
-    "packSize": 1
+    "packSize": 1,
+    "seasonCode": "Core"
   },
   {
     "id": "INV-003",
@@ -196,7 +199,8 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
     "orderFrequency": "4 weeks",
     "leadTime": "8 weeks",
     "minOrderQty": 500,
-    "packSize": 1
+    "packSize": 1,
+    "seasonCode": "Core"
   },
   {
     "id": "INV-004",
@@ -231,7 +235,8 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
     "orderFrequency": "4 weeks",
     "leadTime": "8 weeks",
     "minOrderQty": 500,
-    "packSize": 1
+    "packSize": 1,
+    "seasonCode": "SS26"
   },
   {
     "id": "INV-005",
@@ -266,7 +271,8 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
     "orderFrequency": "4 weeks",
     "leadTime": "8 weeks",
     "minOrderQty": 500,
-    "packSize": 1
+    "packSize": 1,
+    "seasonCode": "Core"
   },
   {
     "id": "INV-006",
@@ -326,7 +332,8 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
     "orderFrequency": "4 weeks",
     "leadTime": "8 weeks",
     "minOrderQty": 200,
-    "packSize": 1
+    "packSize": 1,
+    "seasonCode": "SS26"
   },
   {
     "id": "INV-007",
@@ -386,7 +393,8 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
     "orderFrequency": "4 weeks",
     "leadTime": "8 weeks",
     "minOrderQty": 200,
-    "packSize": 1
+    "packSize": 1,
+    "seasonCode": "SS26"
   },
   {
     "id": "INV-008",
@@ -446,7 +454,8 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
     "orderFrequency": "4 weeks",
     "leadTime": "8 weeks",
     "minOrderQty": 200,
-    "packSize": 1
+    "packSize": 1,
+    "seasonCode": "AW26"
   },
   {
     "id": "INV-009",
@@ -506,7 +515,8 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
     "orderFrequency": "4 weeks",
     "leadTime": "8 weeks",
     "minOrderQty": 200,
-    "packSize": 1
+    "packSize": 1,
+    "seasonCode": "Core"
   },
   {
     "id": "INV-010",
@@ -566,7 +576,8 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
     "orderFrequency": "4 weeks",
     "leadTime": "8 weeks",
     "minOrderQty": 200,
-    "packSize": 1
+    "packSize": 1,
+    "seasonCode": "SS26"
   },
   {
     "id": "INV-011",
@@ -626,7 +637,8 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
     "orderFrequency": "4 weeks",
     "leadTime": "8 weeks",
     "minOrderQty": 200,
-    "packSize": 1
+    "packSize": 1,
+    "seasonCode": "AW26"
   },
   {
     "id": "INV-012",
@@ -686,7 +698,8 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
     "orderFrequency": "4 weeks",
     "leadTime": "8 weeks",
     "minOrderQty": 200,
-    "packSize": 1
+    "packSize": 1,
+    "seasonCode": "AW26"
   },
   {
     "id": "INV-013",
@@ -751,7 +764,8 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
     "orderFrequency": "4 weeks",
     "leadTime": "8 weeks",
     "minOrderQty": 150,
-    "packSize": 1
+    "packSize": 1,
+    "seasonCode": "AW26"
   },
   {
     "id": "INV-014",
@@ -816,7 +830,8 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
     "orderFrequency": "4 weeks",
     "leadTime": "8 weeks",
     "minOrderQty": 150,
-    "packSize": 1
+    "packSize": 1,
+    "seasonCode": "SS26"
   },
   {
     "id": "INV-015",
@@ -881,7 +896,8 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
     "orderFrequency": "4 weeks",
     "leadTime": "8 weeks",
     "minOrderQty": 150,
-    "packSize": 1
+    "packSize": 1,
+    "seasonCode": "AW26"
   },
   {
     "id": "INV-016",
@@ -946,7 +962,8 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
     "orderFrequency": "4 weeks",
     "leadTime": "8 weeks",
     "minOrderQty": 150,
-    "packSize": 1
+    "packSize": 1,
+    "seasonCode": "Core"
   },
   {
     "id": "INV-017",
@@ -1011,7 +1028,8 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
     "orderFrequency": "4 weeks",
     "leadTime": "8 weeks",
     "minOrderQty": 150,
-    "packSize": 1
+    "packSize": 1,
+    "seasonCode": "SS26"
   },
   {
     "id": "INV-018",
@@ -1046,7 +1064,8 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
     "orderFrequency": "4 weeks",
     "leadTime": "8 weeks",
     "minOrderQty": 300,
-    "packSize": 1
+    "packSize": 1,
+    "seasonCode": "Core"
   },
   {
     "id": "INV-019",
@@ -1081,7 +1100,8 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
     "orderFrequency": "4 weeks",
     "leadTime": "8 weeks",
     "minOrderQty": 300,
-    "packSize": 1
+    "packSize": 1,
+    "seasonCode": "SS26"
   },
   {
     "id": "INV-020",
@@ -1116,7 +1136,8 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
     "orderFrequency": "4 weeks",
     "leadTime": "8 weeks",
     "minOrderQty": 300,
-    "packSize": 1
+    "packSize": 1,
+    "seasonCode": "Clearance"
   }
 ]
 
