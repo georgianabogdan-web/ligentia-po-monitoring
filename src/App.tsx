@@ -3091,12 +3091,15 @@ function InquiryDrawer({
                 </span>
               </div>
               {!appliedToBuySheet ? (
-                <button
-                  onClick={() => { setAppliedToBuySheet(true); handleAccept() }}
-                  className="w-full h-8 rounded-lg bg-green-600 text-white text-xs font-semibold hover:bg-green-700 transition-colors flex items-center justify-center gap-1.5"
-                >
-                  <Check className="w-3.5 h-3.5" /> Apply to Purchase Order
-                </button>
+                <div className="space-y-1">
+                  <button
+                    onClick={() => { setAppliedToBuySheet(true); handleAccept() }}
+                    className="w-full h-8 rounded-lg bg-green-600 text-white text-xs font-semibold hover:bg-green-700 transition-colors flex items-center justify-center gap-1.5"
+                  >
+                    <Check className="w-3.5 h-3.5" /> Apply to Purchase Order
+                  </button>
+                  <p className="text-center text-[10px] text-gray-400">You'll review before anything is sent.</p>
+                </div>
               ) : (
                 <div className="flex items-center justify-center gap-1.5 text-xs font-semibold text-green-700 py-1">
                   <Check className="w-3.5 h-3.5" /> Applied to Purchase Order
@@ -3319,13 +3322,16 @@ function InquiryDrawer({
             </div>
           )}
           {status === 'draft' && (
-            <button
-              onClick={handleSend}
-              disabled={isSending}
-              className="w-full h-9 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 transition-colors flex items-center justify-center gap-2 disabled:opacity-60"
-            >
-              <Mail className="w-3.5 h-3.5" /> Send via Outlook
-            </button>
+            <div className="space-y-1">
+              <button
+                onClick={handleSend}
+                disabled={isSending}
+                className="w-full h-9 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 transition-colors flex items-center justify-center gap-2 disabled:opacity-60"
+              >
+                <Mail className="w-3.5 h-3.5" /> Send via Outlook
+              </button>
+              <p className="text-center text-[10px] text-gray-400">You'll review before anything is sent.</p>
+            </div>
           )}
           {(status === 'sent' || status === 'awaiting_reply') && (
             <p className="text-center text-xs text-blue-600 font-medium">
@@ -6610,16 +6616,19 @@ export function ChaseScheduler({
                             value={draftBodies[key] ?? ''}
                             onChange={e => setDraftBodies(p => ({ ...p, [key]: e.target.value }))}
                           />
-                          <div className="px-3.5 py-2.5 bg-gray-50 border-t border-gray-100 flex items-center gap-2">
-                            <span className="text-[10px] text-gray-400">{(draftBodies[key] ?? '').length} chars</span>
-                            <button onClick={() => setDraftBodies(p => ({ ...p, [key]: buildChaseEmail(sg.name, sg.pos, type) }))}
-                              className="text-[10px] text-gray-500 hover:text-gray-700 font-medium">Revert</button>
-                            <button onClick={() => sendDraft(type, sg)} disabled={isSndg}
-                              className="ml-auto h-7 px-3 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 transition-colors flex items-center gap-1.5 disabled:opacity-60">
-                              {isSndg
-                                ? <><div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />Sending…</>
-                                : <><Send className="w-3 h-3" />Send via Outlook</>}
-                            </button>
+                          <div className="px-3.5 py-2.5 bg-gray-50 border-t border-gray-100 space-y-1.5">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] text-gray-400">{(draftBodies[key] ?? '').length} chars</span>
+                              <button onClick={() => setDraftBodies(p => ({ ...p, [key]: buildChaseEmail(sg.name, sg.pos, type) }))}
+                                className="text-[10px] text-gray-500 hover:text-gray-700 font-medium">Revert</button>
+                              <button onClick={() => sendDraft(type, sg)} disabled={isSndg}
+                                className="ml-auto h-7 px-3 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 transition-colors flex items-center gap-1.5 disabled:opacity-60">
+                                {isSndg
+                                  ? <><div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />Sending…</>
+                                  : <><Send className="w-3 h-3" />Send via Outlook</>}
+                              </button>
+                            </div>
+                            <p className="text-center text-[10px] text-gray-400">You'll review before anything is sent.</p>
                           </div>
                         </div>
                       )}
@@ -6944,15 +6953,15 @@ function POMonitoringView() {
     { time: '2026-04-20T10:00:00Z', type: 'scan',        message: 'Midday scan: PO-2891 (Floral Maxi Dress) now 1 day overdue. Chase email queued for Summer Styles Ltd.' },
     { time: '2026-04-19T11:20:00Z', type: 'date_change', message: 'Date change proposal received from Nordic Knitwear for PO-2901. New delivery: 18 May 2026 (was 20 Apr). Flagged for buyer approval.' },
     { time: '2026-04-18T09:00:00Z', type: 'scan',        message: 'Morning scan: 28 open POs reviewed. 2 overdue, 1 pre-dispatch chase. All other POs tracking to plan.' },
-    { time: '2026-04-17T15:30:00Z', type: 'chase_draft', message: 'Pre-dispatch chase sent to Urban Footwear for PO-2976 (Canvas Lo-Top Trainers). Delivery due 30 Apr.' },
+    { time: '2026-04-17T15:30:00Z', type: 'chase_draft', message: 'Pre-dispatch chase drafted for Urban Footwear — PO-2976 (Canvas Lo-Top Trainers). Delivery due 30 Apr. Awaiting buyer review.' },
   ]
-  const LOG_ICON: Record<AgentLogEntry['type'], { icon: string; color: string; bg: string; label: string }> = {
-    scan:        { icon: '🔍', color: 'text-blue-600',   bg: 'bg-blue-50',   label: 'Daily Scan'        },
-    scorecard:   { icon: '📊', color: 'text-purple-600', bg: 'bg-purple-50', label: 'Scorecard Update'  },
-    date_change: { icon: '📅', color: 'text-amber-600',  bg: 'bg-amber-50',  label: 'Date Change'       },
-    at_risk:     { icon: '⚠️', color: 'text-orange-600', bg: 'bg-orange-50', label: 'At Risk Flag'      },
-    escalation:  { icon: '🚨', color: 'text-red-600',    bg: 'bg-red-50',    label: 'Escalation'        },
-    chase_draft: { icon: '✉️', color: 'text-green-600',  bg: 'bg-green-50',  label: 'Chase Draft'       },
+  const LOG_ICON: Record<AgentLogEntry['type'], { icon: string; color: string; bg: string; label: string; actionLabel: string; actionCls: string }> = {
+    scan:        { icon: '🔍', color: 'text-blue-600',   bg: 'bg-blue-50',   label: 'Daily Scan',       actionLabel: 'Detected', actionCls: 'bg-gray-100 text-gray-500'   },
+    scorecard:   { icon: '📊', color: 'text-purple-600', bg: 'bg-purple-50', label: 'Scorecard Update', actionLabel: 'Detected', actionCls: 'bg-gray-100 text-gray-500'   },
+    date_change: { icon: '📅', color: 'text-amber-600',  bg: 'bg-amber-50',  label: 'Date Change',      actionLabel: 'Detected', actionCls: 'bg-gray-100 text-gray-500'   },
+    at_risk:     { icon: '⚠️', color: 'text-orange-600', bg: 'bg-orange-50', label: 'At Risk Flag',     actionLabel: 'Detected', actionCls: 'bg-gray-100 text-gray-500'   },
+    escalation:  { icon: '🚨', color: 'text-red-600',    bg: 'bg-red-50',    label: 'Escalation',       actionLabel: 'Detected', actionCls: 'bg-gray-100 text-gray-500'   },
+    chase_draft: { icon: '✉️', color: 'text-indigo-600', bg: 'bg-indigo-50', label: 'Chase Draft',      actionLabel: 'Drafted',  actionCls: 'bg-indigo-50 text-indigo-600' },
   }
   const CHASE_CONFIGS = [
     { label: 'Pre-Dispatch Chase',              trigger: '7 days before delivery',            autoSend: true  },
@@ -7322,6 +7331,7 @@ function POMonitoringView() {
                               >
                                 <Send className="w-3.5 h-3.5" /> Send via Outlook
                               </button>
+                              <p className="text-center text-[10px] text-gray-400 -mt-1">You'll review before anything is sent.</p>
                               <div className="flex gap-3 justify-center">
                                 <button className="text-[11px] text-gray-400 hover:text-gray-600 font-medium transition-colors">Snooze 3d</button>
                                 <span className="text-[11px] text-gray-300">·</span>
@@ -7463,6 +7473,10 @@ function POMonitoringView() {
               <span className="text-sm font-bold text-gray-800">Agent Activity Log</span>
               <span className="text-xs text-gray-400">· updated {new Date(AGENT_LOG[0].time).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span>
             </div>
+            <div className="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-[11px] text-gray-500">
+              <Bot className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+              This agent drafts and recommends. All outbound actions require your approval.
+            </div>
             <div className="relative pl-8">
               <div className="absolute left-3.5 top-0 bottom-0 w-px bg-gray-100" />
               <div className="space-y-2">
@@ -7474,7 +7488,10 @@ function POMonitoringView() {
                       <div className={`absolute -left-5 w-7 h-7 rounded-full flex items-center justify-center text-sm shrink-0 ${cfg.bg}`}>{cfg.icon}</div>
                       <div className="flex-1 bg-white border border-gray-100 rounded-xl px-4 py-3 shadow-sm">
                         <div className="flex items-center justify-between gap-2 mb-1">
-                          <span className={`text-[10px] font-bold uppercase tracking-wide ${cfg.color}`}>{cfg.label}</span>
+                          <div className="flex items-center gap-1.5">
+                            <span className={`text-[10px] font-bold uppercase tracking-wide ${cfg.color}`}>{cfg.label}</span>
+                            <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full ${cfg.actionCls}`}>{cfg.actionLabel}</span>
+                          </div>
                           <span className="text-[10px] text-gray-400">{timeStr}</span>
                         </div>
                         <p className="text-xs text-gray-700 leading-relaxed">{entry.message}</p>
