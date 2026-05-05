@@ -5879,6 +5879,7 @@ function POLineDrawer({
   const [replyText,       setReplyText]       = useState('')
   const [lateDecision,    setLateDecision]    = useState<'cancel' | 'cpr' | 'accept' | null>(null)
   const [decisionDone,    setDecisionDone]    = useState(false)
+  const [whyExpanded,     setWhyExpanded]     = useState(false)
 
   const product      = getLinkedProduct(po.id)
   const openPOs      = product ? ALL_POS.filter(p => PO_PRODUCT_MAP[p.id] === PO_PRODUCT_MAP[po.id] && p.status !== 'Delivered') : []
@@ -5888,6 +5889,29 @@ function POLineDrawer({
   const orderValueNum  = parseInt(po.orderValue.replace(/[^0-9]/g, ''), 10) || 0
   const daysLate       = Math.max(0, Math.ceil((new Date().getTime() - new Date(po.expectedDelivery).getTime()) / 86400000))
   const cprPct         = Math.min(15, Math.round(daysLate * 0.5))
+
+  type LateDec = 'cancel' | 'cpr' | 'accept'
+  const PO_REC_MAP: Record<string, { rec: LateDec; cardRationale: string; bullets: string[] }> = {
+    'PO-2756': {
+      rec: 'cpr',
+      cardRationale: `Best £/wk trade-off — 8.5w cover means cancellation isn't urgent.`,
+      bullets: [
+        "Eastern Textiles' on-time rate is 54% and deteriorating — a CPR sets a commercial precedent for this supplier.",
+        "8.5 weeks of cover on Wide Leg Trousers means a stockout from this delay is unlikely.",
+        `CPR ${cprPct}% recovers ~£${Math.round(orderValueNum * cprPct / 100).toLocaleString()} without blocking intake or requiring spot-sourcing.`,
+      ],
+    },
+    'PO-2834': {
+      rec: 'cpr',
+      cardRationale: `3w cover on Floral Midi Dress is too tight to cancel; CPR secures the stock with compensation.`,
+      bullets: [
+        "Floral Midi Dress is at 3w cover and classified low-stock — cancellation would almost certainly cause a stockout.",
+        "Accepting late at no penalty rewards a deteriorating supplier and sets a bad precedent across Eastern Textiles' 18 open POs.",
+        `CPR ${cprPct}% (~£${Math.round(orderValueNum * cprPct / 100).toLocaleString()}) compensates for the delay while locking in delivery within ${Math.ceil(daysLate / 7)} weeks.`,
+      ],
+    },
+  }
+  const poRec = PO_REC_MAP[po.id] ?? null
 
   const addNote = () => {
     if (!noteInput.trim()) return
@@ -6027,20 +6051,64 @@ function POLineDrawer({
             <div className="bg-red-50 rounded-xl p-3.5 border border-red-200 space-y-2">
               <div className="text-[10px] font-semibold text-red-600 uppercase tracking-wide">Decision required — {daysLate} days past delivery window</div>
               <div className="text-xs text-red-700">Select the commercial response to record in the event log:</div>
-              <div className="grid grid-cols-3 gap-2 pt-0.5">
-                {[
-                  { key: 'cancel' as const, label: 'Cancel',       sub: 'Est. cover', val: '–3 wks',        cls: 'bg-red-100 border-red-300 text-red-800 hover:bg-red-200'       },
-                  { key: 'cpr'    as const, label: `CPR ${cprPct}%`, sub: 'Est. saving', val: `£${Math.round(orderValueNum * cprPct / 100).toLocaleString()}`, cls: 'bg-amber-100 border-amber-300 text-amber-800 hover:bg-amber-200' },
-                  { key: 'accept' as const, label: 'Accept late',  sub: 'New intake',  val: `+${Math.ceil(daysLate / 7)} wks`, cls: 'bg-green-100 border-green-300 text-green-800 hover:bg-green-200' },
-                ].map(opt => (
-                  <button key={opt.key} onClick={() => recordDecision(opt.key)}
-                    className={`rounded-lg p-2.5 border text-center transition-opacity ${lateDecision === opt.key ? 'ring-2 ring-offset-1 ring-red-400' : ''} ${opt.cls}`}>
-                    <div className="text-xs font-bold">{opt.label}</div>
-                    <div className="text-[10px] mt-0.5 opacity-70">{opt.sub}</div>
-                    <div className="text-[11px] font-semibold mt-0.5">{opt.val}</div>
-                  </button>
-                ))}
+              <div className={`grid grid-cols-3 gap-2 ${poRec ? 'pt-4' : 'pt-0.5'}`}>
+                {([
+                  { key: 'cancel' as const, label: 'Cancel',          sub: 'Est. cover',  val: '–3 wks',
+                    recCls:    'bg-red-100 border-2 border-red-400 text-red-800 hover:bg-red-200 shadow-sm',
+                    nonRecCls: 'bg-red-50 border border-red-200 text-red-700 hover:bg-red-100' },
+                  { key: 'cpr' as const,    label: `CPR ${cprPct}%`,  sub: 'Est. saving', val: `£${Math.round(orderValueNum * cprPct / 100).toLocaleString()}`,
+                    recCls:    'bg-amber-100 border-2 border-amber-400 text-amber-800 hover:bg-amber-200 shadow-sm',
+                    nonRecCls: 'bg-amber-50 border border-amber-200 text-amber-700 hover:bg-amber-100' },
+                  { key: 'accept' as const, label: 'Accept late',     sub: 'New intake',  val: `+${Math.ceil(daysLate / 7)} wks`,
+                    recCls:    'bg-green-100 border-2 border-green-400 text-green-800 hover:bg-green-200 shadow-sm',
+                    nonRecCls: 'bg-green-50 border border-green-200 text-green-700 hover:bg-green-100' },
+                ] as Array<{ key: LateDec; label: string; sub: string; val: string; recCls: string; nonRecCls: string }>).map(opt => {
+                  const isRec = poRec?.rec === opt.key
+                  const cardCls = isRec ? opt.recCls : opt.nonRecCls
+                  return (
+                    <div key={opt.key} className="relative">
+                      {isRec && (
+                        <div className="absolute -top-3.5 left-0 right-0 flex justify-center pointer-events-none">
+                          <span className="inline-flex items-center px-1.5 py-0.5 rounded-full bg-indigo-600 text-white text-[9px] font-semibold tracking-wide whitespace-nowrap">
+                            Recommended
+                          </span>
+                        </div>
+                      )}
+                      <button
+                        onClick={() => recordDecision(opt.key)}
+                        className={`w-full rounded-lg p-2.5 border text-center transition-all ${lateDecision === opt.key ? 'ring-2 ring-offset-1 ring-indigo-400' : ''} ${cardCls}`}
+                      >
+                        <div className="text-xs font-bold">{opt.label}</div>
+                        <div className="text-[10px] mt-0.5 opacity-70">{opt.sub}</div>
+                        <div className="text-[11px] font-semibold mt-0.5">{opt.val}</div>
+                        {isRec && poRec && (
+                          <div className="text-[9px] mt-1.5 leading-snug opacity-80 font-normal">{poRec.cardRationale}</div>
+                        )}
+                      </button>
+                    </div>
+                  )
+                })}
               </div>
+
+              {/* Why this recommendation? */}
+              {poRec && (
+                <div className="pt-1">
+                  <button
+                    onClick={() => setWhyExpanded(e => !e)}
+                    className="flex items-center gap-1 text-[10px] text-indigo-500 hover:text-indigo-700 transition-colors font-medium"
+                  >
+                    <ChevronRight className={`w-3 h-3 transition-transform ${whyExpanded ? 'rotate-90' : ''}`} />
+                    Why this recommendation?
+                  </button>
+                  {whyExpanded && (
+                    <ul className="mt-2 space-y-1.5 pl-4">
+                      {poRec.bullets.map((b, i) => (
+                        <li key={i} className="text-[10px] text-gray-600 leading-snug list-disc">{b}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
             </div>
           )}
           {decisionDone && (
