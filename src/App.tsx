@@ -3378,19 +3378,23 @@ function ReplyBlock({ reply, rec, cpDeltaColor, cpDeltaLabel, currentMarginPct, 
   currentMarginPct: string
   leadTimeBreach?: boolean
 }) {
-  const [expanded, setExpanded] = useState(false)
+  const [expanded, setExpanded] = useState(true)
   const newGP = ((rec.sellingPrice - reply.offeredCP) / rec.sellingPrice * 100).toFixed(1)
   const gpDeltaUp = parseFloat(newGP) >= parseFloat(currentMarginPct)
+  const borderCls = leadTimeBreach ? 'border-red-200' : 'border-amber-200'
+  const accentBg  = leadTimeBreach ? 'bg-red-50 border-red-100' : 'bg-amber-50 border-amber-100'
+  const accentTxt = leadTimeBreach ? 'text-red-700' : 'text-amber-700'
   return (
-    <div className={`border rounded-xl overflow-hidden ${leadTimeBreach ? 'border-red-200' : 'border-amber-200'}`}>
-      {/* Header — always visible, not a toggle */}
-      <div className={`flex items-center justify-between px-3.5 py-2.5 border-b ${leadTimeBreach ? 'bg-red-50 border-red-100' : 'bg-amber-50 border-amber-100'}`}>
-        <span className={`text-[11px] font-semibold ${leadTimeBreach ? 'text-red-700' : 'text-amber-700'}`}>Supplier Reply — {reply.receivedAt}</span>
+    <div className={`border rounded-xl overflow-hidden ${borderCls}`}>
+      {/* Header */}
+      <div className={`flex items-center justify-between px-3.5 py-2.5 border-b ${accentBg}`}>
+        <span className={`text-[11px] font-semibold ${accentTxt}`}>Supplier Reply — {reply.receivedAt}</span>
         <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${gpDeltaUp ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
           GP% {currentMarginPct}% → {newGP}%
         </span>
       </div>
-      {/* Summary row — always visible */}
+
+      {/* Summary cards */}
       <div className="px-3.5 py-2.5 grid grid-cols-2 gap-x-4 gap-y-1.5 bg-white">
         <div>
           <div className="text-[10px] text-gray-400">CP offered</div>
@@ -3414,19 +3418,30 @@ function ReplyBlock({ reply, rec, cpDeltaColor, cpDeltaLabel, currentMarginPct, 
           <div className={`text-xs font-semibold ${leadTimeBreach ? 'text-red-600' : 'text-gray-700'}`}>{reply.deliveryWindow}</div>
         </div>
       </div>
-      {/* Expandable full reply */}
-      <div className="border-t border-amber-100">
-        <button
-          onClick={() => setExpanded(o => !o)}
-          className="w-full flex items-center justify-between px-3.5 py-1.5 hover:bg-amber-50/60 transition-colors text-left"
-        >
-          <span className="text-[10px] text-amber-600 font-medium">{expanded ? 'Hide full reply' : 'View full reply'}</span>
-          <ChevronDown className={`w-3 h-3 text-amber-400 transition-transform ${expanded ? 'rotate-180' : ''}`} />
-        </button>
-        {expanded && (
-          <div className="px-3.5 pb-3 bg-white border-t border-amber-100">
-            <pre className="text-[10px] text-gray-600 font-mono leading-relaxed whitespace-pre-wrap mt-2">{reply.rawText}</pre>
+      <div className="px-3.5 pb-2 text-[9px] text-gray-400 italic bg-white">
+        AI-summarised — verify against full reply below
+      </div>
+
+      {/* Full reply text — expanded by default */}
+      <div className={`border-t ${borderCls}`}>
+        {expanded ? (
+          <div className="px-3.5 pt-2 pb-3 bg-white">
+            <pre className="text-[10px] text-gray-600 font-mono leading-relaxed whitespace-pre-wrap">{reply.rawText}</pre>
+            <button
+              onClick={() => setExpanded(false)}
+              className={`mt-2 text-[10px] font-medium ${accentTxt} hover:opacity-70 transition-opacity`}
+            >
+              Collapse full reply ↑
+            </button>
           </div>
+        ) : (
+          <button
+            onClick={() => setExpanded(true)}
+            className={`w-full flex items-center justify-between px-3.5 py-1.5 hover:bg-amber-50/60 transition-colors text-left`}
+          >
+            <span className={`text-[10px] font-medium ${accentTxt}`}>View full reply</span>
+            <ChevronDown className="w-3 h-3 text-amber-400" />
+          </button>
         )}
       </div>
     </div>
