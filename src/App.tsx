@@ -559,6 +559,42 @@ function getFitFamily(recId: string): FitFamily | null {
   return id ? (FIT_FAMILIES.find(f => f.id === id) ?? null) : null
 }
 
+// ── Tooltip ───────────────────────────────────────────────────────────────────
+function Tt({ tip, children }: { tip: string; children: React.ReactNode }) {
+  return (
+    <span className="relative group/tt inline-flex items-baseline">
+      <span className="border-b border-dotted border-gray-400 cursor-help">{children}</span>
+      <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover/tt:block z-50 w-52 bg-gray-900 text-white text-[10px] leading-snug rounded-lg px-2.5 py-2 shadow-xl whitespace-normal text-left">
+        {tip}
+        <span className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-900" />
+      </span>
+    </span>
+  )
+}
+
+// ── Sparkline ─────────────────────────────────────────────────────────────────
+const SPARKLINE_DATA: Record<string, number[]> = {
+  deteriorating: [86, 80, 74, 68, 62, 57],
+  stable:        [78, 81, 77, 80, 79, 81],
+  improving:     [65, 69, 73, 77, 80, 84],
+}
+function Sparkline({ trend }: { trend: 'deteriorating' | 'stable' | 'improving' }) {
+  const pts  = SPARKLINE_DATA[trend]
+  const min  = Math.min(...pts)
+  const max  = Math.max(...pts)
+  const W = 48, H = 18
+  const x = (i: number) => (i / (pts.length - 1)) * W
+  const y = (v: number) => H - ((v - min) / (max - min + 1)) * H
+  const d = pts.map((v, i) => `${i === 0 ? 'M' : 'L'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ')
+  const color = trend === 'improving' ? '#22c55e' : trend === 'deteriorating' ? '#ef4444' : '#94a3b8'
+  return (
+    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} className="shrink-0">
+      <path d={d} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx={x(pts.length - 1).toFixed(1)} cy={y(pts[pts.length - 1]).toFixed(1)} r="2" fill={color} />
+    </svg>
+  )
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 function formatDate(iso: string) {
   return new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
@@ -1551,7 +1587,8 @@ export function SuppliersView() {
                 <div className="mb-3">
                   <div className="flex items-end justify-between mb-1">
                     <span className="text-xs text-gray-500">On-time delivery rate</span>
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-2">
+                      <Sparkline trend={supplier.trend} />
                       <TrendIcon className={`w-3.5 h-3.5 ${trendColor}`} />
                       <span className={`text-2xl font-bold ${rateColor}`}>{supplier.onTimeRate}%</span>
                     </div>
@@ -3091,11 +3128,11 @@ function InquiryDrawer({
             <div className="bg-green-50 rounded-xl p-3.5 border border-green-200 space-y-1.5">
               <div className="text-[10px] font-semibold text-green-600 uppercase tracking-wide">Margin impact if accepted</div>
               <div className="flex justify-between text-xs">
-                <span className="text-gray-500">Current GP%</span>
+                <span className="text-gray-500">Current <Tt tip="Gross Profit %: selling price minus cost price, as a percentage of selling price.">GP%</Tt></span>
                 <span className="font-semibold text-gray-700">{currentMarginPct}%</span>
               </div>
               <div className="flex justify-between text-xs">
-                <span className="text-green-600">New GP% at £{lastReply.offeredCP.toFixed(2)}</span>
+                <span className="text-green-600">New <Tt tip="Gross Profit %: selling price minus cost price, as a percentage of selling price.">GP%</Tt> at £{lastReply.offeredCP.toFixed(2)}</span>
                 <span className="font-bold text-green-700">{((rec.sellingPrice - lastReply.offeredCP) / rec.sellingPrice * 100).toFixed(1)}%</span>
               </div>
               <div className="flex justify-between text-xs pb-1">
@@ -3453,13 +3490,13 @@ function ReplyBlock({ reply, rec, cpDeltaColor, cpDeltaLabel, currentMarginPct, 
           </div>
         </div>
         <div>
-          <div className="text-[10px] text-gray-400">MOQ</div>
+          <div className="text-[10px] text-gray-400"><Tt tip="Minimum Order Quantity: the smallest number of units a supplier will produce in a single order.">MOQ</Tt></div>
           <div className="text-sm font-bold text-gray-800">{reply.moqOffered.toLocaleString()}</div>
         </div>
         <div>
           <div className="text-[10px] text-gray-400">Lead time</div>
           <div className={`text-xs font-semibold ${leadTimeBreach ? 'text-red-600' : 'text-gray-700'}`}>
-            {reply.leadTimeWeeks} wks{leadTimeBreach && <span className="ml-1 text-[10px] font-normal">⚠ slips ex-fty</span>}
+            {reply.leadTimeWeeks} wks{leadTimeBreach && <span className="ml-1 text-[10px] font-normal">⚠ <Tt tip="Delivery slips past the agreed ex-factory date, meaning goods will leave the factory late and likely arrive late.">slips ex-fty</Tt></span>}
           </div>
         </div>
         <div>
@@ -4736,8 +4773,8 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
             </div>
           </div>
           {[
-            { label: 'Total Reorder Value',  value: fmtGBP(totalReorderValue), sub: `${total} orders pending`, pop: '↑ +12% vs last month', popCls: 'text-green-600' },
-            { label: 'Live Purchase Orders', value: `${livePos}`,              sub: 'approved this week',      pop: '↑ +2 vs last week',    popCls: 'text-green-600' },
+            { label: 'Total Reorder Value',  value: fmtGBP(totalReorderValue), sub: `${total} orders pending`, pop: '↑ +12% vs last month · within plan', popCls: 'text-green-600' },
+            { label: 'Live Purchase Orders', value: `${livePos}`,              sub: 'approved this week',      pop: '↑ +2 vs last week · on track',       popCls: 'text-green-600' },
             { label: 'Total Suppliers',      value: `${uniqueSuppliers}`,      sub: 'across all recs' },
             { label: 'Avg Lead Time',        value: `${avgLeadDays} days`,     sub: 'across all recs' },
           ].map(({ label, value, sub, pop, popCls }) => (
@@ -6140,7 +6177,7 @@ function POLineDrawer({
           {/* PO summary */}
           <div className="grid grid-cols-3 gap-3 bg-gray-50 rounded-xl p-3.5 border border-gray-100">
             <div>
-              <div className="text-[10px] text-gray-400">X-factory</div>
+              <div className="text-[10px] text-gray-400"><Tt tip="Ex-factory (ex-fty): the date goods leave the supplier's factory. Delays here cascade into late delivery.">Ex-fty</Tt></div>
               <div className="text-xs font-semibold text-gray-800">{xfDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</div>
               {isPostDsp && <div className="text-[9px] text-indigo-500 font-medium">Historical (dispatched)</div>}
             </div>
@@ -6238,7 +6275,9 @@ function POLineDrawer({
                         onClick={() => recordDecision(opt.key)}
                         className={`w-full rounded-lg p-2.5 border text-center transition-all ${lateDecision === opt.key ? 'ring-2 ring-offset-1 ring-indigo-400' : ''} ${cardCls}`}
                       >
-                        <div className="text-xs font-bold">{opt.label}</div>
+                        <div className="text-xs font-bold">
+                          {opt.key === 'cpr' ? <Tt tip="Commercial Price Reduction: a discount negotiated with the supplier to offset the cost impact of a late delivery.">CPR {cprPct}%</Tt> : opt.label}
+                        </div>
                         <div className="text-[10px] mt-0.5 opacity-70">{opt.sub}</div>
                         <div className="text-[11px] font-semibold mt-0.5">{opt.val}</div>
                         {isRec && poRec && (
@@ -7172,6 +7211,8 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg }: { initialOpenPO?: 
                   {actionGroups.map(g => {
                     const sup = getSupplier(g.supplierId)
                     const isSelected = selectedGroup?.supplierId === g.supplierId && selectedGroup?.type === g.type
+                    const actionLabel = g.type === 'overdue' ? 'Overdue' : g.type === 'at_risk' ? 'Date Change' : 'DC Booking'
+                    const actionCls   = g.type === 'overdue' ? 'bg-red-100 text-red-700' : g.type === 'at_risk' ? 'bg-orange-100 text-orange-700' : 'bg-amber-100 text-amber-700'
                     return (
                       <button key={`${g.supplierId}-${g.type}`} onClick={() => setSelectedSupId(g.supplierId)}
                         className={`w-full text-left px-4 py-3 flex items-start gap-3 hover:bg-gray-50 transition-colors ${isSelected ? 'bg-indigo-50 border-l-[3px] border-indigo-500' : ''}`}>
@@ -7181,14 +7222,17 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg }: { initialOpenPO?: 
                           {g.type === 'late_dc' && <Mail className="w-4 h-4 text-amber-500" />}
                         </span>
                         <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5 mb-0.5">
+                            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${actionCls}`}>{actionLabel}</span>
+                            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${actionCls}`}>{g.pos.length}</span>
+                          </div>
                           <div className="text-xs font-semibold text-gray-800 truncate">{sup?.name ?? g.supplierId}</div>
                           <div className="text-[10px] text-gray-400 mt-0.5">
                             {g.type === 'overdue'      && `${g.pos.length} overdue PO${g.pos.length > 1 ? 's' : ''}`}
                             {g.type === 'at_risk'      && `${g.pos.length} date change${g.pos.length > 1 ? 's' : ''}`}
-                            {g.type === 'late_dc' && `${g.pos.length} late DC booking${g.pos.length > 1 ? 's' : ''}`}
+                            {g.type === 'late_dc' && <><Tt tip="Distribution Centre booking: the appointment slot to receive goods at the DC. Must be booked in advance; a missed or late booking delays stock reaching the shop floor.">DC booking</Tt> needed · {g.pos.length} PO{g.pos.length > 1 ? 's' : ''}</>}
                           </div>
                         </div>
-                        <span className={`shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded-full ${g.type === 'overdue' ? 'bg-red-100 text-red-700' : g.type === 'at_risk' ? 'bg-orange-100 text-orange-700' : 'bg-amber-100 text-amber-700'}`}>{g.pos.length}</span>
                       </button>
                     )
                   })}
@@ -8646,8 +8690,11 @@ export default function App() {
               </p>
             </div>
             <div className="flex items-center gap-2">
-              <button className="inline-flex items-center gap-2 h-9 px-3 rounded-lg text-sm font-semibold text-gray-600 bg-white border border-gray-200 hover:bg-gray-50 shadow-sm transition-colors">
-                <RefreshCw className="w-3.5 h-3.5" />Refresh
+              <button className="inline-flex items-center gap-2 h-9 px-3 rounded-lg text-sm text-gray-500 bg-white border border-gray-200 hover:bg-gray-50 shadow-sm transition-colors">
+                <span className="text-xs text-gray-400">Updated 3 min ago</span>
+                <span className="w-px h-4 bg-gray-200" />
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span className="font-semibold text-gray-600">Refresh</span>
               </button>
             </div>
           </div>
