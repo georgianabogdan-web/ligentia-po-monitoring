@@ -216,6 +216,7 @@ const SUPPLIERS: Supplier[] = [
   { id: 'UF', name: 'Urban Footwear',      onTimeRate: 85, avgDelayDays: 2.1,  contractualLeadTimeDays: 35, trend: 'stable',        openPOs: 17, category: 'Footwear' },
   { id: 'LL', name: 'Luxe Leather Co',     onTimeRate: 91, avgDelayDays: 1.4,  contractualLeadTimeDays: 50, trend: 'stable',        openPOs: 9,  category: 'Accessories' },
   { id: 'EL', name: 'Estée Lauder UK',     onTimeRate: 96, avgDelayDays: 0.8,  contractualLeadTimeDays: 21, trend: 'stable',        openPOs: 8,  category: 'Beauty', hasSubmissionDeadline: 'Thursday' },
+  { id: 'UL', name: 'Unilever Ltd',        onTimeRate: 94, avgDelayDays: 1.1,  contractualLeadTimeDays: 28, trend: 'stable',        openPOs: 4,  category: 'Beauty' },
 ]
 
 const SUPPLIER_EMAILS: Record<string, string> = {
@@ -268,6 +269,8 @@ const ALL_POS: PO[] = [
   { id: 'PO-3052', supplierId: 'EL', product: 'Foundation Range',          category: 'Beauty',          createdOn: '26/03/26', expectedDelivery: '2026-06-02', status: 'On track',              priority: false, quantity: 480,  skus: 12, orderValue: '£84,000', freight: 'Air', handledBy: 'agent' },
   { id: 'PO-3055', supplierId: 'SS', product: 'Wrap Midi Dresses',         category: "Women's Apparel", createdOn: '26/03/26', expectedDelivery: '2026-06-05', status: 'On track',              priority: false, quantity: 720,  skus: 8,  orderValue: '£21,600', freight: 'Sea', handledBy: 'agent' },
   { id: 'PO-3059', supplierId: 'BA', product: 'Linen Shorts',              category: "Men's Apparel",   createdOn: '28/03/26', expectedDelivery: '2026-06-10', status: 'On track',              priority: false, quantity: 960,  skus: 12, orderValue: '£14,400', freight: 'Sea', handledBy: 'agent' },
+  // Negotiated PO — raised following CP negotiation with Unilever Ltd (REC-002)
+  { id: 'PO-3060', supplierId: 'UL', product: 'Hyaluronic Acid Toner',    category: 'Beauty',          createdOn: '30/04/26', expectedDelivery: '2026-06-11', status: 'On track',              priority: false, quantity: 2840, skus: 1,  orderValue: '£25,475', freight: 'Air', handledBy: 'human' },
 ]
 
 // Links each PO to the nearest equivalent InventoryProduct or ReorderRecommendation.
@@ -289,6 +292,7 @@ const PO_PRODUCT_MAP: Record<string, string> = {
   'PO-2997': 'INV-001', // Advanced Sérum Collection → Hydrating Face Serum
   'PO-3002': 'INV-018', // Leather Tote Bags → Leather Crossbody Bag
   'PO-3015': 'REC-010', // Running Shoes → Platform Derby Shoes
+  'PO-3060': 'REC-002', // Hyaluronic Acid Toner → directly the negotiated rec
   'PO-3022': 'INV-003', // Summer Skincare Gift Sets → Vitamin C Moisturiser
   'PO-3026': 'INV-017', // Leather Sandals → Strappy Sandals
   'PO-3029': 'INV-012', // Denim Shorts → Wide Leg Trousers
@@ -299,6 +303,15 @@ const PO_PRODUCT_MAP: Record<string, string> = {
   'PO-3052': 'REC-003', // Foundation Range → Brightening Eye Cream
   'PO-3055': 'REC-004', // Wrap Midi Dresses → Wrap Midi Dress
   'PO-3059': 'INV-008', // Linen Shorts → Slim Fit Chinos
+}
+
+// Maps negotiation rec IDs → resulting PO IDs (for closed/applied negotiations)
+const NEG_PO_MAP: Record<string, string> = {
+  'REC-002': 'PO-3060',
+}
+// Reverse map: PO ID → negotiation rec ID
+const PO_NEG_MAP: Record<string, string> = {
+  'PO-3060': 'REC-002',
 }
 
 // ── Seeded PO Event Log ────────────────────────────────────────────────────────
@@ -2548,16 +2561,17 @@ function evalCpDecision(cpDeltaPct: number, lastReply: { offeredCP: number } | n
 
 // ── Inquiry Drawer ────────────────────────────────────────────────────────────
 function InquiryDrawer({
-  rec, thread, onClose, onUpdate, isManager, onApprove, onReject, globalCpRules,
+  rec, thread, onClose, onUpdate, isManager, onApprove, onReject, globalCpRules, onNavigateToPO,
 }: {
-  rec:            typeof REORDER_RECOMMENDATIONS[0]
-  thread:         InquiryThread | undefined
-  onClose:        () => void
-  onUpdate:       (t: InquiryThread) => void
-  isManager?:     boolean
-  onApprove?:     () => void
-  onReject?:      () => void
-  globalCpRules:  CpRulesState
+  rec:              typeof REORDER_RECOMMENDATIONS[0]
+  thread:           InquiryThread | undefined
+  onClose:          () => void
+  onUpdate:         (t: InquiryThread) => void
+  isManager?:       boolean
+  onApprove?:       () => void
+  onReject?:        () => void
+  globalCpRules:    CpRulesState
+  onNavigateToPO?:  (poId: string) => void
 }) {
   const ff      = getFitFamily(rec.id)
   const status: NegotiationStatus = thread?.status ?? 'idle'
@@ -3090,7 +3104,7 @@ function InquiryDrawer({
                   £{((rec.costPrice - lastReply.offeredCP) * rec.recommendedReorderQty).toLocaleString('en-GB', { maximumFractionDigits: 0 })}
                 </span>
               </div>
-              {!appliedToBuySheet ? (
+              {!appliedToBuySheet && !NEG_PO_MAP[rec.id] ? (
                 <div className="space-y-1">
                   <button
                     onClick={() => { setAppliedToBuySheet(true); handleAccept() }}
@@ -3101,8 +3115,28 @@ function InquiryDrawer({
                   <p className="text-center text-[10px] text-gray-400">You'll review before anything is sent.</p>
                 </div>
               ) : (
-                <div className="flex items-center justify-center gap-1.5 text-xs font-semibold text-green-700 py-1">
-                  <Check className="w-3.5 h-3.5" /> Applied to Purchase Order
+                <div className="space-y-2">
+                  <div className="flex items-center justify-center gap-1.5 text-xs font-semibold text-green-700 py-1">
+                    <Check className="w-3.5 h-3.5" /> Applied to Purchase Order
+                  </div>
+                  {NEG_PO_MAP[rec.id] && (() => {
+                    const linkedPO = ALL_POS.find(p => p.id === NEG_PO_MAP[rec.id])
+                    return linkedPO ? (
+                      <div className="bg-white border border-green-200 rounded-lg px-3 py-2 flex items-center justify-between">
+                        <div className="text-[11px] text-gray-600">
+                          Resulted in <span className="font-semibold text-gray-900">{linkedPO.id}</span>
+                          <span className="mx-1.5 text-gray-300">·</span>
+                          <span className="text-green-600 font-medium">Currently: {linkedPO.status}</span>
+                        </div>
+                        <button
+                          onClick={() => onNavigateToPO?.(linkedPO.id)}
+                          className="text-indigo-500 hover:text-indigo-700 text-[11px] font-medium whitespace-nowrap ml-2 transition-colors"
+                        >
+                          View PO →
+                        </button>
+                      </div>
+                    ) : null
+                  })()}
                 </div>
               )}
             </div>
@@ -3996,7 +4030,7 @@ function StockLevelsChart({ productId, timeRange }: { productId: string; timeRan
   )
 }
 
-function ReorderView() {
+function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquiry?: string | null; onNavigateToPO?: (poId: string) => void }) {
   const [search, setSearch]   = useState('')
   const [cat, setCat]         = useState('')
   const [recoSubView, setRecoSubView] = useState<'recommendations' | 'negotiations'>('recommendations')
@@ -4011,8 +4045,10 @@ function ReorderView() {
   const [selectedIds, setSelectedIds]           = useState<Set<string>>(new Set())
   const [toast, setToast]                       = useState<string | null>(null)
   const [inquiries, setInquiries]               = useState<Record<string, InquiryThread>>(() => ({ ...SEEDED_THREADS }))
-  const [openInquiryId, setOpenInquiryId]       = useState<string | null>(null)
+  const [openInquiryId, setOpenInquiryId]       = useState<string | null>(initialOpenInquiry ?? null)
   const [globalCpRules, setGlobalCpRules]       = useState<CpRulesState>(DEFAULT_CP_RULES)
+
+  useEffect(() => { if (initialOpenInquiry) setOpenInquiryId(initialOpenInquiry) }, [initialOpenInquiry])
   const [editQty, setEditQty]                   = useState(0)
   const [editExFactory, setEditExFactory]       = useState('')
   const [editCostPrice, setEditCostPrice]       = useState(0)
@@ -4961,9 +4997,9 @@ function ReorderView() {
                               {inquiries[p.id] && inquiries[p.id].status !== 'idle' && (() => {
                                 const nsCfg = NEG_STATUS_CFG[inquiries[p.id].status]
                                 return (
-                                  <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-semibold border ${nsCfg.bg} ${nsCfg.text} ${nsCfg.border}`} title="Open inquiry">
+                                  <button onClick={() => setOpenInquiryId(p.id)} className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-semibold border cursor-pointer hover:opacity-80 transition-opacity ${nsCfg.bg} ${nsCfg.text} ${nsCfg.border}`} title="Open negotiation">
                                     <span className={`w-1.5 h-1.5 rounded-full ${nsCfg.dot}`} />1
-                                  </span>
+                                  </button>
                                 )
                               })()}
                             </div>
@@ -5003,6 +5039,7 @@ function ReorderView() {
             onClose={() => setOpenInquiryId(null)}
             onUpdate={t => setInquiries(prev => ({ ...prev, [t.recId]: t }))}
             globalCpRules={globalCpRules}
+            onNavigateToPO={onNavigateToPO}
           />
         )
       })()}
@@ -5954,13 +5991,14 @@ function ManagerReorderView() {
 // ── Kanban Panel ─────────────────────────────────────────────────────────────
 // ── PO Line Drawer ────────────────────────────────────────────────────────────
 function POLineDrawer({
-  po, events, lastChased, onClose, onAddEvent,
+  po, events, lastChased, onClose, onAddEvent, onNavigateToNeg,
 }: {
-  po:          PO
-  events:      POEvent[]
-  lastChased:  string | undefined
-  onClose:     () => void
-  onAddEvent:  (poId: string, event: POEvent) => void
+  po:               PO
+  events:           POEvent[]
+  lastChased:       string | undefined
+  onClose:          () => void
+  onAddEvent:       (poId: string, event: POEvent) => void
+  onNavigateToNeg?: (recId: string) => void
 }) {
   const rag       = computeRAG(po)
   const rc        = RAG_CFG[rag]
@@ -6142,6 +6180,31 @@ function POLineDrawer({
               </button>
             </div>
           )}
+
+          {/* Negotiated CP strip — shown when this PO was raised via a CP negotiation */}
+          {PO_NEG_MAP[po.id] && (() => {
+            const recId  = PO_NEG_MAP[po.id]
+            const thread = SEEDED_THREADS[recId]
+            const rec    = REORDER_RECOMMENDATIONS.find(r => r.id === recId)
+            const agreedCP = thread?.rounds[thread.rounds.length - 1]?.supplierReply?.offeredCP ?? null
+            if (!agreedCP || !rec) return null
+            const saving = Math.round((rec.costPrice - agreedCP) * rec.recommendedReorderQty)
+            return (
+              <div className="flex items-center justify-between bg-emerald-50 rounded-lg px-3 py-2 border border-emerald-100 text-[11px]">
+                <div className="text-emerald-700">
+                  Negotiated CP: <span className="font-semibold text-emerald-900">£{agreedCP.toFixed(2)}</span>
+                  <span className="mx-1.5 text-emerald-300">·</span>
+                  saved <span className="font-semibold text-emerald-900">£{saving.toLocaleString()}</span> vs opening CP
+                </div>
+                <button
+                  onClick={() => onNavigateToNeg?.(recId)}
+                  className="text-indigo-500 hover:text-indigo-700 transition-colors whitespace-nowrap shrink-0 ml-3 font-medium"
+                >
+                  View negotiation →
+                </button>
+              </div>
+            )
+          })()}
 
           {/* Late decision card */}
           {isEligibleLate && !decisionDone && (
@@ -6764,11 +6827,13 @@ export function KanbanPanel({
 }
 
 // ── PO Monitoring View ────────────────────────────────────────────────────────
-function POMonitoringView() {
+function POMonitoringView({ initialOpenPO, onNavigateToNeg }: { initialOpenPO?: string | null; onNavigateToNeg?: (recId: string) => void }) {
   const [subTab,           setSubTab]           = useState<'actions' | 'allpos' | 'suppliers' | 'agentlog'>('actions')
   const [poEventsMap,      setPoEventsMap]      = useState<Map<string, POEvent[]>>(new Map(Object.entries(SEED_PO_EVENTS)))
   const [lastChasedMap] = useState<Map<string, string>>(new Map())
-  const [selectedPOId,     setSelectedPOId]     = useState<string | null>(null)
+  const [selectedPOId,     setSelectedPOId]     = useState<string | null>(initialOpenPO ?? null)
+
+  useEffect(() => { if (initialOpenPO) setSelectedPOId(initialOpenPO) }, [initialOpenPO])
   const [settingsOpen,     setSettingsOpen]     = useState(false)
   const [selectedSupId,    setSelectedSupId]    = useState<string | null>(null)
   const [sendModal,        setSendModal]        = useState<{ supplierId: string; poIds: string[] } | null>(null)
@@ -6976,7 +7041,7 @@ function POMonitoringView() {
     <div className="flex-1 overflow-y-auto relative">
 
       {selectedPO && (
-        <POLineDrawer po={selectedPO} events={poEventsMap.get(selectedPO.id) ?? []} lastChased={lastChasedMap.get(selectedPO.id)} onClose={() => setSelectedPOId(null)} onAddEvent={addPOEvent} />
+        <POLineDrawer po={selectedPO} events={poEventsMap.get(selectedPO.id) ?? []} lastChased={lastChasedMap.get(selectedPO.id)} onClose={() => setSelectedPOId(null)} onAddEvent={addPOEvent} onNavigateToNeg={onNavigateToNeg} />
       )}
 
       {/* Send confirm modal */}
@@ -8537,9 +8602,20 @@ function ReplenishmentView() {
 export default function App() {
   const [tab, setTab] = useState<Tab>('alerts')
   const [configMode, setConfigMode] = useState(false)
+  const [pendingOpenInquiry, setPendingOpenInquiry] = useState<string | null>(null)
+  const [pendingOpenPO, setPendingOpenPO] = useState<string | null>(null)
 
   // reset config mode when leaving inventory tab
   const handleTabChange = (t: Tab) => { setTab(t); if (t !== 'inventory') setConfigMode(false) }
+
+  const handleNavigateToNeg = (recId: string) => {
+    setPendingOpenInquiry(recId)
+    handleTabChange('reorder')
+  }
+  const handleNavigateToPO = (poId: string) => {
+    setPendingOpenPO(poId)
+    handleTabChange('po-monitoring')
+  }
 
   const tabs: { id: Tab; label: string; count: number }[] = [
     { id: 'alerts',        label: 'Overview',                count: ALL_POS.filter(p => p.status === 'Ex-factory delay' || p.status === 'Date change required').length + STATIC_KANBAN_ITEMS.length },
@@ -8599,9 +8675,9 @@ export default function App() {
 
         {tab === 'alerts'          && <AlertDigest />}
         {tab === 'inventory'       && <InventoryView configMode={configMode} setConfigMode={setConfigMode} />}
-        {tab === 'reorder'         && <ReorderView />}
+        {tab === 'reorder'         && <ReorderView initialOpenInquiry={pendingOpenInquiry} onNavigateToPO={handleNavigateToPO} />}
         {tab === 'reorder-manager' && <ManagerReorderView />}
-        {tab === 'po-monitoring'   && <POMonitoringView />}
+        {tab === 'po-monitoring'   && <POMonitoringView initialOpenPO={pendingOpenPO} onNavigateToNeg={handleNavigateToNeg} />}
         {tab === 'replenishment'   && <ReplenishmentView />}
       </div>
     </div>
