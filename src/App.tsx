@@ -316,6 +316,15 @@ const SEED_PO_EVENTS: Record<string, POEvent[]> = {
     { id: 'e6', type: 'supplier_reply',       timestamp: '2026-04-05T11:00:00Z', body: 'Nordic Knitwear: requesting extension to 15 Apr due to cotton supply disruption. Formal letter to follow.', author: 'agent' },
     { id: 'e7', type: 'date_change_proposed', timestamp: '2026-04-05T11:02:00Z', body: 'Agent proposed: delivery 18 Mar → 15 Apr. Queued for approval.', author: 'agent' },
   ],
+  'PO-2834': [
+    { id: 'e2a', type: 'chase_sent',     timestamp: '2026-04-14T09:30:00Z', body: 'Handover chase sent to Eastern Textiles Co. Linen Summer Dresses — expected delivery date passed with no dispatch confirmation or booking documentation received.', author: 'agent' },
+    { id: 'e2b', type: 'supplier_reply', timestamp: '2026-04-17T13:45:00Z', body: 'Reply from Eastern Textiles: "Production finalised but freight forwarder slot not confirmed. Ex-factory now expected 21 Apr. Apologies for the delay."', author: 'agent' },
+    { id: 'e2c', type: 'chase_sent',     timestamp: '2026-04-22T09:00:00Z', body: 'Third-party logistics chase issued. 21 Apr ex-factory passed with no booking reference. 8 days since last supplier reply.', author: 'agent' },
+  ],
+  'PO-2845': [
+    { id: 'e2d', type: 'supplier_reply',       timestamp: '2026-04-21T10:20:00Z', body: 'Trendy Boots UK: production delay due to last-minute component sourcing issue. Requesting delivery extension to 9 May. Formal notification attached.', author: 'agent' },
+    { id: 'e2e', type: 'date_change_proposed',  timestamp: '2026-04-21T10:22:00Z', body: 'Agent proposed: delivery 22 Apr → 9 May (+17 days). Queued for buyer approval.', author: 'agent' },
+  ],
   'PO-2976': [
     { id: 'e8', type: 'chase_sent', timestamp: '2026-04-18T09:00:00Z', body: 'Booking-in chase sent to Urban Footwear. Sea freight — 6 days to x-factory. Freight forwarder booking reference required.', author: 'agent' },
   ],
@@ -6035,6 +6044,7 @@ function POLineDrawer({
   }
 
   const sortedEvents = [...events].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+  const isOverdue = new Date() > new Date(po.expectedDelivery)
 
   return (
     <div className="fixed inset-0 z-50 flex">
@@ -6251,8 +6261,14 @@ function POLineDrawer({
           {/* Event log */}
           <div>
             <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2.5">Event log</div>
+            {isOverdue && sortedEvents.length === 0 && (
+              <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-2.5 text-[11px] text-amber-800">
+                <span className="shrink-0 mt-0.5">⚠</span>
+                <span>This PO is overdue but has no chase activity logged. Log a chase or simulate a supplier reply below.</span>
+              </div>
+            )}
             {sortedEvents.length === 0
-              ? <div className="text-xs text-gray-400 text-center py-4">No events yet.</div>
+              ? <div className="text-xs text-gray-400 text-center py-4">No events logged. The agent will record chases, supplier replies, and status changes here.</div>
               : (
                 <div className="space-y-1">
                   {sortedEvents.map((ev, idx) => {
