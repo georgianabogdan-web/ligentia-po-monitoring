@@ -124,7 +124,7 @@ interface DateChangeProposal {
 
 interface AgentLogEntry {
   time: string
-  type: 'scan' | 'scorecard' | 'date_change' | 'at_risk' | 'escalation' | 'chase_draft'
+  type: 'scan' | 'scorecard' | 'date_change' | 'at_risk' | 'escalation' | 'chase_draft' | 'low_confidence'
   message: string
 }
 
@@ -182,7 +182,7 @@ interface SupplierNegReply {
   leadTimeWeeks:  number
   deliveryWindow: string
   accepted:       boolean
-  scenario:       'accepted' | 'counter' | 'escalate'
+  scenario:       'accepted' | 'counter' | 'escalate' | 'uncertain'
   rawText:        string
 }
 
@@ -203,7 +203,7 @@ interface InquiryThread {
   agreedMOQ:      number | null
   flaggedReason:  string | null
   internalNotes:  string
-  scenario:       'accepted' | 'counter' | 'escalate'
+  scenario:       'accepted' | 'counter' | 'escalate' | 'uncertain'
 }
 
 // ── Data ───────────────────────────────────────────────────────────────────────
@@ -509,15 +509,15 @@ const SEEDED_THREADS: Record<string, InquiryThread> = {
     agreedCP: null, agreedMOQ: null, flaggedReason: null, internalNotes: '',
   },
   'REC-006': {
-    recId: 'REC-006', supplierId: 'Next Sourcing', status: 'replied', scenario: 'counter',
+    recId: 'REC-006', supplierId: 'Next Sourcing', status: 'replied', scenario: 'uncertain',
     rounds: [{
       roundNumber: 1, sentAt: '2026-04-30',
       emailBody: SEED_R1_COTTONTEE, requestedCP: 13.63,
       supplierReply: {
-        receivedAt: '2026-04-30', offeredCP: 15.73, moqOffered: 1500,
-        leadTimeWeeks: 7, deliveryWindow: '18 Jun – 2 Jul 2026',
-        accepted: false, scenario: 'counter',
-        rawText: `Dear Buying Team,\n\nThank you for your inquiry regarding Striped Cotton Tee (SKU-REC006).\n\nWe have reviewed your CP request and unfortunately cannot meet £13.63 due to raw material cost increases (cotton +18% YoY) and freight surcharges.\n\nOur best offer:\n• CP: £15.73 per unit\n• MOQ: 1,500 units (your qty of 3,130 is acceptable)\n• Lead time: 7 weeks from order placement\n• Delivery window: 18 Jun – 2 Jul 2026\n• Partial fulfilment: 1,800 units by 28 May (week 5), balance 1,330 units by 2 Jul (week 9)\n\nWe hope to continue our partnership.\n\nBest regards,\nNext Sourcing`,
+        receivedAt: '2026-05-01', offeredCP: 0, moqOffered: 0,
+        leadTimeWeeks: 0, deliveryWindow: '—',
+        accepted: false, scenario: 'uncertain',
+        rawText: `Dear Buying Team,\n\nThank you for reaching out regarding Striped Cotton Tee (SKU-REC006).\n\nWe appreciate the relationship and understand you are reviewing your cost position. At this time, raw material availability remains uncertain due to the ongoing cotton market situation. We are not in a position to confirm a specific CP for this cycle.\n\nWe would be open to revisiting CP terms if the committed volume were to increase substantially. We suggest scheduling a call with your account manager to explore options.\n\nWe look forward to continuing our partnership.\n\nBest regards,\nNext Sourcing`,
       },
     }],
     agreedCP: null, agreedMOQ: null, flaggedReason: null, internalNotes: '',
@@ -2674,7 +2674,7 @@ function InquiryDrawer({
       const cur = latestThread.current
       if (!cur || cur.status !== 'awaiting_reply') return
       const last  = cur.rounds[cur.rounds.length - 1]
-      const reply = simulateSupplierReply(rec, last, cur.scenario)
+      const reply = simulateSupplierReply(rec, last, cur.scenario === 'uncertain' ? 'counter' : cur.scenario)
       let nextStatus: NegotiationStatus = 'replied'
       let flaggedReason: string | null  = null
       if (reply.scenario === 'escalate') {
@@ -2819,6 +2819,7 @@ function InquiryDrawer({
   const negStatusLabel =
     status === 'agreed'          ? 'Closed — Agreed' :
     status === 'escalated'       ? 'Escalated' :
+    (status === 'replied' && scenario === 'uncertain') ? '⚠ Agent uncertain — flagged for review' :
     status === 'replied'         ? `Round ${lastRound?.roundNumber ?? 1} — Reply received` :
     status === 'sent'            ? `Round ${lastRound?.roundNumber ?? 1} — Sent` :
     status === 'awaiting_reply'  ? `Round ${lastRound?.roundNumber ?? 1} — Awaiting` :
@@ -2826,6 +2827,7 @@ function InquiryDrawer({
   const negStatusPillCls =
     status === 'agreed'    ? 'bg-green-100 text-green-700' :
     status === 'escalated' ? 'bg-red-100 text-red-700' :
+    (status === 'replied' && scenario === 'uncertain') ? 'bg-amber-100 text-amber-800 border border-amber-300' :
     status === 'replied'   ? 'bg-amber-100 text-amber-700' :
     status === 'draft'     ? 'bg-gray-100 text-gray-500' :
     'bg-blue-100 text-blue-700'
@@ -2879,7 +2881,7 @@ function InquiryDrawer({
                   emailBody={round.emailBody}
                 />
               )}
-              {round.supplierReply && (
+              {round.supplierReply && scenario !== 'uncertain' && (
                 <ReplyBlock
                   reply={round.supplierReply}
                   rec={rec}
@@ -2888,6 +2890,17 @@ function InquiryDrawer({
                   currentMarginPct={currentMarginPct}
                   leadTimeBreach={leadTimeBreach}
                 />
+              )}
+              {round.supplierReply && scenario === 'uncertain' && (
+                <div className="border border-amber-200 rounded-xl overflow-hidden">
+                  <div className="flex items-center justify-between px-3.5 py-2.5 bg-amber-50 border-b border-amber-100">
+                    <span className="text-[11px] font-semibold text-amber-700">Supplier Reply — {round.supplierReply.receivedAt}</span>
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">No CP offered</span>
+                  </div>
+                  <div className="px-3.5 pt-2 pb-3 bg-white">
+                    <pre className="text-[10px] text-gray-600 font-mono leading-relaxed whitespace-pre-wrap">{round.supplierReply.rawText}</pre>
+                  </div>
+                </div>
               )}
             </div>
           ))}
@@ -3210,6 +3223,34 @@ function InquiryDrawer({
             </div>
           )}
 
+          {/* Scenario C: uncertain → agent flags for human review */}
+          {status === 'replied' && scenario === 'uncertain' && (
+            <div className="bg-amber-50 rounded-xl p-4 border border-amber-300 space-y-3">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                <span className="text-xs font-bold text-amber-800">Agent uncertain — supplier response is non-committal</span>
+              </div>
+              <p className="text-xs text-amber-700 leading-relaxed">
+                The supplier hasn't proposed a specific CP. The agent isn't confident enough to recommend a margin impact or next action. Review the full reply above and decide how to respond.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => { onUpdate({ ...thread!, status: 'follow_up' }) }}
+                  className="flex-1 h-8 rounded-lg border border-amber-300 bg-white text-amber-800 text-xs font-semibold hover:bg-amber-100 transition-colors flex items-center justify-center gap-1.5"
+                >
+                  <Mail className="w-3 h-3" /> Draft follow-up
+                </button>
+                <button
+                  onClick={() => { onUpdate({ ...thread!, status: 'escalated', flaggedReason: 'Supplier reply non-committal — no CP proposed.' }) }}
+                  className="flex-1 h-8 rounded-lg border border-amber-300 bg-white text-amber-800 text-xs font-semibold hover:bg-amber-100 transition-colors flex items-center justify-center gap-1.5"
+                >
+                  <AlertTriangle className="w-3 h-3" /> Escalate to manager
+                </button>
+              </div>
+              <p className="text-[10px] text-amber-600 text-center">Agent is passing control to you — no action will be taken without your decision.</p>
+            </div>
+          )}
+
           {/* Scenario B: counter → editable follow-up draft */}
           {status === 'replied' && scenario === 'counter' && followUpBody && (
             <div className="border border-violet-200 rounded-xl overflow-hidden">
@@ -3414,6 +3455,9 @@ function InquiryDrawer({
           )}
           {status === 'replied' && scenario === 'counter' && (
             <p className="text-center text-xs text-violet-600 font-medium">Review follow-up draft above and send when ready.</p>
+          )}
+          {status === 'replied' && scenario === 'uncertain' && (
+            <p className="text-center text-xs text-amber-600 font-medium">Agent has flagged this for your review. Choose an action above.</p>
           )}
           {status === 'agreed' && !isManager && (
             <p className="text-center text-xs text-gray-400">Update agreed CP in Order App.</p>
@@ -7048,6 +7092,7 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg }: { initialOpenPO?: 
   }
 
   const AGENT_LOG: AgentLogEntry[] = [
+    { time: '2026-05-01T11:30:00Z', type: 'low_confidence', message: 'Supplier reply from Next Sourcing (Striped Cotton Tee — REC-006) is non-committal. No specific CP proposed. Agent cannot assess margin impact. Flagged for buyer review.' },
     { time: '2026-04-22T08:00:00Z', type: 'scan',        message: 'Morning scan complete. 31 open POs reviewed. 3 overdue, 2 date change requests, 4 pre-dispatch chases identified.' },
     { time: '2026-04-22T08:02:00Z', type: 'at_risk',     message: 'PO-2845 (Ankle Strap Heels, Trendy Boots UK) flagged — revised delivery now 9 May, 17-day extension requested.' },
     { time: '2026-04-22T08:03:00Z', type: 'at_risk',     message: 'PO-2901 (Cotton Knit Jumpers, Nordic Knitwear) flagged — revised delivery 18 May requested, 28-day extension.' },
@@ -7065,7 +7110,8 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg }: { initialOpenPO?: 
     date_change: { icon: '📅', color: 'text-amber-600',  bg: 'bg-amber-50',  label: 'Date Change',      actionLabel: 'Detected', actionCls: 'bg-gray-100 text-gray-500'   },
     at_risk:     { icon: '⚠️', color: 'text-orange-600', bg: 'bg-orange-50', label: 'At Risk Flag',     actionLabel: 'Detected', actionCls: 'bg-gray-100 text-gray-500'   },
     escalation:  { icon: '🚨', color: 'text-red-600',    bg: 'bg-red-50',    label: 'Escalation',       actionLabel: 'Detected', actionCls: 'bg-gray-100 text-gray-500'   },
-    chase_draft: { icon: '✉️', color: 'text-indigo-600', bg: 'bg-indigo-50', label: 'Chase Draft',      actionLabel: 'Drafted',  actionCls: 'bg-indigo-50 text-indigo-600' },
+    chase_draft:    { icon: '✉️', color: 'text-indigo-600', bg: 'bg-indigo-50',  label: 'Chase Draft',      actionLabel: 'Drafted',          actionCls: 'bg-indigo-50 text-indigo-600'  },
+    low_confidence: { icon: '🤔', color: 'text-amber-700', bg: 'bg-amber-50',   label: 'Low Confidence',   actionLabel: 'Flagged for review', actionCls: 'bg-amber-100 text-amber-700'  },
   }
   const CHASE_CONFIGS = [
     { label: 'Pre-Dispatch Chase',              trigger: '7 days before delivery',            autoSend: true  },
