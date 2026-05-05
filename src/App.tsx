@@ -4034,7 +4034,7 @@ function ReorderView() {
             </div>
           )}
 
-          {/* Top card */}
+          {/* Product banner — full width, no inputs */}
           <div className="bg-white border border-gray-100 rounded-xl p-5 shadow-sm flex items-start gap-5">
             <img src={p.imageUrl} className="w-20 h-20 rounded-lg object-cover shrink-0" alt={p.name} />
             <div className="flex-1 min-w-0">
@@ -4088,7 +4088,6 @@ function ReorderView() {
                     Push to Order App
                   </button>
                 )}
-                {/* Send inquiry — always available as secondary action */}
                 <button onClick={() => setOpenInquiryId(p.id)}
                   className="h-7 px-2.5 text-[10px] font-medium rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 transition-colors flex items-center gap-1"
                   title="Send supplier inquiry">
@@ -4096,46 +4095,48 @@ function ReorderView() {
                 </button>
               </div>
             </div>
-            <div className="space-y-1.5 shrink-0">
-              <div className="text-[9px] font-semibold text-indigo-500 uppercase tracking-wide px-0.5 flex items-center gap-1">
-                <span className="w-3 h-px bg-indigo-300 inline-block" />Editable<span className="w-3 h-px bg-indigo-300 inline-block" />
+          </div>
+
+          {/* Editable fields */}
+          <div className="bg-white border border-gray-100 rounded-xl px-5 py-4 shadow-sm space-y-2">
+            <div className="text-[9px] font-semibold text-indigo-500 uppercase tracking-wide flex items-center gap-1">
+              <span className="w-3 h-px bg-indigo-300 inline-block" />Editable<span className="w-3 h-px bg-indigo-300 inline-block" />
+            </div>
+            <div className="grid grid-cols-6 gap-2">
+              <div className="bg-indigo-50/50 border border-indigo-100 rounded-lg px-3 py-2 text-center col-span-2">
+                <input type="number" value={editQty > 0 ? editQty : p.recommendedReorderQty}
+                  onChange={e => setEditQty(Number(e.target.value))}
+                  className="text-xs font-bold text-gray-900 bg-transparent border-b border-indigo-300 focus:outline-none focus:border-indigo-600 w-full text-center" />
+                <div className="text-[10px] text-gray-400 mt-0.5">Order Qty</div>
+                <div className="text-[9px] text-indigo-400 mt-0.5">updates next Monday</div>
               </div>
-              <div className="grid grid-cols-3 gap-2">
-                <div className="bg-indigo-50/50 border border-indigo-100 rounded-lg px-3 py-2 text-center min-w-[88px]">
-                  <input type="number" value={editQty > 0 ? editQty : p.recommendedReorderQty}
-                    onChange={e => setEditQty(Number(e.target.value))}
-                    className="text-xs font-bold text-gray-900 bg-transparent border-b border-indigo-300 focus:outline-none focus:border-indigo-600 w-full text-center" />
-                  <div className="text-[10px] text-gray-400 mt-0.5">Order Qty</div>
-                  <div className="text-[9px] text-indigo-400 mt-0.5">updates next Monday</div>
+              <div className="bg-indigo-50/50 border border-indigo-100 rounded-lg px-3 py-2 text-center col-span-2">
+                <div className="flex items-center justify-center">
+                  <span className="text-xs font-bold text-gray-900 mr-0.5">£</span>
+                  <input type="number" step="0.01" value={editCostPrice > 0 ? editCostPrice : p.costPrice}
+                    onChange={e => setEditCostPrice(Number(e.target.value))}
+                    className="text-xs font-bold text-gray-900 bg-transparent border-b border-indigo-300 focus:outline-none focus:border-indigo-600 w-16 text-center" />
                 </div>
-                <div className="bg-indigo-50/50 border border-indigo-100 rounded-lg px-3 py-2 text-center min-w-[88px]">
-                  <div className="flex items-center justify-center">
-                    <span className="text-xs font-bold text-gray-900 mr-0.5">£</span>
-                    <input type="number" step="0.01" value={editCostPrice > 0 ? editCostPrice : p.costPrice}
-                      onChange={e => setEditCostPrice(Number(e.target.value))}
-                      className="text-xs font-bold text-gray-900 bg-transparent border-b border-indigo-300 focus:outline-none focus:border-indigo-600 w-16 text-center" />
-                  </div>
-                  <div className="text-[10px] text-gray-400 mt-0.5">Cost Price</div>
-                </div>
-                <div className="bg-indigo-50/50 border border-indigo-100 rounded-lg px-3 py-2 text-center min-w-[88px]">
-                  <input type="date" value={exFact} onChange={e => setEditExFactory(e.target.value)}
-                    className="text-xs font-bold text-gray-900 bg-transparent border-b border-indigo-300 focus:outline-none focus:border-indigo-600 w-full text-center" />
-                  <div className="text-[10px] text-gray-400 mt-0.5">Ex-Factory</div>
-                </div>
+                <div className="text-[10px] text-gray-400 mt-0.5">Cost Price</div>
               </div>
-              <div className="grid grid-cols-3 gap-2">
-                <div className="bg-gray-50 rounded-lg px-3 py-2 text-center min-w-[88px]">
-                  <div className="text-xs font-bold text-gray-900">£{editTotalCost.toLocaleString()}</div>
-                  <div className="text-[10px] text-gray-400 mt-0.5">Total Cost</div>
-                </div>
-                <div className="bg-gray-50 rounded-lg px-3 py-2 text-center min-w-[88px]">
-                  <div className="text-xs font-bold text-gray-900">{p.receiptDate}</div>
-                  <div className="text-[10px] text-gray-400 mt-0.5">Receipt Date</div>
-                </div>
-                <div className="bg-gray-50 rounded-lg px-3 py-2 text-center min-w-[88px]">
-                  <div className="text-xs font-bold text-gray-900">£{p.sellingPrice.toFixed(2)}</div>
-                  <div className="text-[10px] text-gray-400 mt-0.5">Selling Price</div>
-                </div>
+              <div className="bg-indigo-50/50 border border-indigo-100 rounded-lg px-3 py-2 text-center col-span-2">
+                <input type="date" value={exFact} onChange={e => setEditExFactory(e.target.value)}
+                  className="text-xs font-bold text-gray-900 bg-transparent border-b border-indigo-300 focus:outline-none focus:border-indigo-600 w-full text-center" />
+                <div className="text-[10px] text-gray-400 mt-0.5">Ex-Factory</div>
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <div className="bg-gray-50 rounded-lg px-3 py-2 text-center">
+                <div className="text-xs font-bold text-gray-900">£{editTotalCost.toLocaleString()}</div>
+                <div className="text-[10px] text-gray-400 mt-0.5">Total Cost</div>
+              </div>
+              <div className="bg-gray-50 rounded-lg px-3 py-2 text-center">
+                <div className="text-xs font-bold text-gray-900">{p.receiptDate}</div>
+                <div className="text-[10px] text-gray-400 mt-0.5">Receipt Date</div>
+              </div>
+              <div className="bg-gray-50 rounded-lg px-3 py-2 text-center">
+                <div className="text-xs font-bold text-gray-900">£{p.sellingPrice.toFixed(2)}</div>
+                <div className="text-[10px] text-gray-400 mt-0.5">Selling Price</div>
               </div>
             </div>
           </div>
@@ -4148,7 +4149,14 @@ function ReorderView() {
             const showOverrideReason = activeMode === 'Split' || (activeMode as string) !== p.recommendedFreight
             return (
               <div className="bg-white border border-gray-100 rounded-xl p-5 shadow-sm">
-                <div className="text-sm font-semibold text-gray-800 mb-3">Freight Allocation</div>
+                <div className="text-sm font-semibold text-gray-800 mb-3">Freight Options</div>
+                {/* Suggested freight */}
+                <div className="flex items-center gap-2 mb-3 text-[11px] text-gray-500">
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-700 text-[10px] font-semibold">
+                    {p.recommendedFreight === 'Air' ? '✈️' : '🚢'} Suggested: {p.recommendedFreight}
+                  </span>
+                  <span>{p.recommendedFreight === 'Sea' ? 'lowest landed cost at this lead time' : 'required to meet receipt date'}</span>
+                </div>
                 {/* Mode selector tabs */}
                 <div className="flex items-center bg-gray-100 rounded-lg p-0.5 gap-0.5 mb-4 w-fit">
                   {(['Sea', 'Air', 'Split'] as const).map(mode => {
