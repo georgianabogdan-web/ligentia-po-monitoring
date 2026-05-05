@@ -445,10 +445,9 @@ Dear Unilever Ltd team,
 
 We are reviewing our reorder position for Hyaluronic Acid Toner (SKU: SKU-REC002) and would like to discuss cost price for the upcoming replenishment.
 
-Current agreed CP:         £9.50 per unit
-Target CP for this order:  £8.93 per unit (27.3% of selling price)
+Current agreed CP: £9.50 per unit
 
-Order quantity under consideration: 2,840 units
+Given the 2,840-unit commitment and our forward plan for this line, we'd like to align on £8.93 per unit for this order.
 
 Please confirm your best CP and any MOQ conditions by 5 May 2026.
 
@@ -461,10 +460,9 @@ Dear Next Sourcing team,
 
 We are reviewing our reorder position for Striped Cotton Tee (SKU: SKU-REC006) and would like to discuss cost price for the upcoming replenishment.
 
-Current agreed CP:         £14.50 per unit
-Target CP for this order:  £13.63 per unit (26.3% of selling price)
+Current agreed CP: £14.50 per unit
 
-Order quantity under consideration: 3,130 units
+Given the 3,130-unit commitment and our forward plan for this line, we'd like to align on £13.63 per unit for this order.
 
 Delivery required by ex-factory date: 27 May 2026
 
@@ -2395,7 +2393,6 @@ function buildInquiryEmail(
   const deadline = new Date(today)
   deadline.setDate(today.getDate() + 5)
   const dlStr   = deadline.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
-  const reqPct  = (requestedCP / rec.sellingPrice * 100).toFixed(1)
   const familyLine = ff
     ? `\nAs part of our ${ff.label} programme, combined volume across styles reaches ${ff.sharedMOQ.toLocaleString()} units, which we trust supports this request.`
     : ''
@@ -2408,10 +2405,9 @@ Dear ${rec.supplier} team,
 
 ${openingLine}
 
-Current agreed CP:         £${rec.costPrice.toFixed(2)} per unit
-Target CP for this order:  £${requestedCP.toFixed(2)} per unit (${reqPct}% of selling price)
+Current agreed CP: £${rec.costPrice.toFixed(2)} per unit
 
-Order quantity under consideration: ${rec.recommendedReorderQty.toLocaleString()} units${familyLine}
+Given the ${rec.recommendedReorderQty.toLocaleString()}-unit commitment and our forward plan for this line, we'd like to align on £${requestedCP.toFixed(2)} per unit for this order.${familyLine}
 
 Please confirm your best CP and any MOQ conditions by ${dlStr}.
 
@@ -2574,6 +2570,8 @@ function InquiryDrawer({
   const [cpEditing,         setCpEditing]         = useState(false)
   const [cpOverride,        setCpOverride]        = useState<CpRulesState | null>(null)
   const [suggestStrategy,   setSuggestStrategy]   = useState<'counter' | 'split' | 'escalate'>('counter')
+  const [draftCpOverride,   setDraftCpOverride]   = useState<number | null>(null)
+  const [editingAsk,        setEditingAsk]        = useState(false)
 
   // Auto-generate draft on open
   useEffect(() => {
@@ -2637,6 +2635,15 @@ function InquiryDrawer({
     }, 3000)
     return () => clearTimeout(t)
   }, [status]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // draftCpOverride → regenerate email body live
+  useEffect(() => {
+    if (draftCpOverride === null || !thread) return
+    const round = thread.rounds[thread.rounds.length - 1]
+    const newBody = buildInquiryEmail(rec, round.roundNumber, draftCpOverride)
+    setOriginalBody(newBody)
+    setEditedBody(newBody)
+  }, [draftCpOverride]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // replied + counter → auto-generate follow-up draft
   useEffect(() => {
@@ -2716,6 +2723,18 @@ function InquiryDrawer({
 
   const currentMarginPct  = ((rec.sellingPrice - rec.costPrice) / rec.sellingPrice * 100).toFixed(1)
   const agreedMarginPct   = thread?.agreedCP ? ((rec.sellingPrice - thread.agreedCP) / rec.sellingPrice * 100).toFixed(1) : null
+
+  // "Why this ask" panel derived values
+  const ANCHOR_LABELS: Record<string, string> = {
+    Beauty:      'Category benchmark · Beauty / volume tier 3,000+',
+    Clothing:    'Category benchmark · Clothing / volume tier 2,000+',
+    Footwear:    'Category benchmark · Footwear / volume tier 1,500+',
+    Accessories: 'Category benchmark · Accessories / volume tier 1,000+',
+  }
+  const anchorLabel    = ANCHOR_LABELS[rec.category] ?? `${rec.category} category benchmark`
+  const walkAwayPct    = Math.ceil(effectiveCpRules.openingAskPct / 2)
+  const roundRequestedCP = lastRound?.requestedCP ?? calcRequestedCP(rec.costPrice, 1)
+  const effectiveDraftCP = draftCpOverride ?? roundRequestedCP
 
   const exFactoryRecDt   = rec.exFactoryDate ? new Date(rec.exFactoryDate) : null
   const weeksToExFactory = exFactoryRecDt ? (exFactoryRecDt.getTime() - today.getTime()) / (7 * 86400000) : null
@@ -2812,6 +2831,182 @@ function InquiryDrawer({
               )}
             </div>
           ))}
+
+          {/* Why this ask — visible when draft is open */}
+          {status === 'draft' && (
+            <div className="bg-indigo-50 border border-indigo-200 rounded-xl overflow-hidden">
+              <div className="flex items-center justify-between px-4 py-2.5 border-b border-indigo-100">
+                <span className="text-[11px] font-semibold text-indigo-700">Why this ask</span>
+                <button
+                  onClick={() => setEditingAsk(o => !o)}
+                  className="text-[10px] text-indigo-500 hover:text-indigo-700 font-medium flex items-center gap-1 transition-colors"
+                >
+                  ✎ Edit ask
+                </button>
+              </div>
+              <div className="px-4 py-3">
+                {editingAsk ? (
+                  <div className="space-y-2">
+                    <div className="text-[10px] text-indigo-400">Target CP for this draft only</div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-gray-500">£</span>
+                      <input
+                        type="number" step="0.01" min={0}
+                        value={effectiveDraftCP}
+                        onChange={e => setDraftCpOverride(Number(e.target.value))}
+                        className="w-24 h-7 rounded-lg border border-indigo-200 px-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
+                      />
+                      <button onClick={() => setEditingAsk(false)} className="text-[10px] text-indigo-600 hover:text-indigo-800 font-medium">Done</button>
+                      {draftCpOverride !== null && (
+                        <button onClick={() => { setDraftCpOverride(null); setEditingAsk(false) }} className="text-[10px] text-gray-400 hover:text-gray-600">Reset</button>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-x-6 gap-y-2">
+                    <div>
+                      <div className="text-[10px] text-indigo-400">Opening ask</div>
+                      <div className="text-xs font-bold text-indigo-700">–{effectiveCpRules.openingAskPct}% · £{effectiveDraftCP.toFixed(2)}</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-indigo-400">Anchored on</div>
+                      <div className="text-[10px] font-medium text-indigo-700 leading-snug">{anchorLabel}</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-indigo-400">Walk-away (Round {effectiveCpRules.maxRounds} floor)</div>
+                      <div className="text-xs font-bold text-indigo-700">–{walkAwayPct}%</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-indigo-400">Max rounds</div>
+                      <div className="text-xs font-bold text-indigo-700">{effectiveCpRules.maxRounds}</div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Deal record — reasoning before output */}
+          <div className="border border-gray-200 rounded-xl overflow-hidden">
+            <button
+              onClick={() => setContextOpen(o => !o)}
+              className="w-full flex items-center justify-between px-4 py-2.5 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
+            >
+              <span className="text-[11px] text-gray-400">Deal record</span>
+              <ChevronDown className={`w-3.5 h-3.5 text-gray-400 transition-transform ${contextOpen ? 'rotate-180' : ''}`} />
+            </button>
+            {contextOpen && (
+              <div className="px-4 py-3 space-y-3 bg-white">
+                {/* Leverage */}
+                <div>
+                  <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">Leverage & context</div>
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="text-center">
+                      <div className="text-[10px] text-gray-400">Line value</div>
+                      <div className="text-xs font-bold text-gray-800 mt-0.5">{lineValue}</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-[10px] text-gray-400">Relationship</div>
+                      <span className={`mt-0.5 inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold ${relColors}`}>{relTier}</span>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-[10px] text-gray-400">Fit family</div>
+                      <div className="text-xs font-bold text-gray-800 mt-0.5">{ff ? ff.label : '—'}</div>
+                    </div>
+                  </div>
+                  {ff && (
+                    <div className="mt-2 pt-2 border-t border-gray-200 text-[11px] text-gray-500">
+                      Combined MOQ across family: <span className="font-semibold text-gray-700">{ff.sharedMOQ.toLocaleString()} units</span>
+                    </div>
+                  )}
+                </div>
+                <div className="border-t border-gray-100" />
+                {/* Key dates */}
+                <div>
+                  <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-3">Key dates</div>
+                  <div className="relative flex items-start">
+                    <div className="absolute top-1 left-[16.5%] right-[16.5%] h-0.5 bg-gray-100" />
+                    {[
+                      { label: 'Today',        date: todayStr,     color: 'bg-gray-400'   },
+                      { label: 'Buy decision', date: buyDlStr,     color: 'bg-amber-400'  },
+                      { label: 'Ex-factory',   date: exFactoryStr, color: 'bg-indigo-400' },
+                    ].map((item, i) => (
+                      <div key={i} className="flex-1 flex flex-col items-center gap-1 relative z-10">
+                        <div className={`w-2.5 h-2.5 rounded-full ${item.color} ring-2 ring-white`} />
+                        <div className="text-[11px] font-semibold text-gray-600 text-center">{item.date}</div>
+                        <div className="text-[9px] text-gray-400 text-center">{item.label}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="border-t border-gray-100" />
+                {/* CP Rule Engine — editable */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-[10px] font-semibold text-indigo-500 uppercase tracking-wide">CP Rule Engine</div>
+                    <div className="flex items-center gap-2">
+                      {cpOverride && (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-600 font-semibold border border-amber-200">modified</span>
+                      )}
+                      <button onClick={() => setCpEditing(o => !o)} className="text-[10px] text-indigo-500 hover:text-indigo-700 font-medium">
+                        {cpEditing ? 'Done' : 'Edit'}
+                      </button>
+                      {cpOverride && (
+                        <button onClick={() => { setCpOverride(null); setCpEditing(false) }} className="text-[10px] text-gray-400 hover:text-gray-600">Reset</button>
+                      )}
+                    </div>
+                  </div>
+                  {cpEditing ? (
+                    <div className="grid grid-cols-3 gap-2">
+                      <div>
+                        <div className="text-[10px] text-indigo-400 mb-1">Opening ask (–%)</div>
+                        <input type="number" min={0} max={30}
+                          value={(cpOverride ?? globalCpRules).openingAskPct}
+                          onChange={e => setCpOverride(prev => ({ ...(prev ?? globalCpRules), openingAskPct: Number(e.target.value) }))}
+                          className="w-full h-7 rounded-lg border border-indigo-200 px-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
+                        />
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-indigo-400 mb-1">Escalate if &gt; (%)</div>
+                        <input type="number" min={0} max={50}
+                          value={(cpOverride ?? globalCpRules).escalateIfPct}
+                          onChange={e => setCpOverride(prev => ({ ...(prev ?? globalCpRules), escalateIfPct: Number(e.target.value) }))}
+                          className="w-full h-7 rounded-lg border border-indigo-200 px-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
+                        />
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-indigo-400 mb-1">Max rounds</div>
+                        <input type="number" min={1} max={10}
+                          value={(cpOverride ?? globalCpRules).maxRounds}
+                          onChange={e => setCpOverride(prev => ({ ...(prev ?? globalCpRules), maxRounds: Number(e.target.value) }))}
+                          className="w-full h-7 rounded-lg border border-indigo-200 px-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-3 gap-2 text-center">
+                      <div>
+                        <div className="text-[10px] text-indigo-400">Opening ask</div>
+                        <div className="text-xs font-bold text-indigo-700">–{effectiveCpRules.openingAskPct}%</div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-indigo-400">Escalate if &gt;</div>
+                        <div className="text-xs font-bold text-indigo-700">+{effectiveCpRules.escalateIfPct}%</div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-indigo-400">Max rounds</div>
+                        <div className="text-xs font-bold text-indigo-700">{effectiveCpRules.maxRounds}</div>
+                      </div>
+                    </div>
+                  )}
+                  <div className="mt-2 pt-2 border-t border-indigo-100 flex justify-between text-[10px]">
+                    <span className="text-indigo-400">Current CP</span>
+                    <span className="font-semibold text-indigo-700">£{rec.costPrice.toFixed(2)}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* Editable email draft */}
           {status === 'draft' && (
@@ -3066,144 +3261,7 @@ function InquiryDrawer({
             </div>
           )}
 
-          {/* [2] Deal record — collapsed by default, at the bottom */}
-          <div className="border border-gray-200 rounded-xl overflow-hidden">
-            <button
-              onClick={() => setContextOpen(o => !o)}
-              className="w-full flex items-center justify-between px-4 py-2.5 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
-            >
-              <span className="text-[11px] text-gray-400">Deal record</span>
-              <ChevronDown className={`w-3.5 h-3.5 text-gray-400 transition-transform ${contextOpen ? 'rotate-180' : ''}`} />
-            </button>
-            {contextOpen && (
-              <div className="px-4 py-3 space-y-3 bg-white">
-                {/* Leverage */}
-                <div>
-                  <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">Leverage & context</div>
-                  <div className="grid grid-cols-3 gap-3">
-                    <div className="text-center">
-                      <div className="text-[10px] text-gray-400">Line value</div>
-                      <div className="text-xs font-bold text-gray-800 mt-0.5">{lineValue}</div>
-                    </div>
-                    <div className="text-center">
-                      <div className="text-[10px] text-gray-400">Relationship</div>
-                      <span className={`mt-0.5 inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold ${relColors}`}>{relTier}</span>
-                    </div>
-                    <div className="text-center">
-                      <div className="text-[10px] text-gray-400">Fit family</div>
-                      <div className="text-xs font-bold text-gray-800 mt-0.5">{ff ? ff.label : '—'}</div>
-                    </div>
-                  </div>
-                  {ff && (
-                    <div className="mt-2 pt-2 border-t border-gray-200 text-[11px] text-gray-500">
-                      Combined MOQ across family: <span className="font-semibold text-gray-700">{ff.sharedMOQ.toLocaleString()} units</span>
-                    </div>
-                  )}
-                </div>
-
-                <div className="border-t border-gray-100" />
-
-                {/* Key dates */}
-                <div>
-                  <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-3">Key dates</div>
-                  <div className="relative flex items-start">
-                    <div className="absolute top-1 left-[16.5%] right-[16.5%] h-0.5 bg-gray-100" />
-                    {[
-                      { label: 'Today',        date: todayStr,     color: 'bg-gray-400'   },
-                      { label: 'Buy decision', date: buyDlStr,     color: 'bg-amber-400'  },
-                      { label: 'Ex-factory',   date: exFactoryStr, color: 'bg-indigo-400' },
-                    ].map((item, i) => (
-                      <div key={i} className="flex-1 flex flex-col items-center gap-1 relative z-10">
-                        <div className={`w-2.5 h-2.5 rounded-full ${item.color} ring-2 ring-white`} />
-                        <div className="text-[11px] font-semibold text-gray-600 text-center">{item.date}</div>
-                        <div className="text-[9px] text-gray-400 text-center">{item.label}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="border-t border-gray-100" />
-
-                {/* CP Rule Engine — editable */}
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="text-[10px] font-semibold text-indigo-500 uppercase tracking-wide">CP Rule Engine</div>
-                    <div className="flex items-center gap-2">
-                      {cpOverride && (
-                        <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-600 font-semibold border border-amber-200">modified</span>
-                      )}
-                      <button
-                        onClick={() => setCpEditing(o => !o)}
-                        className="text-[10px] text-indigo-500 hover:text-indigo-700 font-medium"
-                      >
-                        {cpEditing ? 'Done' : 'Edit'}
-                      </button>
-                      {cpOverride && (
-                        <button
-                          onClick={() => { setCpOverride(null); setCpEditing(false) }}
-                          className="text-[10px] text-gray-400 hover:text-gray-600"
-                        >
-                          Reset
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                  {cpEditing ? (
-                    <div className="grid grid-cols-3 gap-2">
-                      <div>
-                        <div className="text-[10px] text-indigo-400 mb-1">Opening ask (–%)</div>
-                        <input
-                          type="number" min={0} max={30}
-                          value={(cpOverride ?? globalCpRules).openingAskPct}
-                          onChange={e => setCpOverride(prev => ({ ...(prev ?? globalCpRules), openingAskPct: Number(e.target.value) }))}
-                          className="w-full h-7 rounded-lg border border-indigo-200 px-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
-                        />
-                      </div>
-                      <div>
-                        <div className="text-[10px] text-indigo-400 mb-1">Escalate if &gt; (%)</div>
-                        <input
-                          type="number" min={0} max={50}
-                          value={(cpOverride ?? globalCpRules).escalateIfPct}
-                          onChange={e => setCpOverride(prev => ({ ...(prev ?? globalCpRules), escalateIfPct: Number(e.target.value) }))}
-                          className="w-full h-7 rounded-lg border border-indigo-200 px-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
-                        />
-                      </div>
-                      <div>
-                        <div className="text-[10px] text-indigo-400 mb-1">Max rounds</div>
-                        <input
-                          type="number" min={1} max={10}
-                          value={(cpOverride ?? globalCpRules).maxRounds}
-                          onChange={e => setCpOverride(prev => ({ ...(prev ?? globalCpRules), maxRounds: Number(e.target.value) }))}
-                          className="w-full h-7 rounded-lg border border-indigo-200 px-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
-                        />
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-3 gap-2 text-center">
-                      <div>
-                        <div className="text-[10px] text-indigo-400">Opening ask</div>
-                        <div className="text-xs font-bold text-indigo-700">–{effectiveCpRules.openingAskPct}%</div>
-                      </div>
-                      <div>
-                        <div className="text-[10px] text-indigo-400">Escalate if &gt;</div>
-                        <div className="text-xs font-bold text-indigo-700">+{effectiveCpRules.escalateIfPct}%</div>
-                      </div>
-                      <div>
-                        <div className="text-[10px] text-indigo-400">Max rounds</div>
-                        <div className="text-xs font-bold text-indigo-700">{effectiveCpRules.maxRounds}</div>
-                      </div>
-                    </div>
-                  )}
-                  <div className="mt-2 pt-2 border-t border-indigo-100 flex justify-between text-[10px]">
-                    <span className="text-indigo-400">Current CP</span>
-                    <span className="font-semibold text-indigo-700">£{rec.costPrice.toFixed(2)}</span>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Internal notes — below Deal record */}
+          {/* Internal notes */}
           {thread && (
             <div>
               <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1.5 mt-4">
