@@ -5872,7 +5872,7 @@ function POLineDrawer({
   const xfDate    = getXFactoryDate(po)
   const isPostDsp = ['In Transit', 'Partially Delivered'].includes(po.status)
 
-  const [drawerTab,       setDrawerTab]       = useState<'supply-chain' | 'product'>('supply-chain')
+  const [drawerTab,       setDrawerTab]       = useState<'status-decisions' | 'product'>('status-decisions')
   const [noteInput,       setNoteInput]       = useState('')
   const [isSimulating,    setIsSimulating]    = useState(false)
   const [pendingProposal, setPendingProposal] = useState<DateChangeProposal | null>(null)
@@ -5956,7 +5956,7 @@ function POLineDrawer({
         {/* Tab bar */}
         <div className="flex border-b border-gray-100 shrink-0 px-5">
           {[
-            { id: 'supply-chain' as const, label: 'Supply chain' },
+            { id: 'status-decisions' as const, label: 'Status & decisions' },
             { id: 'product'      as const, label: 'Product', disabled: !product },
           ].map(t => (
             <button
@@ -5974,8 +5974,8 @@ function POLineDrawer({
           ))}
         </div>
 
-        {/* Supply chain tab */}
-        {drawerTab === 'supply-chain' && (
+        {/* Status & decisions tab */}
+        {drawerTab === 'status-decisions' && (
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
 
           {/* PO summary */}
@@ -6002,6 +6002,23 @@ function POLineDrawer({
             <div className="flex items-center gap-2 text-[11px] text-gray-500">
               <Clock className="w-3.5 h-3.5 text-gray-400 shrink-0" />
               Last chased: {new Date(lastChased).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
+            </div>
+          )}
+
+          {/* Product context strip */}
+          {product && (
+            <div className="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2 border border-gray-100 text-[11px] text-gray-600">
+              <div className="flex items-center gap-3">
+                <span><span className="font-semibold text-gray-900">{product.weeksOfStock.toFixed(1)}w</span> cover</span>
+                <span className="text-gray-300">·</span>
+                <span><span className="font-semibold text-gray-900">{totalOnOrder > 0 ? ((po.quantity / totalOnOrder) * 100).toFixed(0) : 0}%</span> of open orders for this SKU</span>
+              </div>
+              <button
+                onClick={() => setDrawerTab('product')}
+                className="text-indigo-500 hover:text-indigo-700 transition-colors whitespace-nowrap shrink-0 ml-3"
+              >
+                View full product detail →
+              </button>
             </div>
           )}
 
