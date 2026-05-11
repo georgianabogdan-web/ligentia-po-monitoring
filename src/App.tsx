@@ -512,15 +512,15 @@ const SEEDED_THREADS: Record<string, InquiryThread> = {
     agreedCP: null, agreedMOQ: null, flaggedReason: null, internalNotes: '',
   },
   'REC-006': {
-    recId: 'REC-006', supplierId: 'Next Sourcing', status: 'replied', scenario: 'uncertain',
+    recId: 'REC-006', supplierId: 'Next Sourcing', status: 'replied', scenario: 'counter',
     rounds: [{
       roundNumber: 1, sentAt: '2026-04-30',
       emailBody: SEED_R1_COTTONTEE, requestedCP: 13.63,
       supplierReply: {
-        receivedAt: '2026-05-01', offeredCP: 0, moqOffered: 0,
-        leadTimeWeeks: 0, deliveryWindow: '—',
-        accepted: false, scenario: 'uncertain',
-        rawText: `Dear Buying Team,\n\nThank you for reaching out regarding Striped Cotton Tee (SKU-REC006).\n\nWe appreciate the relationship and understand you are reviewing your cost position. At this time, raw material availability remains uncertain due to the ongoing cotton market situation. We are not in a position to confirm a specific CP for this cycle.\n\nWe would be open to revisiting CP terms if the committed volume were to increase substantially. We suggest scheduling a call with your account manager to explore options.\n\nWe look forward to continuing our partnership.\n\nBest regards,\nNext Sourcing`,
+        receivedAt: '2026-05-01', offeredCP: 14.20, moqOffered: 300,
+        leadTimeWeeks: 5, deliveryWindow: '2 Jun – 16 Jun 2026',
+        accepted: false, scenario: 'counter',
+        rawText: `Dear Buying Team,\n\nThank you for your inquiry regarding Striped Cotton Tee (SKU-REC006).\n\nWe appreciate our ongoing partnership and have reviewed your CP request carefully. Given current cotton market conditions and raw material costs, we are unfortunately unable to meet the target of £13.63 at this time.\n\nWe are pleased to offer the following:\n• CP: £14.20 per unit\n• MOQ: 300 units\n• Lead time: 5 weeks\n• Delivery: 2 Jun – 16 Jun 2026\n\nWe believe this reflects a fair position given current input costs, and we remain open to discussing volume commitments that could help us move closer to your target.\n\nBest regards,\nNext Sourcing`,
       },
     }],
     agreedCP: null, agreedMOQ: null, flaggedReason: null, internalNotes: '',
@@ -2478,7 +2478,7 @@ function InquiryDrawer({
   const [mgrComment,        setMgrComment]        = useState('')
   const [cpEditing,         setCpEditing]         = useState(false)
   const [cpOverride,        setCpOverride]        = useState<CpRulesState | null>(null)
-  const [suggestStrategy,   setSuggestStrategy]   = useState<'counter' | 'split' | 'escalate'>('counter')
+  const [_suggestStrategy,  setSuggestStrategy]   = useState<'counter' | 'split' | 'escalate'>('counter')
   const [draftCpOverride,   setDraftCpOverride]   = useState<number | null>(null)
   const [editingAsk,        setEditingAsk]        = useState(false)
 
@@ -3041,36 +3041,63 @@ function InquiryDrawer({
             </div>
           )}
 
-          {/* Agent suggestions — counter scenario only */}
-          {status === 'replied' && scenario === 'counter' && (
-            <div className="bg-indigo-50/70 rounded-xl p-3 border border-indigo-100">
-              <div className="text-[10px] font-semibold text-indigo-600 uppercase tracking-wide mb-2">Agent suggestions</div>
-              <div className="flex items-center gap-2 flex-wrap">
-                {(['counter', 'split', 'escalate'] as const).map(s => (
-                  <button
-                    key={s}
-                    onClick={() => s !== 'escalate' && handleStrategyChange(s)}
-                    title={s === 'escalate' ? 'Coming soon' : undefined}
-                    disabled={s === 'escalate'}
-                    className={`h-7 px-3 rounded-full text-[10px] font-semibold transition-colors border ${
-                      suggestStrategy === s
-                        ? 'bg-indigo-600 text-white border-indigo-600'
-                        : s === 'escalate'
-                        ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
-                        : 'bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-100'
-                    }`}
-                  >
-                    {s === 'counter' ? 'Counter at midpoint' : s === 'split' ? 'Accept split delivery' : 'Escalate to manager'}
-                    {s === 'escalate' && <span className="ml-1 text-[9px] opacity-70">soon</span>}
-                  </button>
-                ))}
+          {/* Strategy recommendation — counter scenario */}
+          {status === 'replied' && scenario === 'counter' && (() => {
+            const offeredCP = lastReply ? (lastReply as SupplierNegReply).offeredCP : null
+            const round1CP  = thread?.rounds[0]?.requestedCP ?? 0
+            const midpointCP = offeredCP !== null ? ((offeredCP + round1CP) / 2) : null
+            const recStrategy: 'counter' | 'split' | 'escalate' =
+              cpDeltaPct >= effectiveCpRules.escalateIfPct ? 'escalate' :
+              cpDeltaPct <= effectiveCpRules.escalateIfPct / 2 ? 'split' :
+              'counter'
+            const recRationale =
+              recStrategy === 'split'    ? 'Margin impact is within tolerance — supplier moved closer to your ask.' :
+              recStrategy === 'escalate' ? 'Offered CP exceeds your target ceiling by ' + cpDeltaPct.toFixed(1) + '%. This needs manager review before further rounds.' :
+              midpointCP !== null ? 'Supplier offered £' + offeredCP!.toFixed(2) + ' vs your £' + round1CP.toFixed(2) + ' ask; midpoint at £' + midpointCP.toFixed(2) + ' is within your concession budget.' :
+              'Meet at midpoint between our ask and their offer — within CP rules.'
+            return (
+              <div className="rounded-xl border border-indigo-100 overflow-hidden">
+                <div className="bg-indigo-50 px-4 py-3 border-b border-indigo-100">
+                  <p className="text-[11px] font-bold text-indigo-800 mb-0.5">
+                    Recommendation: {recStrategy === 'counter' ? 'Counter at midpoint' : recStrategy === 'split' ? 'Accept the split' : 'Escalate to manager'}.
+                  </p>
+                  <p className="text-[11px] text-indigo-700">{recRationale}</p>
+                </div>
+                <div className="bg-white px-4 py-3 flex items-center gap-2 flex-wrap">
+                  {(['counter', 'split', 'escalate'] as const).map(s => (
+                    <button
+                      key={s}
+                      onClick={() => s !== 'escalate' && handleStrategyChange(s)}
+                      disabled={s === 'escalate'}
+                      className={`h-7 px-3 rounded-full text-[10px] font-semibold transition-colors border ${
+                        s === recStrategy
+                          ? 'bg-indigo-600 text-white border-indigo-600'
+                          : s === 'escalate'
+                          ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+                          : 'bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-100'
+                      }`}
+                    >
+                      {s === 'counter' ? 'Counter at midpoint' : s === 'split' ? 'Accept split delivery' : 'Escalate to manager'}
+                      {s === 'escalate' && <span className="ml-1 text-[9px] opacity-70">soon</span>}
+                    </button>
+                  ))}
+                </div>
+                <details className="border-t border-indigo-100">
+                  <summary className="px-4 py-2 text-[10px] text-indigo-500 cursor-pointer hover:text-indigo-700 select-none">
+                    ▸ Why this recommendation?
+                  </summary>
+                  <div className="px-4 pb-3 space-y-1 text-[11px] text-gray-500">
+                    <div>Round: <span className="font-semibold text-gray-700">{lastRound?.roundNumber ?? 1}</span></div>
+                    <div>Your ask: <span className="font-semibold text-gray-700">£{round1CP.toFixed(2)}</span></div>
+                    {offeredCP !== null && <div>Supplier offered: <span className="font-semibold text-gray-700">£{offeredCP.toFixed(2)}</span></div>}
+                    {midpointCP !== null && <div>Midpoint: <span className="font-semibold text-gray-700">£{midpointCP.toFixed(2)}</span></div>}
+                    <div>Escalate threshold: <span className="font-semibold text-gray-700">+{effectiveCpRules.escalateIfPct}%</span></div>
+                    <div>CP delta: <span className={`font-semibold ${cpDeltaColor}`}>{cpDeltaLabel}</span></div>
+                  </div>
+                </details>
               </div>
-              <div className="text-[10px] text-indigo-500 mt-1.5">
-                {suggestStrategy === 'counter' && 'Meet at midpoint between our ask and their offer — within CP rules'}
-                {suggestStrategy === 'split' && 'Accept 1,800 units first shipment (by 28 May), balance by firm date'}
-              </div>
-            </div>
-          )}
+            )
+          })()}
 
           {/* Scenario C: uncertain → agent flags for human review */}
           {status === 'replied' && scenario === 'uncertain' && (
@@ -6574,6 +6601,93 @@ export function KanbanPanel({
   )
 }
 
+// ── PO Monitoring helpers ─────────────────────────────────────────────────────
+function getRelationshipPattern(sup: Supplier): 'structural' | 'concentration' | 'routine' {
+  if (sup.onTimeRate < 60) return 'structural'
+  if (sup.openPOs >= 20 && sup.onTimeRate < 80) return 'concentration'
+  return 'routine'
+}
+
+const SUPPLIER_COVER_WEEKS: Record<string, number> = {
+  ET: 7, SS: 5, NK: 8, BA: 9, TB: 8, UF: 8, LL: 9,
+}
+
+interface PORecommendation {
+  action:          'accept_late' | 'cpr' | 'cancel' | 'chase'
+  primaryLabel:    string
+  primaryForecast: string
+  rationale:       string
+  altOptions:      Array<{ key: 'accept_late' | 'cpr' | 'cancel' | 'chase'; label: string; forecast: string }>
+}
+
+function getPORecommendation(
+  _g: ActionGroup,
+  sup: Supplier,
+  maxDaysOverdue: number,
+  orderVal: number,
+  cprPct: number
+): PORecommendation {
+  const coverWeeks = SUPPLIER_COVER_WEEKS[sup.id] ?? 6
+  const cprSaving  = Math.round(orderVal * cprPct / 100)
+  const delayWeeks = Math.ceil(maxDaysOverdue / 7)
+  const pattern    = getRelationshipPattern(sup)
+
+  const ALL_OPTS: PORecommendation['altOptions'] = [
+    { key: 'accept_late', label: 'Accept late (+' + delayWeeks + 'w intake)',   forecast: 'Cover: ' + coverWeeks + 'w → ' + Math.max(0, coverWeeks - delayWeeks) + 'w · Margin preserved' },
+    { key: 'cpr',         label: 'Request CPR ' + cprPct + '%',                 forecast: 'Margin recovered: +£' + cprSaving.toLocaleString() + ' · Relationship risk moderate' },
+    { key: 'cancel',      label: 'Cancel PO and resource',                       forecast: 'Stockouts likely · £' + orderVal.toLocaleString() + ' commitment cancelled' },
+    { key: 'chase',       label: 'Chase first (24h deadline)',                   forecast: 'Supplier notified · Resolution expected 48h' },
+  ]
+
+  if (pattern === 'concentration') {
+    return {
+      action: 'chase',
+      primaryLabel: 'Review concentration with ' + sup.name,
+      primaryForecast: sup.openPOs + ' open POs · Portfolio risk at ' + sup.onTimeRate + '% OTR',
+      rationale: sup.openPOs + ' open POs at ' + sup.onTimeRate + '% OTR creates portfolio risk across your range. Review your exposure before chasing individual POs.',
+      altOptions: ALL_OPTS.filter(o => o.key !== 'chase'),
+    }
+  }
+
+  if (coverWeeks >= 6 && maxDaysOverdue < 60) {
+    return {
+      action: 'accept_late',
+      primaryLabel: 'Accept late delivery (+' + delayWeeks + 'w intake)',
+      primaryForecast: 'Cover holds: ' + coverWeeks + 'w → ' + Math.max(0, coverWeeks - delayWeeks) + 'w by intake · Margin preserved',
+      rationale: 'You have ' + coverWeeks + ' weeks of cover at current sell-through, so the late intake won\'t cause stockouts. ' + (pattern === 'structural' ? sup.name + '\'s OTR is ' + sup.onTimeRate + '% -- cancelling or applying CPR pressure risks the relationship without improving reliability.' : 'Chasing aggressively risks the relationship for marginal gain.'),
+      altOptions: ALL_OPTS.filter(o => o.key !== 'accept_late'),
+    }
+  }
+
+  if (coverWeeks < 4 && sup.onTimeRate >= 70) {
+    return {
+      action: 'cpr',
+      primaryLabel: 'Request CPR ' + cprPct + '% (+£' + cprSaving.toLocaleString() + ' margin)',
+      primaryForecast: 'Margin recovered: +£' + cprSaving.toLocaleString() + ' · ' + sup.name + ' relationship manageable',
+      rationale: 'Cover is low at ' + coverWeeks + ' weeks -- you need this stock, but the ' + maxDaysOverdue + 'd delay warrants a commercial concession. A ' + cprPct + '% CPR recovers £' + cprSaving.toLocaleString() + ' and is proportionate given ' + sup.name + '\'s ' + sup.onTimeRate + '% OTR.',
+      altOptions: ALL_OPTS.filter(o => o.key !== 'cpr'),
+    }
+  }
+
+  if (sup.onTimeRate < 60 && maxDaysOverdue >= 30) {
+    return {
+      action: 'cancel',
+      primaryLabel: 'Cancel PO and resource',
+      primaryForecast: 'Stockouts likely · £' + orderVal.toLocaleString() + ' commitment cancelled',
+      rationale: sup.name + '\'s OTR is ' + sup.onTimeRate + '% and this PO is ' + maxDaysOverdue + ' days late. Continued commitment concentrates risk with a structurally unreliable supplier. Source alternatives now.',
+      altOptions: ALL_OPTS.filter(o => o.key !== 'cancel'),
+    }
+  }
+
+  return {
+    action: 'chase',
+    primaryLabel: 'Chase first (24h deadline)',
+    primaryForecast: 'Supplier notified · Resolution expected 48h',
+    rationale: sup.name + ' typically resolves delays within 48 hours when chased directly. Send a formal chase with a 24-hour deadline before escalating to commercial decisions.',
+    altOptions: ALL_OPTS.filter(o => o.key !== 'chase'),
+  }
+}
+
 // ── PO Monitoring View ────────────────────────────────────────────────────────
 function POMonitoringView({ initialOpenPO, onNavigateToNeg: _onNavigateToNeg }: { initialOpenPO?: string | null; onNavigateToNeg?: (recId: string) => void }) {
   const [subTab,           setSubTab]           = useState<'actions' | 'allpos' | 'suppliers' | 'agentlog'>('actions')
@@ -7336,6 +7450,12 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg: _onNavigateToNeg }: 
                             <Building2 className="w-3 h-3 text-indigo-600" />
                           </div>
                           <span className="text-xs font-bold text-gray-700">{sup?.name ?? g.supplierId}</span>
+                          {sup && (() => {
+                            const pat = getRelationshipPattern(sup)
+                            if (pat === 'structural') return <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-700">Structural underperformer</span>
+                            if (pat === 'concentration') return <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">High concentration &middot; {sup.openPOs} open POs</span>
+                            return null
+                          })()}
                           <div className="flex items-center gap-1.5 flex-wrap">
                             {sup && (
                               <>
@@ -7540,49 +7660,125 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg: _onNavigateToNeg }: 
                       <div className="border-b border-gray-100 px-6 py-4 shrink-0">
                         {drawerUiState === 'A' ? (
                           <>
-                            <p className="text-[11px] font-semibold text-gray-500 mb-3">What would you like to do?</p>
-                            <div className={`grid gap-2.5 mb-3 ${drawerGroup.type === 'at_risk' ? 'grid-cols-3' : 'grid-cols-2'}`}>
-                              {(drawerGroup.type === 'at_risk' ? [
-                                { key: 'approve_date', label: 'Approve',               sub: 'Accept new date',            cls: 'border-green-200 hover:border-green-400 hover:bg-green-50' },
-                                { key: 'counter',      label: 'Counter-propose',       sub: 'Suggest alternative date',   cls: 'border-amber-200 hover:border-amber-400 hover:bg-amber-50' },
-                                { key: 'reject',       label: 'Reject',                sub: 'Decline proposed date',      cls: 'border-red-200 hover:border-red-400 hover:bg-red-50' },
-                              ] : drawerGroup.type === 'late_dc' ? [
-                                { key: 'confirm_booking', label: 'Confirm booking',        sub: 'Lock in current slot',        cls: 'border-green-200 hover:border-green-400 hover:bg-green-50' },
-                                { key: 'alt_slot',        label: 'Request alternate slot', sub: 'Ask for different date/time', cls: 'border-amber-200 hover:border-amber-400 hover:bg-amber-50' },
-                              ] : [
-                                { key: 'chase',    label: 'Chase supplier',          sub: 'Send urgent chase email',     cls: 'border-purple-200 hover:border-purple-400 hover:bg-purple-50' },
-                                { key: 'decision', label: 'Make commercial decision', sub: 'Cancel, CPR, or accept late', cls: 'border-indigo-200 hover:border-indigo-400 hover:bg-indigo-50' },
-                              ]).map(opt => (
-                                <button
-                                  key={opt.key}
-                                  onClick={() => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: opt.key }))}
-                                  className={`border-2 rounded-xl p-3 text-left transition-all min-h-[56px] ${opt.cls}`}
-                                >
-                                  <div className="text-[12px] font-bold text-gray-800 leading-tight">{opt.label}</div>
-                                  <div className="text-[10px] text-gray-500 mt-0.5 leading-tight">{opt.sub}</div>
-                                </button>
-                              ))}
-                            </div>
-                            <div className="flex items-center gap-3">
-                              {isSnoozeConfirm ? (
-                                <span className="text-[11px] text-gray-600">Reappear in 3 days?
-                                  <button onClick={() => { setSnoozedCards(prev => { const n = new Set(prev); n.add(drawerCardKey!); return n }); setDrawerCardKey(null) }} className="ml-1.5 font-semibold text-indigo-600 hover:text-indigo-800">Confirm</button>
-                                  <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: false }))} className="ml-1.5 text-gray-400 hover:text-gray-600">Cancel</button>
-                                </span>
-                              ) : isDismissConfirm ? (
-                                <span className="text-[11px] text-gray-600">Dismiss without action?
-                                  <button onClick={() => { setSnoozedCards(prev => { const n = new Set(prev); n.add(drawerCardKey!); return n }); setDrawerCardKey(null) }} className="ml-1.5 font-semibold text-red-600 hover:text-red-800">Confirm</button>
-                                  <button onClick={() => setDismissConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: false }))} className="ml-1.5 text-gray-400 hover:text-gray-600">Cancel</button>
-                                </span>
-                              ) : (
+                            {drawerGroup.type === 'overdue' ? (() => {
+                              const poRec = getPORecommendation(drawerGroup, drawerSup, drawerMaxOverdue, drawerOrderVal, cprPct)
+                              const pattern = getRelationshipPattern(drawerSup)
+                              const recBg = pattern === 'structural' ? 'bg-red-50 border-red-200' : pattern === 'concentration' ? 'bg-amber-50 border-amber-200' : 'bg-indigo-50 border-indigo-100'
+                              const recHd = pattern === 'structural' ? 'text-red-800' : pattern === 'concentration' ? 'text-amber-800' : 'text-indigo-800'
+                              const recBody = pattern === 'structural' ? 'text-red-700' : pattern === 'concentration' ? 'text-amber-700' : 'text-indigo-700'
+                              return (
                                 <>
-                                  <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors">Snooze 3 days</button>
-                                  {drawerGroup.type === 'overdue' && (
-                                    <button onClick={() => setDismissConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors">Dismiss</button>
-                                  )}
+                                  <p className="text-[13px] font-bold text-gray-900 mb-0.5">What should we do about {drawerSup.name}?</p>
+                                  <p className="text-[11px] text-gray-400 mb-3">
+                                    {drawerGroup.pos.length} PO{drawerGroup.pos.length > 1 ? 's' : ''} &middot; £{drawerOrderVal.toLocaleString()} at risk &middot; {drawerMaxOverdue}d overdue
+                                  </p>
+                                  <div className={`border rounded-xl px-4 py-3 mb-3 ${recBg}`}>
+                                    <p className={`text-[11px] font-bold mb-1 ${recHd}`}>Recommendation: {poRec.primaryLabel.split('(')[0].trim().replace(/\+$/, '').trim()}.</p>
+                                    <p className={`text-[11px] leading-relaxed ${recBody}`}>{poRec.rationale}</p>
+                                  </div>
+                                  <button
+                                    onClick={() => {
+                                      if (poRec.action === 'chase') {
+                                        setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: 'chase' }))
+                                      } else {
+                                        setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: 'decision' }))
+                                        setDrawerDecision(prev => ({ ...prev, [drawerCardKey!]: poRec.action as 'accept_late' | 'cpr' | 'cancel' }))
+                                      }
+                                    }}
+                                    className="w-full rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-3 text-left mb-3 transition-colors"
+                                  >
+                                    <div className="text-[12px] font-bold">{poRec.primaryLabel}</div>
+                                    <div className="text-[10px] text-indigo-200 mt-0.5">{poRec.primaryForecast}</div>
+                                  </button>
+                                  <div className="grid grid-cols-3 gap-2 mb-3">
+                                    {poRec.altOptions.map(opt => (
+                                      <button
+                                        key={opt.key}
+                                        onClick={() => {
+                                          if (opt.key === 'chase') {
+                                            setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: 'chase' }))
+                                          } else {
+                                            setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: 'decision' }))
+                                            setDrawerDecision(prev => ({ ...prev, [drawerCardKey!]: opt.key as 'accept_late' | 'cpr' | 'cancel' }))
+                                          }
+                                        }}
+                                        className="border border-gray-200 rounded-xl px-2 py-2 text-left hover:bg-gray-50 hover:border-gray-300 transition-colors"
+                                      >
+                                        <div className="text-[11px] font-semibold text-gray-700 leading-tight">{opt.label}</div>
+                                        <div className="text-[10px] text-gray-400 mt-0.5 leading-tight">{opt.forecast}</div>
+                                      </button>
+                                    ))}
+                                  </div>
+                                  <details className="mb-3">
+                                    <summary className="text-[11px] text-gray-400 cursor-pointer hover:text-gray-600 select-none">
+                                      ▸ Why this recommendation?
+                                    </summary>
+                                    <div className="mt-2 space-y-1 pl-3 border-l-2 border-gray-100">
+                                      <div className="text-[11px] text-gray-500">OTR: <span className="font-semibold text-gray-700">{drawerSup.onTimeRate}%</span></div>
+                                      <div className="text-[11px] text-gray-500">Avg delay: <span className="font-semibold text-gray-700">{drawerSup.avgDelayDays}d</span></div>
+                                      <div className="text-[11px] text-gray-500">Days overdue (max): <span className="font-semibold text-gray-700">{drawerMaxOverdue}d</span></div>
+                                      <div className="text-[11px] text-gray-500">Est. cover remaining: <span className="font-semibold text-gray-700">~{SUPPLIER_COVER_WEEKS[drawerSup.id] ?? 6}w</span></div>
+                                      <div className="text-[11px] text-gray-500">Open POs: <span className="font-semibold text-gray-700">{drawerSup.openPOs}</span></div>
+                                      <div className="text-[11px] text-gray-500">Pattern: <span className="font-semibold text-gray-700 capitalize">{pattern}</span></div>
+                                    </div>
+                                  </details>
+                                  <div className="border border-dashed border-gray-200 rounded-xl px-4 py-4 text-center">
+                                    <p className="text-[11px] text-gray-400">Once you choose an action, the agent will draft the communication or record the decision.</p>
+                                  </div>
+                                  <div className="flex items-center gap-3 mt-3">
+                                    {isSnoozeConfirm ? (
+                                      <span className="text-[11px] text-gray-600">Reappear in 3 days?
+                                        <button onClick={() => { setSnoozedCards(prev => { const n = new Set(prev); n.add(drawerCardKey!); return n }); setDrawerCardKey(null) }} className="ml-1.5 font-semibold text-indigo-600 hover:text-indigo-800">Confirm</button>
+                                        <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: false }))} className="ml-1.5 text-gray-400 hover:text-gray-600">Cancel</button>
+                                      </span>
+                                    ) : (
+                                      <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors">Snooze 3 days</button>
+                                    )}
+                                  </div>
                                 </>
-                              )}
-                            </div>
+                              )
+                            })() : (
+                              <>
+                                <p className="text-[11px] font-semibold text-gray-500 mb-3">What would you like to do?</p>
+                                <div className={`grid gap-2.5 mb-3 ${drawerGroup.type === 'at_risk' ? 'grid-cols-3' : 'grid-cols-2'}`}>
+                                  {(drawerGroup.type === 'at_risk' ? [
+                                    { key: 'approve_date', label: 'Approve',               sub: 'Accept new date',            cls: 'border-green-200 hover:border-green-400 hover:bg-green-50' },
+                                    { key: 'counter',      label: 'Counter-propose',       sub: 'Suggest alternative date',   cls: 'border-amber-200 hover:border-amber-400 hover:bg-amber-50' },
+                                    { key: 'reject',       label: 'Reject',                sub: 'Decline proposed date',      cls: 'border-red-200 hover:border-red-400 hover:bg-red-50' },
+                                  ] : [
+                                    { key: 'confirm_booking', label: 'Confirm booking',        sub: 'Lock in current slot',        cls: 'border-green-200 hover:border-green-400 hover:bg-green-50' },
+                                    { key: 'alt_slot',        label: 'Request alternate slot', sub: 'Ask for different date/time', cls: 'border-amber-200 hover:border-amber-400 hover:bg-amber-50' },
+                                  ]).map(opt => (
+                                    <button
+                                      key={opt.key}
+                                      onClick={() => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: opt.key }))}
+                                      className={`border-2 rounded-xl p-3 text-left transition-all min-h-[56px] ${opt.cls}`}
+                                    >
+                                      <div className="text-[12px] font-bold text-gray-800 leading-tight">{opt.label}</div>
+                                      <div className="text-[10px] text-gray-500 mt-0.5 leading-tight">{opt.sub}</div>
+                                    </button>
+                                  ))}
+                                </div>
+                                <div className="flex items-center gap-3">
+                                  {isSnoozeConfirm ? (
+                                    <span className="text-[11px] text-gray-600">Reappear in 3 days?
+                                      <button onClick={() => { setSnoozedCards(prev => { const n = new Set(prev); n.add(drawerCardKey!); return n }); setDrawerCardKey(null) }} className="ml-1.5 font-semibold text-indigo-600 hover:text-indigo-800">Confirm</button>
+                                      <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: false }))} className="ml-1.5 text-gray-400 hover:text-gray-600">Cancel</button>
+                                    </span>
+                                  ) : isDismissConfirm ? (
+                                    <span className="text-[11px] text-gray-600">Dismiss without action?
+                                      <button onClick={() => { setSnoozedCards(prev => { const n = new Set(prev); n.add(drawerCardKey!); return n }); setDrawerCardKey(null) }} className="ml-1.5 font-semibold text-red-600 hover:text-red-800">Confirm</button>
+                                      <button onClick={() => setDismissConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: false }))} className="ml-1.5 text-gray-400 hover:text-gray-600">Cancel</button>
+                                    </span>
+                                  ) : (
+                                    <>
+                                      <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors">Snooze 3 days</button>
+                                      <button onClick={() => setDismissConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors">Dismiss</button>
+                                    </>
+                                  )}
+                                </div>
+                              </>
+                            )}
                           </>
                         ) : (
                           <>
@@ -7596,13 +7792,13 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg: _onNavigateToNeg }: 
                             {drawerCurrentPill === 'decision' && (
                               <div className="mt-3 space-y-2.5">
                                 <p className="text-[11px] text-gray-500 italic leading-relaxed">
-                                  Agent observation: {drawerMaxOverdue}d overdue · OTR {drawerSup.onTimeRate}% · {drawerSup.avgDelayDays}d avg delay — accepting late is lowest-risk if cover is sufficient.
+                                  {drawerMaxOverdue}d overdue · OTR {drawerSup.onTimeRate}% · Avg delay {drawerSup.avgDelayDays}d · Est. cover ~{SUPPLIER_COVER_WEEKS[drawerSup.id] ?? 6}w
                                 </p>
                                 <div className="flex gap-2">
                                   {([
-                                    { key: 'cancel'      as const, label: 'Cancel',         sub: `-3 wks cover`,                    cls: 'border-red-200 bg-red-50 hover:bg-red-100 text-red-800' },
-                                    { key: 'cpr'         as const, label: `CPR ${cprPct}%`, sub: `+£${cprSaving.toLocaleString()}`, cls: 'border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800' },
-                                    { key: 'accept_late' as const, label: 'Accept late',    sub: `+${Math.ceil(drawerMaxOverdue/7)}w intake`, cls: 'border-green-200 bg-green-50 hover:bg-green-100 text-green-800' },
+                                    { key: 'cancel'      as const, label: 'Cancel',         sub: `Cover loss: ~3 weeks before intake`,    cls: 'border-red-200 bg-red-50 hover:bg-red-100 text-red-800' },
+                                    { key: 'cpr'         as const, label: `CPR ${cprPct}%`, sub: `Margin recovered: £${cprSaving.toLocaleString()}`, cls: 'border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800' },
+                                    { key: 'accept_late' as const, label: 'Accept late',    sub: `Intake delayed: ${Math.ceil(drawerMaxOverdue/7)} weeks`, cls: 'border-green-200 bg-green-50 hover:bg-green-100 text-green-800' },
                                   ] as const).map(opt => {
                                     const chosen = drawerDecChoice === opt.key
                                     return (
@@ -7621,13 +7817,6 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg: _onNavigateToNeg }: 
                             )}
                           </>
                         )}
-                      </div>
-                    )}
-
-                    {/* DP1 agent observation */}
-                    {(drawerUiState === 'A' || drawerUiState === 'B') && (
-                      <div className="px-6 py-2.5 border-b border-gray-50 shrink-0">
-                        <p className="text-[11px] text-gray-400 italic leading-relaxed">{agentRec(drawerGroup, drawerState ?? 'agent-drafted')}</p>
                       </div>
                     )}
 
@@ -7891,8 +8080,8 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg: _onNavigateToNeg }: 
 
                     {/* ── Bottom section (state-gated) ─────────────────────────────── */}
 
-                    {/* State A: draft preview — select an action above to send */}
-                    {drawerUiState === 'A' && (
+                    {/* State A: draft preview — only for at_risk/late_dc (overdue uses recommendation panel placeholder) */}
+                    {drawerUiState === 'A' && drawerGroup.type !== 'overdue' && (
                       <div className="shrink-0 border-t border-gray-100 px-6 py-4 bg-white space-y-2">
                         <div className="flex items-center gap-2">
                           <span className="text-[10px] text-gray-400 shrink-0 w-5">To:</span>
