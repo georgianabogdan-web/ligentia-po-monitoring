@@ -4180,7 +4180,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                     <button onClick={() => setOpenInquiryId(p.id)}
                       className="h-7 px-2.5 text-[10px] font-medium rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 transition-colors flex items-center gap-1"
                       title="Send supplier inquiry">
-                      <Mail className="w-3 h-3" />Inquire
+                      <Mail className="w-3 h-3" />Supplier Inquiry
                     </button>
                   </div>
                 </div>
@@ -5097,7 +5097,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                                 className="h-6 px-2 text-[10px] font-medium rounded-md border border-gray-200 text-gray-500 hover:bg-gray-50 transition-colors flex items-center gap-1"
                                 title="Send supplier inquiry"
                               >
-                                <Mail className="w-2.5 h-2.5" />Inquire
+                                <Mail className="w-2.5 h-2.5" />Supplier Inquiry
                               </button>
                               {inquiries[p.id] && inquiries[p.id].status !== 'idle' && (() => {
                                 const nsCfg = NEG_STATUS_CFG[inquiries[p.id].status]
@@ -5962,7 +5962,7 @@ function ManagerReorderView() {
                               className="h-6 px-2 text-[10px] font-medium rounded-md border border-gray-200 text-gray-500 hover:bg-gray-50 transition-colors flex items-center gap-1"
                               title="Send supplier inquiry"
                             >
-                              <Mail className="w-2.5 h-2.5" />Inquire
+                              <Mail className="w-2.5 h-2.5" />Supplier Inquiry
                             </button>
                             {inquiries[p.id] && inquiries[p.id].status !== 'idle' && (() => {
                               const t = inquiries[p.id]
