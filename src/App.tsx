@@ -5,7 +5,7 @@ import {
   Download, Search, Star, ArrowRight, Building2,
   ChevronDown, RefreshCw, Activity,
   Bot, User, X, Clock, Mail, Check,
-  Calendar, MessageSquare, Send, ChevronRight, ChevronLeft, Plus, AlertCircle, Info,
+  Calendar, MessageSquare, Send, ChevronRight, ChevronLeft, Plus, AlertCircle, Info, Pencil,
 } from 'lucide-react'
 import { ComposedChart, LineChart, Cell, Bar, Line, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceArea, ReferenceLine } from 'recharts'
 import { INVENTORY_PRODUCTS, REORDER_RECOMMENDATIONS } from './mockData'
@@ -2448,25 +2448,24 @@ function evalCpDecision(cpDeltaPct: number, lastReply: { offeredCP: number } | n
 
 // ── Inquiry Drawer ────────────────────────────────────────────────────────────
 function InquiryDrawer({
-  rec, thread, onClose, onUpdate, isManager, onApprove, onReject, globalCpRules, onNavigateToPO,
+  rec, thread, onClose, onUpdate, isManager, onApprove, onReject, globalCpRules, onUpdateGlobalCpRules, onNavigateToPO,
 }: {
-  rec:              typeof REORDER_RECOMMENDATIONS[0]
-  thread:           InquiryThread | undefined
-  onClose:          () => void
-  onUpdate:         (t: InquiryThread) => void
-  isManager?:       boolean
-  onApprove?:       () => void
-  onReject?:        () => void
-  globalCpRules:    CpRulesState
-  onNavigateToPO?:  (poId: string) => void
+  rec:                   typeof REORDER_RECOMMENDATIONS[0]
+  thread:                InquiryThread | undefined
+  onClose:               () => void
+  onUpdate:              (t: InquiryThread) => void
+  isManager?:            boolean
+  onApprove?:            () => void
+  onReject?:             () => void
+  globalCpRules:         CpRulesState
+  onUpdateGlobalCpRules?: (r: CpRulesState) => void
+  onNavigateToPO?:       (poId: string) => void
 }) {
-  const ff      = getFitFamily(rec.id)
   const status: NegotiationStatus = thread?.status ?? 'idle'
 
   const latestThread = useRef(thread)
   useEffect(() => { latestThread.current = thread }, [thread])
 
-  const [contextOpen,       setContextOpen]       = useState(false)
   const [editedBody,        setEditedBody]        = useState('')
   const [originalBody,      setOriginalBody]      = useState('')
   const [followUpBody,      setFollowUpBody]      = useState('')
@@ -2477,11 +2476,17 @@ function InquiryDrawer({
   const [alertSent,         setAlertSent]         = useState(false)
   const [appliedToBuySheet, setAppliedToBuySheet] = useState(false)
   const [mgrComment,        setMgrComment]        = useState('')
-  const [cpEditing,         setCpEditing]         = useState(false)
-  const [cpOverride,        setCpOverride]        = useState<CpRulesState | null>(null)
   const [_suggestStrategy,  setSuggestStrategy]   = useState<'counter' | 'split' | 'escalate'>('counter')
   const [draftCpOverride,   setDraftCpOverride]   = useState<number | null>(null)
-  const [editingAsk,        setEditingAsk]        = useState(false)
+  const [draftWalkAway,     setDraftWalkAway]     = useState<number | null>(null)
+  const [draftMaxRounds,    setDraftMaxRounds]    = useState<number | null>(null)
+  const [editingTargetCp,   setEditingTargetCp]   = useState(false)
+  const [editingWalkAway,   setEditingWalkAway]   = useState(false)
+  const [editingMaxRounds,  setEditingMaxRounds]  = useState(false)
+  const [rulesDialogOpen,   setRulesDialogOpen]   = useState(false)
+  const [dialogOpeningAsk,  setDialogOpeningAsk]  = useState(globalCpRules.openingAskPct)
+  const [dialogEscalateIf,  setDialogEscalateIf]  = useState(globalCpRules.escalateIfPct)
+  const [dialogMaxRoundsVal,setDialogMaxRoundsVal]= useState(globalCpRules.maxRounds)
 
   // Auto-generate draft on open
   useEffect(() => {
@@ -2623,9 +2628,8 @@ function InquiryDrawer({
   const exFactory    = new Date(today); exFactory.setDate(today.getDate() + (sup?.contractualLeadTimeDays ?? 42))
   const buyDlStr     = buyDeadline.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
   const exFactoryStr = exFactory.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
-  const todayStr     = today.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
 
-  const effectiveCpRules = cpOverride ?? globalCpRules
+  const effectiveCpRules = globalCpRules
 
   const cpDeltaPct   = lastReply ? ((lastReply.offeredCP - rec.costPrice) / rec.costPrice * 100) : 0
   const cpDeltaLabel = cpDeltaPct >= 0 ? `+${cpDeltaPct.toFixed(1)}%` : `${cpDeltaPct.toFixed(1)}%`
@@ -2634,17 +2638,27 @@ function InquiryDrawer({
   const currentMarginPct  = ((rec.sellingPrice - rec.costPrice) / rec.sellingPrice * 100).toFixed(1)
   const agreedMarginPct   = thread?.agreedCP ? ((rec.sellingPrice - thread.agreedCP) / rec.sellingPrice * 100).toFixed(1) : null
 
-  // "Why this ask" panel derived values
-  const ANCHOR_LABELS: Record<string, string> = {
-    Beauty:      'Category benchmark · Beauty / volume tier 3,000+',
-    Clothing:    'Category benchmark · Clothing / volume tier 2,000+',
-    Footwear:    'Category benchmark · Footwear / volume tier 1,500+',
-    Accessories: 'Category benchmark · Accessories / volume tier 1,000+',
+  // Volume tier thresholds per category (from CP playbook)
+  const TIER_THRESHOLDS: Record<string, number> = {
+    Beauty:      3000,
+    Clothing:    2000,
+    Footwear:    1500,
+    Accessories: 1000,
   }
-  const anchorLabel    = ANCHOR_LABELS[rec.category] ?? `${rec.category} category benchmark`
-  const walkAwayPct    = Math.ceil(effectiveCpRules.openingAskPct / 2)
-  const roundRequestedCP = lastRound?.requestedCP ?? calcRequestedCP(rec.costPrice, 1)
-  const effectiveDraftCP = draftCpOverride ?? roundRequestedCP
+  const tierThreshold      = TIER_THRESHOLDS[rec.category] ?? 1000
+  const tierThresholdLabel = tierThreshold.toLocaleString('en-GB')
+
+  const walkAwayPctDefault   = Math.ceil(effectiveCpRules.openingAskPct / 2)
+  const walkAwayPriceDefault = Math.round(rec.costPrice * (1 - walkAwayPctDefault / 100) * 100) / 100
+  const roundRequestedCP     = lastRound?.requestedCP ?? calcRequestedCP(rec.costPrice, 1)
+  const effectiveDraftCP     = draftCpOverride ?? roundRequestedCP
+  const effectiveWalkAway    = draftWalkAway   ?? walkAwayPriceDefault
+  const effectiveMaxRounds   = draftMaxRounds  ?? effectiveCpRules.maxRounds
+
+  // Days-until helpers for "Deal facts"
+  const daysFromToday = (d: Date) => Math.max(0, Math.round((d.getTime() - today.getTime()) / 86400000))
+  const buyDaysOut    = daysFromToday(buyDeadline)
+  const exFactoryOut  = daysFromToday(exFactory)
 
   const exFactoryRecDt   = rec.exFactoryDate ? new Date(rec.exFactoryDate) : null
   const weeksToExFactory = exFactoryRecDt ? (exFactoryRecDt.getTime() - today.getTime()) / (7 * 86400000) : null
@@ -2683,6 +2697,7 @@ function InquiryDrawer({
     'bg-blue-100 text-blue-700'
 
   return (
+    <>
     <div className="fixed inset-0 z-50 flex">
       <div className="flex-1 bg-black/30" onClick={onClose} />
       <div className="w-[560px] bg-white h-full flex flex-col shadow-2xl overflow-hidden">
@@ -2697,20 +2712,6 @@ function InquiryDrawer({
               </span>
             </div>
             <div className="text-xs text-gray-400">{rec.supplier} · {rec.sku}</div>
-            <div className="flex items-center gap-1.5 flex-wrap mt-2">
-              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-100">
-                CP target −{effectiveCpRules.openingAskPct}%
-              </span>
-              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-50 text-amber-700 border border-amber-100">
-                Escalate &gt;{effectiveCpRules.escalateIfPct}%
-              </span>
-              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-gray-100 text-gray-600 border border-gray-200">
-                Buy by {buyDlStr}
-              </span>
-              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-gray-100 text-gray-600 border border-gray-200">
-                {lineValue}
-              </span>
-            </div>
           </div>
           <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 transition-colors shrink-0 mt-0.5">
             <X className="w-4 h-4" />
@@ -2755,180 +2756,194 @@ function InquiryDrawer({
             </div>
           ))}
 
-          {/* Why this ask — visible when draft is open */}
-          {status === 'draft' && (
-            <div className="bg-indigo-50 border border-indigo-200 rounded-xl overflow-hidden">
-              <div className="flex items-center justify-between px-4 py-2.5 border-b border-indigo-100">
-                <span className="text-[11px] font-semibold text-indigo-700">Why this ask</span>
+          {/* Context — single panel, always visible */}
+          <div className="border border-gray-200 rounded-xl bg-white">
+            <div className="px-4 py-4 space-y-4">
+
+              {/* Section 1 — This ask */}
+              <div>
+                <div className="mb-3">
+                  <div className="text-[11px] font-semibold text-gray-700">This ask</div>
+                  <div className="text-[10px] text-gray-400">One-off, applies to this draft only.</div>
+                </div>
+                <div className="space-y-2">
+                  {/* Target CP */}
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[11px] text-gray-500">Target CP</span>
+                    {editingTargetCp ? (
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] text-gray-400">£</span>
+                        <input
+                          type="number" step="0.01" min={0}
+                          value={effectiveDraftCP}
+                          onChange={e => setDraftCpOverride(Number(e.target.value))}
+                          autoFocus
+                          className="w-24 h-7 rounded-md border border-gray-200 px-2 text-xs font-semibold text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
+                        />
+                        <button
+                          onClick={() => setEditingTargetCp(false)}
+                          className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800"
+                        >
+                          Done
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-semibold text-gray-800">£{effectiveDraftCP.toFixed(2)}</span>
+                        <button
+                          onClick={() => setEditingTargetCp(true)}
+                          className="text-gray-400 hover:text-gray-600 transition-colors"
+                          aria-label="Edit target CP"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Walk-away */}
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[11px] text-gray-500">Walk-away</span>
+                    {editingWalkAway ? (
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] text-gray-400">£</span>
+                        <input
+                          type="number" step="0.01" min={0}
+                          value={effectiveWalkAway}
+                          onChange={e => setDraftWalkAway(Number(e.target.value))}
+                          autoFocus
+                          className="w-24 h-7 rounded-md border border-gray-200 px-2 text-xs font-semibold text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
+                        />
+                        <button
+                          onClick={() => setEditingWalkAway(false)}
+                          className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800"
+                        >
+                          Done
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-semibold text-gray-800">£{effectiveWalkAway.toFixed(2)}</span>
+                        <button
+                          onClick={() => setEditingWalkAway(true)}
+                          className="text-gray-400 hover:text-gray-600 transition-colors"
+                          aria-label="Edit walk-away"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Max rounds */}
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[11px] text-gray-500">Max rounds</span>
+                    {editingMaxRounds ? (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number" step="1" min={1} max={10}
+                          value={effectiveMaxRounds}
+                          onChange={e => setDraftMaxRounds(Number(e.target.value))}
+                          autoFocus
+                          className="w-16 h-7 rounded-md border border-gray-200 px-2 text-xs font-semibold text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
+                        />
+                        <button
+                          onClick={() => setEditingMaxRounds(false)}
+                          className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800"
+                        >
+                          Done
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-semibold text-gray-800">{effectiveMaxRounds}</span>
+                        <button
+                          onClick={() => setEditingMaxRounds(true)}
+                          className="text-gray-400 hover:text-gray-600 transition-colors"
+                          aria-label="Edit max rounds"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="border-t border-gray-100" />
+
+              {/* Section 2 — Deal facts (read-only) */}
+              <div>
+                <div className="mb-3">
+                  <div className="text-[11px] font-semibold text-gray-700">Deal facts</div>
+                  <div className="text-[10px] text-gray-400">Read-only.</div>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[11px] text-gray-500">Line value</span>
+                    <span className="text-xs font-semibold text-gray-800">{lineValue}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[11px] text-gray-500">Relationship</span>
+                    <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold ${relColors}`}>{relTier}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[11px] text-gray-500">Buy decision</span>
+                    <span className="text-xs font-semibold text-gray-800">
+                      {buyDlStr} <span className="text-gray-400 font-normal">· {buyDaysOut} days</span>
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[11px] text-gray-500">Ex-factory</span>
+                    <span className="text-xs font-semibold text-gray-800">
+                      {exFactoryStr} <span className="text-gray-400 font-normal">· {exFactoryOut} days</span>
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[11px] text-gray-500">Current CP</span>
+                    <span className="text-xs font-semibold text-gray-800">£{rec.costPrice.toFixed(2)}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="border-t border-gray-100" />
+
+              {/* Section 3 — Negotiation rules (global, from playbook) */}
+              <div>
+                <div className="mb-3">
+                  <div className="text-[11px] font-semibold text-gray-700">Negotiation rules</div>
+                  <div className="text-[10px] text-gray-400">
+                    Apply to all {rec.category} / volume {tierThresholdLabel}+ — from your CP playbook.
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[11px] text-gray-500">Opening ask</span>
+                    <span className="text-xs font-semibold text-gray-800">−{globalCpRules.openingAskPct}%</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[11px] text-gray-500">Escalate if</span>
+                    <span className="text-xs font-semibold text-gray-800">&gt; +{globalCpRules.escalateIfPct}%</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[11px] text-gray-500">Max rounds</span>
+                    <span className="text-xs font-semibold text-gray-800">{globalCpRules.maxRounds}</span>
+                  </div>
+                </div>
                 <button
-                  onClick={() => setEditingAsk(o => !o)}
-                  className="text-[10px] text-indigo-500 hover:text-indigo-700 font-medium flex items-center gap-1 transition-colors"
+                  onClick={() => {
+                    setDialogOpeningAsk(globalCpRules.openingAskPct)
+                    setDialogEscalateIf(globalCpRules.escalateIfPct)
+                    setDialogMaxRoundsVal(globalCpRules.maxRounds)
+                    setRulesDialogOpen(true)
+                  }}
+                  className="mt-3 text-[11px] font-medium text-indigo-600 hover:text-indigo-800 transition-colors"
                 >
-                  ✎ Edit ask
+                  Edit rules in playbook →
                 </button>
               </div>
-              <div className="px-4 py-3">
-                {editingAsk ? (
-                  <div className="space-y-2">
-                    <div className="text-[10px] text-indigo-400">Target CP for this draft only</div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs text-gray-500">£</span>
-                      <input
-                        type="number" step="0.01" min={0}
-                        value={effectiveDraftCP}
-                        onChange={e => setDraftCpOverride(Number(e.target.value))}
-                        className="w-24 h-7 rounded-lg border border-indigo-200 px-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
-                      />
-                      <button onClick={() => setEditingAsk(false)} className="text-[10px] text-indigo-600 hover:text-indigo-800 font-medium">Done</button>
-                      {draftCpOverride !== null && (
-                        <button onClick={() => { setDraftCpOverride(null); setEditingAsk(false) }} className="text-[10px] text-gray-400 hover:text-gray-600">Reset</button>
-                      )}
-                    </div>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-2 gap-x-6 gap-y-2">
-                    <div>
-                      <div className="text-[10px] text-indigo-400">Opening ask</div>
-                      <div className="text-xs font-bold text-indigo-700">–{effectiveCpRules.openingAskPct}% · £{effectiveDraftCP.toFixed(2)}</div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] text-indigo-400">Anchored on</div>
-                      <div className="text-[10px] font-medium text-indigo-700 leading-snug">{anchorLabel}</div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] text-indigo-400">Walk-away (Round {effectiveCpRules.maxRounds} floor)</div>
-                      <div className="text-xs font-bold text-indigo-700">–{walkAwayPct}%</div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] text-indigo-400">Max rounds</div>
-                      <div className="text-xs font-bold text-indigo-700">{effectiveCpRules.maxRounds}</div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
 
-          {/* Deal record — reasoning before output */}
-          <div className="border border-gray-200 rounded-xl overflow-hidden">
-            <button
-              onClick={() => setContextOpen(o => !o)}
-              className="w-full flex items-center justify-between px-4 py-2.5 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
-            >
-              <span className="text-[11px] text-gray-400">Deal record</span>
-              <ChevronDown className={`w-3.5 h-3.5 text-gray-400 transition-transform ${contextOpen ? 'rotate-180' : ''}`} />
-            </button>
-            {contextOpen && (
-              <div className="px-4 py-3 space-y-3 bg-white">
-                {/* Leverage */}
-                <div>
-                  <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">Leverage & context</div>
-                  <div className="grid grid-cols-3 gap-3">
-                    <div className="text-center">
-                      <div className="text-[10px] text-gray-400">Line value</div>
-                      <div className="text-xs font-bold text-gray-800 mt-0.5">{lineValue}</div>
-                    </div>
-                    <div className="text-center">
-                      <div className="text-[10px] text-gray-400">Relationship</div>
-                      <span className={`mt-0.5 inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold ${relColors}`}>{relTier}</span>
-                    </div>
-                    <div className="text-center">
-                      <div className="text-[10px] text-gray-400">Fit family</div>
-                      <div className="text-xs font-bold text-gray-800 mt-0.5">{ff ? ff.label : '—'}</div>
-                    </div>
-                  </div>
-                  {ff && (
-                    <div className="mt-2 pt-2 border-t border-gray-200 text-[11px] text-gray-500">
-                      Combined MOQ across family: <span className="font-semibold text-gray-700">{ff.sharedMOQ.toLocaleString()} units</span>
-                    </div>
-                  )}
-                </div>
-                <div className="border-t border-gray-100" />
-                {/* Key dates */}
-                <div>
-                  <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-3">Key dates</div>
-                  <div className="relative flex items-start">
-                    <div className="absolute top-1 left-[16.5%] right-[16.5%] h-0.5 bg-gray-100" />
-                    {[
-                      { label: 'Today',        date: todayStr,     color: 'bg-gray-400'   },
-                      { label: 'Buy decision', date: buyDlStr,     color: 'bg-amber-400'  },
-                      { label: 'Ex-factory',   date: exFactoryStr, color: 'bg-indigo-400' },
-                    ].map((item, i) => (
-                      <div key={i} className="flex-1 flex flex-col items-center gap-1 relative z-10">
-                        <div className={`w-2.5 h-2.5 rounded-full ${item.color} ring-2 ring-white`} />
-                        <div className="text-[11px] font-semibold text-gray-600 text-center">{item.date}</div>
-                        <div className="text-[9px] text-gray-400 text-center">{item.label}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                <div className="border-t border-gray-100" />
-                {/* CP Rule Engine — editable */}
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="text-[10px] font-semibold text-indigo-500 uppercase tracking-wide">CP Rule Engine</div>
-                    <div className="flex items-center gap-2">
-                      {cpOverride && (
-                        <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-600 font-semibold border border-amber-200">modified</span>
-                      )}
-                      <button onClick={() => setCpEditing(o => !o)} className="text-[10px] text-indigo-500 hover:text-indigo-700 font-medium">
-                        {cpEditing ? 'Done' : 'Edit'}
-                      </button>
-                      {cpOverride && (
-                        <button onClick={() => { setCpOverride(null); setCpEditing(false) }} className="text-[10px] text-gray-400 hover:text-gray-600">Reset</button>
-                      )}
-                    </div>
-                  </div>
-                  {cpEditing ? (
-                    <div className="grid grid-cols-3 gap-2">
-                      <div>
-                        <div className="text-[10px] text-indigo-400 mb-1">Opening ask (–%)</div>
-                        <input type="number" min={0} max={30}
-                          value={(cpOverride ?? globalCpRules).openingAskPct}
-                          onChange={e => setCpOverride(prev => ({ ...(prev ?? globalCpRules), openingAskPct: Number(e.target.value) }))}
-                          className="w-full h-7 rounded-lg border border-indigo-200 px-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
-                        />
-                      </div>
-                      <div>
-                        <div className="text-[10px] text-indigo-400 mb-1">Escalate if &gt; (%)</div>
-                        <input type="number" min={0} max={50}
-                          value={(cpOverride ?? globalCpRules).escalateIfPct}
-                          onChange={e => setCpOverride(prev => ({ ...(prev ?? globalCpRules), escalateIfPct: Number(e.target.value) }))}
-                          className="w-full h-7 rounded-lg border border-indigo-200 px-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
-                        />
-                      </div>
-                      <div>
-                        <div className="text-[10px] text-indigo-400 mb-1">Max rounds</div>
-                        <input type="number" min={1} max={10}
-                          value={(cpOverride ?? globalCpRules).maxRounds}
-                          onChange={e => setCpOverride(prev => ({ ...(prev ?? globalCpRules), maxRounds: Number(e.target.value) }))}
-                          className="w-full h-7 rounded-lg border border-indigo-200 px-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
-                        />
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-3 gap-2 text-center">
-                      <div>
-                        <div className="text-[10px] text-indigo-400">Opening ask</div>
-                        <div className="text-xs font-bold text-indigo-700">–{effectiveCpRules.openingAskPct}%</div>
-                      </div>
-                      <div>
-                        <div className="text-[10px] text-indigo-400">Escalate if &gt;</div>
-                        <div className="text-xs font-bold text-indigo-700">+{effectiveCpRules.escalateIfPct}%</div>
-                      </div>
-                      <div>
-                        <div className="text-[10px] text-indigo-400">Max rounds</div>
-                        <div className="text-xs font-bold text-indigo-700">{effectiveCpRules.maxRounds}</div>
-                      </div>
-                    </div>
-                  )}
-                  <div className="mt-2 pt-2 border-t border-indigo-100 flex justify-between text-[10px]">
-                    <span className="text-indigo-400">Current CP</span>
-                    <span className="font-semibold text-indigo-700">£{rec.costPrice.toFixed(2)}</span>
-                  </div>
-                </div>
-              </div>
-            )}
+            </div>
           </div>
 
           {/* Editable email draft */}
@@ -3345,6 +3360,69 @@ function InquiryDrawer({
         </div>
       </div>
     </div>
+
+    {/* Playbook rules-edit Dialog */}
+    {rulesDialogOpen && (
+      <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
+        <div className="bg-white rounded-2xl shadow-2xl p-6 w-[440px]">
+          <div className="text-sm font-bold text-gray-900 mb-1">Edit negotiation rules</div>
+          <div className="text-xs text-gray-500 mb-5">
+            Changes apply to every future draft for {rec.category} / volume {tierThresholdLabel}+ products.
+          </div>
+          <div className="space-y-3 mb-5">
+            <div>
+              <label className="text-[11px] text-gray-500 block mb-1">Opening ask (−%)</label>
+              <input
+                type="number" min={0} max={30}
+                value={dialogOpeningAsk}
+                onChange={e => setDialogOpeningAsk(Number(e.target.value))}
+                className="w-full h-8 rounded-lg border border-gray-200 px-2.5 text-xs font-semibold text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] text-gray-500 block mb-1">Escalate if &gt; (%)</label>
+              <input
+                type="number" min={0} max={50}
+                value={dialogEscalateIf}
+                onChange={e => setDialogEscalateIf(Number(e.target.value))}
+                className="w-full h-8 rounded-lg border border-gray-200 px-2.5 text-xs font-semibold text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] text-gray-500 block mb-1">Max rounds</label>
+              <input
+                type="number" min={1} max={10}
+                value={dialogMaxRoundsVal}
+                onChange={e => setDialogMaxRoundsVal(Number(e.target.value))}
+                className="w-full h-8 rounded-lg border border-gray-200 px-2.5 text-xs font-semibold text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
+              />
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <button
+              onClick={() => setRulesDialogOpen(false)}
+              className="h-8 px-3 text-xs font-medium rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => {
+                onUpdateGlobalCpRules?.({
+                  openingAskPct: dialogOpeningAsk,
+                  escalateIfPct: dialogEscalateIf,
+                  maxRounds:     dialogMaxRoundsVal,
+                })
+                setRulesDialogOpen(false)
+              }}
+              className="h-8 px-3 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors"
+            >
+              Save
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   )
 }
 
@@ -5144,6 +5222,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
             onClose={() => setOpenInquiryId(null)}
             onUpdate={t => setInquiries(prev => ({ ...prev, [t.recId]: t }))}
             globalCpRules={globalCpRules}
+            onUpdateGlobalCpRules={setGlobalCpRules}
             onNavigateToPO={onNavigateToPO}
           />
         )
@@ -6052,6 +6131,7 @@ function ManagerReorderView() {
             onUpdate={t => setInquiries(prev => ({ ...prev, [t.recId]: t }))}
             isManager={true}
             globalCpRules={mgrCpRules}
+            onUpdateGlobalCpRules={setMgrCpRules}
             onApprove={() => {
               approve(rec.id)
               setOpenInquiryId(null)
