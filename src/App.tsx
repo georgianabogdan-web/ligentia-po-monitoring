@@ -243,13 +243,14 @@ const ALL_POS: PO[] = [
   { id: 'PO-2834', supplierId: 'ET', product: 'Linen Summer Dresses',      category: "Women's Apparel", createdOn: '15/12/25', expectedDelivery: '2026-04-14', status: 'Ex-factory delay',      priority: false, quantity: 800,  skus: 8,  orderValue: '£18,200', freight: 'Sea', handledBy: 'human' },
   { id: 'PO-2891', supplierId: 'SS', product: 'Floral Maxi Dress',         category: "Women's Apparel", createdOn: '05/01/26', expectedDelivery: '2026-04-19', status: 'Ex-factory delay',      priority: true,  quantity: 950,  skus: 6,  orderValue: '£22,800', freight: 'Sea', handledBy: 'human' },
   // Date Change Requests — human needed
-  { id: 'PO-2901', supplierId: 'NK', product: 'Cotton Knit Jumpers',       category: 'Knitwear',        createdOn: '20/12/25', expectedDelivery: '2026-04-20', revisedDelivery: '2026-05-18', status: 'Date change required', priority: false, quantity: 600,  skus: 10, orderValue: '£14,400', freight: 'Sea', handledBy: 'human' },
+  { id: 'PO-2901', supplierId: 'NK', product: 'Cotton Knit Jumpers',       category: 'Knitwear',        createdOn: '20/12/25', expectedDelivery: '2026-04-20', revisedDelivery: '2026-04-27', status: 'Date change required', priority: false, quantity: 600,  skus: 10, orderValue: '£14,400', freight: 'Sea', handledBy: 'human' },
   { id: 'PO-2845', supplierId: 'TB', product: 'Ankle Strap Heels',         category: 'Footwear',        createdOn: '10/01/26', expectedDelivery: '2026-04-22', revisedDelivery: '2026-05-09', status: 'Date change required', priority: false, quantity: 600,  skus: 8,  orderValue: '£21,000', freight: 'Sea', handledBy: 'human' },
   // Pre-Dispatch Chases — agent handling
   { id: 'PO-2976', supplierId: 'UF', product: 'Canvas Lo-Top Trainers',    category: 'Footwear',        createdOn: '14/02/26', expectedDelivery: '2026-04-30', status: 'Late DC booking',    priority: true,  quantity: 1500, skus: 18, orderValue: '£37,500', freight: 'Sea', handledBy: 'agent' },
   { id: 'PO-2988', supplierId: 'LL', product: 'Mini Crossbody Bags',       category: 'Accessories',     createdOn: '20/02/26', expectedDelivery: '2026-04-28', status: 'Late DC booking',    priority: false, quantity: 320,  skus: 4,  orderValue: '£28,800', freight: 'Air', handledBy: 'agent' },
   { id: 'PO-2991', supplierId: 'TB', product: 'Chelsea Boots',             category: 'Footwear',        createdOn: '22/02/26', expectedDelivery: '2026-05-02', status: 'Late DC booking',    priority: false, quantity: 450,  skus: 8,  orderValue: '£18,000', freight: 'Sea', handledBy: 'agent' },
   { id: 'PO-2994', supplierId: 'BA', product: 'Polo Shirt Multi-Pack',     category: "Men's Apparel",   createdOn: '24/02/26', expectedDelivery: '2026-05-05', status: 'Late DC booking',    priority: false, quantity: 1800, skus: 24, orderValue: '£12,600', freight: 'Sea', handledBy: 'agent' },
+  { id: 'PO-3001', supplierId: 'ET', product: 'Summer Polo Shirts',        category: "Men's Apparel",   createdOn: '20/02/26', expectedDelivery: '2026-05-08', status: 'Late DC booking',    priority: false, quantity: 900,  skus: 12, orderValue: '£15,300', freight: 'Sea', handledBy: 'agent' },
   // Partially delivered — agent monitoring
   { id: 'PO-2852', supplierId: 'BA', product: 'Graphic Sweatshirts',       category: "Men's Apparel",   createdOn: '18/12/25', expectedDelivery: '2026-03-20', status: 'Partially Delivered',   priority: false, quantity: 1200, skus: 16, orderValue: '£18,000', freight: 'Sea', handledBy: 'agent' },
   // In Transit — agent monitoring
@@ -6688,6 +6689,113 @@ function getPORecommendation(
   }
 }
 
+function isSubstantiveReason(trigger?: TriggerMessage): boolean {
+  if (!trigger) return false
+  const text = (trigger.body + ' ' + (trigger.agentSummary ?? '')).toLowerCase()
+  return /mechanical failure|raw material|yarn supply|qc failure|quality control|natural disaster|flood|fire|power cut|capacity failure|supply disruption/.test(text)
+}
+
+interface DateChangeRec {
+  action:          'approve_date' | 'counter' | 'reject'
+  primaryLabel:    string
+  primaryForecast: string
+  rationale:       string
+  altOptions:      Array<{ key: 'approve_date' | 'counter' | 'reject'; label: string; forecast: string }>
+}
+
+function getDateChangeRecommendation(
+  g: ActionGroup,
+  sup: Supplier,
+  daysPushed: number,
+  substantiveReason: boolean,
+  orderVal: number,
+): DateChangeRec {
+  const coverWeeks   = SUPPLIER_COVER_WEEKS[sup.id] ?? 6
+  const midpointDays = Math.ceil(daysPushed / 2)
+  const origDate     = g.pos.reduce((min, p) => p.expectedDelivery < min ? p.expectedDelivery : min, g.pos[0].expectedDelivery)
+  const midpointDate = new Date(origDate); midpointDate.setDate(new Date(origDate).getDate() + midpointDays)
+  const midpointStr  = midpointDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+  const coverAfterFull  = Math.max(0, coverWeeks - Math.ceil(daysPushed / 7))
+  const coverAfterMid   = Math.max(0, coverWeeks - Math.ceil(midpointDays / 7))
+
+  const ALL_OPTS: DateChangeRec['altOptions'] = [
+    { key: 'approve_date', label: `Approve new date (+${daysPushed}d)`,        forecast: `Intake delayed: ${daysPushed} days · Cover: ${coverWeeks}w → ~${coverAfterFull}w` },
+    { key: 'counter',      label: `Counter-propose ${midpointStr} (+${midpointDays}d)`, forecast: `Earlier than supplier's ask: ${midpointDays} days · Protects ~${coverAfterMid}w cover` },
+    { key: 'reject',       label: 'Reject date change',                         forecast: `Forces supplier commitment · Value at risk: £${orderVal.toLocaleString()}` },
+  ]
+
+  if (substantiveReason && daysPushed <= 14 && coverWeeks >= 4) {
+    return {
+      action: 'approve_date',
+      primaryLabel: `Approve new date (+${daysPushed} days)`,
+      primaryForecast: `Cover holds: ${coverWeeks}w → ~${coverAfterFull}w by new intake · Margin preserved`,
+      rationale: `${sup.name} cited a substantive operational reason and the ${daysPushed}-day push is within tolerance. You have ${coverWeeks} weeks of cover — approving keeps the relationship stable without stockout risk.`,
+      altOptions: ALL_OPTS.filter(o => o.key !== 'approve_date'),
+    }
+  }
+
+  if (!substantiveReason && coverWeeks < 2) {
+    return {
+      action: 'reject',
+      primaryLabel: 'Reject date change',
+      primaryForecast: `Forces supplier commitment · Value at risk: £${orderVal.toLocaleString()}`,
+      rationale: `Cover is critically low at ${coverWeeks} weeks and ${sup.name} has not given a substantive reason for the delay. Holding the original date is the only viable option.`,
+      altOptions: ALL_OPTS.filter(o => o.key !== 'reject'),
+    }
+  }
+
+  const counterRationale = daysPushed > 14
+    ? `A ${daysPushed}-day push is larger than standard tolerance${!substantiveReason ? ' and the reason provided is non-operational' : ''}. Counter-proposing ${midpointStr} (+${midpointDays}d) splits the difference and protects ~${coverAfterMid} weeks of cover.`
+    : `${sup.name}'s OTR is ${sup.onTimeRate}% — caution is warranted. Counter at ${midpointStr} to limit the intake impact while maintaining the relationship.`
+
+  return {
+    action: 'counter',
+    primaryLabel: `Counter-propose ${midpointStr} (+${midpointDays} days)`,
+    primaryForecast: `Earlier than supplier's ask: ${midpointDays} days · Protects ~${coverAfterMid} weeks cover`,
+    rationale: counterRationale,
+    altOptions: ALL_OPTS.filter(o => o.key !== 'counter'),
+  }
+}
+
+interface DCBookingRec {
+  action:          'confirm' | 'alt_slot'
+  recommendLine:   string
+  primaryLabel:    string
+  primaryForecast: string
+  altLabel:        string
+  altForecast:     string
+}
+
+function getDCBookingRecommendation(g: ActionGroup, sup: Supplier): DCBookingRec {
+  const pattern      = getRelationshipPattern(sup)
+  const dispatchDate = g.pos[0].expectedDelivery
+  const dispatchStr  = new Date(dispatchDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+
+  if (sup.onTimeRate < 75) {
+    return {
+      action: 'alt_slot',
+      recommendLine: `Request an alternate slot. ${sup.name}'s OTR is ${sup.onTimeRate}% — confirm goods are packed and ready before committing the DC slot.`,
+      primaryLabel:  'Request alternate slot',
+      primaryForecast: `Avoids committing DC slot before supplier confirms readiness`,
+      altLabel:    'Confirm booking (accept risk)',
+      altForecast: `Accepts reliability risk at ${sup.onTimeRate}% OTR · Locks in ${dispatchStr} dispatch`,
+    }
+  }
+
+  const confirmLine = pattern === 'concentration'
+    ? `Confirm the slot. Goods are ready to dispatch — but note: ${sup.openPOs} open POs at ${sup.onTimeRate}% OTR means this further commitment increases your concentration exposure with ${sup.name}.`
+    : `Confirm the slot. ${sup.name} is ready for dispatch and your DC has capacity in the requested window.`
+
+  return {
+    action:          'confirm',
+    recommendLine:   confirmLine,
+    primaryLabel:    'Confirm booking',
+    primaryForecast: `Locks in ${dispatchStr} dispatch · DC slot reserved`,
+    altLabel:        'Request alternate slot',
+    altForecast:     'Delays commitment · Risk of losing DC slot',
+  }
+}
+
 // ── PO Monitoring View ────────────────────────────────────────────────────────
 function POMonitoringView({ initialOpenPO, onNavigateToNeg: _onNavigateToNeg }: { initialOpenPO?: string | null; onNavigateToNeg?: (recId: string) => void }) {
   const [subTab,           setSubTab]           = useState<'actions' | 'allpos' | 'suppliers' | 'agentlog'>('actions')
@@ -6781,6 +6889,12 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg: _onNavigateToNeg }: 
       timestamp: '2026-04-18T11:15:00Z',
       body: 'Hi team,\n\nQuick update on PO-2976 (Canvas Lo-Top Trainers). Goods are packed and ready. We are targeting dispatch on 30 April via our usual freight forwarder (DHL Supply Chain). However, we have not yet received the final booking confirmation from DHL — we\'re chasing and expect to confirm within 48 hours.\n\nPlease confirm your DC receiving slot is still available for w/c 14 May. Let us know if there are any issues.\n\nThanks,\nMarcus Reid\nUrban Footwear Logistics',
       agentSummary: 'Goods packed for PO-2976, targeting 30 Apr dispatch via DHL Supply Chain. Freight booking not yet confirmed — expecting within 48 hrs. Requesting DC slot confirmation for w/c 14 May.',
+    },
+    'ET-late_dc': {
+      sender: 'Eastern Textiles Co', senderEmail: 'dispatch@easterntextiles.co.uk',
+      timestamp: '2026-05-05T10:00:00Z',
+      body: 'Hi team,\n\nJust to update you on PO-3001 (Summer Polo Shirts). Goods are currently being packed at our warehouse. We have not yet received a confirmed freight booking slot from our logistics partner — we are still working on it. We will update you once confirmed.\n\nBest,\nEastern Textiles',
+      agentSummary: 'ET has not confirmed DC booking for PO-3001 (Summer Polo Shirts). Goods not yet fully packed. No booking reference provided. This is the second late-booking incident from ET this quarter.',
     },
     'SS-overdue': {
       sender: 'Summer Styles Ltd', senderEmail: 'production@summerstyles.co.uk',
@@ -7737,29 +7851,9 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg: _onNavigateToNeg }: 
                                   </div>
                                 </>
                               )
-                            })() : (
-                              <>
-                                <p className="text-[11px] font-semibold text-gray-500 mb-3">What would you like to do?</p>
-                                <div className={`grid gap-2.5 mb-3 ${drawerGroup.type === 'at_risk' ? 'grid-cols-3' : 'grid-cols-2'}`}>
-                                  {(drawerGroup.type === 'at_risk' ? [
-                                    { key: 'approve_date', label: 'Approve',               sub: 'Accept new date',            cls: 'border-green-200 hover:border-green-400 hover:bg-green-50' },
-                                    { key: 'counter',      label: 'Counter-propose',       sub: 'Suggest alternative date',   cls: 'border-amber-200 hover:border-amber-400 hover:bg-amber-50' },
-                                    { key: 'reject',       label: 'Reject',                sub: 'Decline proposed date',      cls: 'border-red-200 hover:border-red-400 hover:bg-red-50' },
-                                  ] : [
-                                    { key: 'confirm_booking', label: 'Confirm booking',        sub: 'Lock in current slot',        cls: 'border-green-200 hover:border-green-400 hover:bg-green-50' },
-                                    { key: 'alt_slot',        label: 'Request alternate slot', sub: 'Ask for different date/time', cls: 'border-amber-200 hover:border-amber-400 hover:bg-amber-50' },
-                                  ]).map(opt => (
-                                    <button
-                                      key={opt.key}
-                                      onClick={() => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: opt.key }))}
-                                      className={`border-2 rounded-xl p-3 text-left transition-all min-h-[56px] ${opt.cls}`}
-                                    >
-                                      <div className="text-[12px] font-bold text-gray-800 leading-tight">{opt.label}</div>
-                                      <div className="text-[10px] text-gray-500 mt-0.5 leading-tight">{opt.sub}</div>
-                                    </button>
-                                  ))}
-                                </div>
-                                <div className="flex items-center gap-3">
+                            })() : (() => {
+                              const snoozeRow = (
+                                <div className="flex items-center gap-3 mt-3">
                                   {isSnoozeConfirm ? (
                                     <span className="text-[11px] text-gray-600">Reappear in 3 days?
                                       <button onClick={() => { setSnoozedCards(prev => { const n = new Set(prev); n.add(drawerCardKey!); return n }); setDrawerCardKey(null) }} className="ml-1.5 font-semibold text-indigo-600 hover:text-indigo-800">Confirm</button>
@@ -7777,8 +7871,189 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg: _onNavigateToNeg }: 
                                     </>
                                   )}
                                 </div>
-                              </>
-                            )}
+                              )
+
+                              // ── Tier 1: Approve date change (at_risk) ──────────────
+                              if (drawerGroup.type === 'at_risk') {
+                                const daysPushed = Math.max(...drawerGroup.pos.map(p => {
+                                  if (!p.revisedDelivery) return 0
+                                  return Math.round((new Date(p.revisedDelivery).getTime() - new Date(p.expectedDelivery).getTime()) / 86400000)
+                                }))
+                                const substantiveReason = isSubstantiveReason(drawerGroup.triggerMessage)
+                                const dateRec = getDateChangeRecommendation(drawerGroup, drawerSup, daysPushed, substantiveReason, drawerOrderVal)
+                                const pattern = getRelationshipPattern(drawerSup)
+                                const recBg   = pattern === 'structural' ? 'bg-red-50 border-red-200' : pattern === 'concentration' ? 'bg-amber-50 border-amber-200' : 'bg-indigo-50 border-indigo-100'
+                                const recHd   = pattern === 'structural' ? 'text-red-800' : pattern === 'concentration' ? 'text-amber-800' : 'text-indigo-800'
+                                const recBody = pattern === 'structural' ? 'text-red-700' : pattern === 'concentration' ? 'text-amber-700' : 'text-indigo-700'
+                                return (
+                                  <>
+                                    <p className="text-[13px] font-bold text-gray-900 mb-0.5">Should we approve {drawerSup.name}'s date change?</p>
+                                    <p className="text-[11px] text-gray-400 mb-3">
+                                      {drawerGroup.pos.length} PO{drawerGroup.pos.length > 1 ? 's' : ''} · £{drawerOrderVal.toLocaleString()} at risk · {daysPushed}-day push requested
+                                    </p>
+                                    <div className={`border rounded-xl px-4 py-3 mb-3 ${recBg}`}>
+                                      <p className={`text-[11px] font-bold mb-1 ${recHd}`}>Recommendation: {dateRec.primaryLabel.split('(')[0].trim().replace(/\+$/, '').trim()}.</p>
+                                      <p className={`text-[11px] leading-relaxed ${recBody}`}>{dateRec.rationale}</p>
+                                    </div>
+                                    <button
+                                      onClick={() => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: dateRec.action }))}
+                                      className="w-full rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-3 text-left mb-3 transition-colors"
+                                    >
+                                      <div className="text-[12px] font-bold">{dateRec.primaryLabel}</div>
+                                      <div className="text-[10px] text-indigo-200 mt-0.5">{dateRec.primaryForecast}</div>
+                                    </button>
+                                    <div className="grid grid-cols-2 gap-2 mb-3">
+                                      {dateRec.altOptions.map(opt => (
+                                        <button
+                                          key={opt.key}
+                                          onClick={() => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: opt.key }))}
+                                          className="border border-gray-200 rounded-xl px-2 py-2 text-left hover:bg-gray-50 hover:border-gray-300 transition-colors"
+                                        >
+                                          <div className="text-[11px] font-semibold text-gray-700 leading-tight">{opt.label}</div>
+                                          <div className="text-[10px] text-gray-400 mt-0.5 leading-tight">{opt.forecast}</div>
+                                        </button>
+                                      ))}
+                                    </div>
+                                    <details className="mb-3">
+                                      <summary className="text-[11px] text-gray-400 cursor-pointer hover:text-gray-600 select-none">
+                                        ▸ Why this recommendation?
+                                      </summary>
+                                      <div className="mt-2 space-y-1 pl-3 border-l-2 border-gray-100">
+                                        <div className="text-[11px] text-gray-500">OTR: <span className="font-semibold text-gray-700">{drawerSup.onTimeRate}%</span></div>
+                                        <div className="text-[11px] text-gray-500">Days push: <span className="font-semibold text-gray-700">{daysPushed}d</span></div>
+                                        <div className="text-[11px] text-gray-500">Est. cover remaining: <span className="font-semibold text-gray-700">~{SUPPLIER_COVER_WEEKS[drawerSup.id] ?? 6}w</span></div>
+                                        <div className="text-[11px] text-gray-500">Reason quality: <span className="font-semibold text-gray-700">{substantiveReason ? 'Substantive' : 'Non-substantive'}</span></div>
+                                        <div className="text-[11px] text-gray-500">Avg delay (hist.): <span className="font-semibold text-gray-700">{drawerSup.avgDelayDays}d</span></div>
+                                        <div className="text-[11px] text-gray-500">Pattern: <span className="font-semibold text-gray-700 capitalize">{pattern}</span></div>
+                                      </div>
+                                    </details>
+                                    <div className="border border-dashed border-gray-200 rounded-xl px-4 py-4 text-center mb-1">
+                                      <p className="text-[11px] text-gray-400">Once you choose an action, the agent will draft the communication or record the decision.</p>
+                                    </div>
+                                    {snoozeRow}
+                                  </>
+                                )
+                              }
+
+                              // ── Tier 1/2/3: DC booking (late_dc) ──────────────────
+                              const dcTier = drawerSup.onTimeRate < 70 ? 1 : drawerSup.onTimeRate > 85 ? 3 : 2
+
+                              // Tier 1 upgrade: structurally unreliable supplier
+                              if (dcTier === 1) {
+                                const pattern = getRelationshipPattern(drawerSup)
+                                const recBg   = 'bg-red-50 border-red-200'
+                                const recHd   = 'text-red-800'
+                                const recBody = 'text-red-700'
+                                void pattern
+                                return (
+                                  <>
+                                    <p className="text-[13px] font-bold text-gray-900 mb-0.5">How do we handle {drawerSup.name}'s DC booking?</p>
+                                    <p className="text-[11px] text-gray-400 mb-3">
+                                      {drawerGroup.pos.length} PO{drawerGroup.pos.length > 1 ? 's' : ''} · £{drawerOrderVal.toLocaleString()} · Booking confirmation overdue
+                                    </p>
+                                    <div className={`border rounded-xl px-4 py-3 mb-3 ${recBg}`}>
+                                      <p className={`text-[11px] font-bold mb-1 ${recHd}`}>Recommendation: Investigate root cause.</p>
+                                      <p className={`text-[11px] leading-relaxed ${recBody}`}>
+                                        {drawerSup.name}'s OTR is {drawerSup.onTimeRate}% — a DC booking delay from a structurally unreliable supplier warrants investigation, not just a routine confirmation. A pattern of late bookings may signal deeper dispatch problems.
+                                      </p>
+                                    </div>
+                                    <button
+                                      onClick={() => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: 'alt_slot' }))}
+                                      className="w-full rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-3 text-left mb-3 transition-colors"
+                                    >
+                                      <div className="text-[12px] font-bold">Request dispatch evidence first</div>
+                                      <div className="text-[10px] text-indigo-200 mt-0.5">Request goods-ready confirmation before committing slot · Reduces booking risk</div>
+                                    </button>
+                                    <div className="grid grid-cols-2 gap-2 mb-3">
+                                      <button
+                                        onClick={() => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: 'confirm_booking' }))}
+                                        className="border border-gray-200 rounded-xl px-2 py-2 text-left hover:bg-gray-50 transition-colors"
+                                      >
+                                        <div className="text-[11px] font-semibold text-gray-700 leading-tight">Confirm booking (accept risk)</div>
+                                        <div className="text-[10px] text-gray-400 mt-0.5 leading-tight">Confirms slot at {drawerSup.onTimeRate}% OTR · Reliability risk remains</div>
+                                      </button>
+                                      <button
+                                        onClick={() => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: 'chase' }))}
+                                        className="border border-gray-200 rounded-xl px-2 py-2 text-left hover:bg-gray-50 transition-colors"
+                                      >
+                                        <div className="text-[11px] font-semibold text-gray-700 leading-tight">Chase for update</div>
+                                        <div className="text-[10px] text-gray-400 mt-0.5 leading-tight">Routine follow-up · May not resolve root cause</div>
+                                      </button>
+                                    </div>
+                                    <details className="mb-3">
+                                      <summary className="text-[11px] text-gray-400 cursor-pointer hover:text-gray-600 select-none">
+                                        ▸ Why this recommendation?
+                                      </summary>
+                                      <div className="mt-2 space-y-1 pl-3 border-l-2 border-gray-100">
+                                        <div className="text-[11px] text-gray-500">OTR: <span className="font-semibold text-gray-700">{drawerSup.onTimeRate}%</span></div>
+                                        <div className="text-[11px] text-gray-500">Avg delay (hist.): <span className="font-semibold text-gray-700">{drawerSup.avgDelayDays}d</span></div>
+                                        <div className="text-[11px] text-gray-500">Open POs: <span className="font-semibold text-gray-700">{drawerSup.openPOs}</span></div>
+                                        <div className="text-[11px] text-gray-500">Pattern: <span className="font-semibold text-gray-700">Structural underperformer</span></div>
+                                      </div>
+                                    </details>
+                                    <div className="border border-dashed border-gray-200 rounded-xl px-4 py-4 text-center mb-1">
+                                      <p className="text-[11px] text-gray-400">Once you choose an action, the agent will draft the communication or record the decision.</p>
+                                    </div>
+                                    {snoozeRow}
+                                  </>
+                                )
+                              }
+
+                              // Tier 3: highly reliable supplier — transactional
+                              if (dcTier === 3) {
+                                const primaryPO    = drawerGroup.pos[0]
+                                const dispatchStr  = new Date(primaryPO.expectedDelivery).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+                                return (
+                                  <>
+                                    <p className="text-[13px] font-bold text-gray-900 mb-0.5">Confirm the DC booking with {drawerSup.name}?</p>
+                                    <p className="text-[11px] text-gray-500 mb-3">
+                                      {drawerSup.name} typically dispatches on schedule ({drawerSup.onTimeRate}% OTR). Agent will send booking confirmation when ready.
+                                    </p>
+                                    <button
+                                      onClick={() => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: 'confirm_booking' }))}
+                                      className="w-full rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-3 text-left mb-3 transition-colors"
+                                    >
+                                      <div className="text-[12px] font-bold">Confirm booking</div>
+                                      <div className="text-[10px] text-indigo-200 mt-0.5">Locks in {dispatchStr} dispatch · DC slot reserved</div>
+                                    </button>
+                                    {snoozeRow}
+                                  </>
+                                )
+                              }
+
+                              // Tier 2: deliberate DC booking with recommendation banner
+                              const dcRec       = getDCBookingRecommendation(drawerGroup, drawerSup)
+                              const primaryPill = dcRec.action === 'confirm' ? 'confirm_booking' : 'alt_slot'
+                              const altPill     = dcRec.action === 'confirm' ? 'alt_slot'        : 'confirm_booking'
+                              return (
+                                <>
+                                  <p className="text-[13px] font-bold text-gray-900 mb-0.5">Confirm the DC booking with {drawerSup.name}?</p>
+                                  <p className="text-[11px] text-gray-400 mb-3">
+                                    {drawerGroup.pos.length} PO{drawerGroup.pos.length > 1 ? 's' : ''} · £{drawerOrderVal.toLocaleString()} · Expected dispatch {new Date(drawerGroup.pos[0].expectedDelivery).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
+                                  </p>
+                                  <div className="bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-2.5 mb-3">
+                                    <p className="text-[11px] text-indigo-800">
+                                      <span className="font-bold">Recommendation: </span>{dcRec.recommendLine}
+                                    </p>
+                                  </div>
+                                  <button
+                                    onClick={() => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: primaryPill }))}
+                                    className="w-full rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-3 text-left mb-2 transition-colors"
+                                  >
+                                    <div className="text-[12px] font-bold">{dcRec.primaryLabel}</div>
+                                    <div className="text-[10px] text-indigo-200 mt-0.5">{dcRec.primaryForecast}</div>
+                                  </button>
+                                  <button
+                                    onClick={() => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: altPill }))}
+                                    className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-left hover:bg-gray-50 hover:border-gray-300 transition-colors mb-3"
+                                  >
+                                    <div className="text-[11px] font-semibold text-gray-700">{dcRec.altLabel}</div>
+                                    <div className="text-[10px] text-gray-400 mt-0.5">{dcRec.altForecast}</div>
+                                  </button>
+                                  {snoozeRow}
+                                </>
+                              )
+                            })()}
                           </>
                         ) : (
                           <>
@@ -8080,8 +8355,8 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg: _onNavigateToNeg }: 
 
                     {/* ── Bottom section (state-gated) ─────────────────────────────── */}
 
-                    {/* State A: draft preview — only for at_risk/late_dc (overdue uses recommendation panel placeholder) */}
-                    {drawerUiState === 'A' && drawerGroup.type !== 'overdue' && (
+                    {/* State A: draft preview — only for late_dc Tier 2/3 (transactional); at_risk + ET-upgraded late_dc use the empty placeholder */}
+                    {drawerUiState === 'A' && drawerGroup.type === 'late_dc' && (drawerSup?.onTimeRate ?? 0) >= 70 && (
                       <div className="shrink-0 border-t border-gray-100 px-6 py-4 bg-white space-y-2">
                         <div className="flex items-center gap-2">
                           <span className="text-[10px] text-gray-400 shrink-0 w-5">To:</span>
