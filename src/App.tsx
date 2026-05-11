@@ -5,11 +5,11 @@ import {
   Download, Search, Star, ArrowRight, Building2,
   ChevronDown, RefreshCw, Activity,
   Bot, User, X, Clock, Mail, Check,
-  Calendar, MessageSquare, FileText, Send, ChevronRight, Plus, AlertCircle, Info,
+  Calendar, MessageSquare, Send, ChevronRight, ChevronLeft, Plus, AlertCircle, Info,
 } from 'lucide-react'
 import { ComposedChart, LineChart, Cell, Bar, Line, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceArea, ReferenceLine } from 'recharts'
 import { INVENTORY_PRODUCTS, REORDER_RECOMMENDATIONS } from './mockData'
-import type { SizeBand, StockStatus, ApprovalStatus, SizeCurveEntry, InventoryProduct, ReorderRecommendation, Category } from './mockData'
+import type { SizeBand, StockStatus, ApprovalStatus, SizeCurveEntry, InventoryProduct, ReorderRecommendation, Category, FreightScenarioData } from './mockData'
 import { REPLEN_PRODUCTS } from './replenData'
 import type { ReplenProduct, DCStatus as ReplenDCStatus } from './replenData'
 
@@ -99,12 +99,26 @@ interface ChaseThreadMsg {
   status:     ChaseThreadMsgStatus
   emailType?: string
 }
-interface ChaseThread {
-  status:    'awaiting-reply' | 'reply-received' | 'resolved'
-  startedAt: string
-  messages:  ChaseThreadMsg[]
+interface ThreadSystemEvent {
+  id:        string
+  timestamp: string
+  body:      string
 }
-interface ActionGroup { supplierId: string; type: 'overdue' | 'at_risk' | 'late_dc'; pos: PO[] }
+interface ChaseThread {
+  status:       'awaiting-reply' | 'reply-received' | 'no-reply-overdue' | 'resolved'
+  startedAt:    string
+  messages:     ChaseThreadMsg[]
+  systemEvents?: ThreadSystemEvent[]
+}
+interface TriggerMessage {
+  sender: string
+  senderEmail: string
+  timestamp: string
+  body: string
+  agentSummary?: string
+  priorMessages?: { sender: string; timestamp: string; body: string; direction: 'inbound' | 'outbound' }[]
+}
+interface ActionGroup { supplierId: string; type: 'overdue' | 'at_risk' | 'late_dc'; pos: PO[]; triggerMessage?: TriggerMessage }
 
 interface POEvent {
   id:        string
@@ -114,13 +128,6 @@ interface POEvent {
   author:    'agent' | 'buyer'
 }
 
-interface DateChangeProposal {
-  field:      'xFactory' | 'delivery'
-  oldDate:    string
-  newDate:    string
-  sourceEmail:string
-  decision?:  'applied' | 'queued'
-}
 
 interface AgentLogEntry {
   time: string
@@ -308,10 +315,6 @@ const PO_PRODUCT_MAP: Record<string, string> = {
 // Maps negotiation rec IDs → resulting PO IDs (for closed/applied negotiations)
 const NEG_PO_MAP: Record<string, string> = {
   'REC-002': 'PO-3060',
-}
-// Reverse map: PO ID → negotiation rec ID
-const PO_NEG_MAP: Record<string, string> = {
-  'PO-3060': 'REC-002',
 }
 
 // ── Seeded PO Event Log ────────────────────────────────────────────────────────
@@ -646,47 +649,8 @@ const RAG_CFG: Record<RAGStatus, { dot: string; bg: string; text: string; label:
   green: { dot: 'bg-green-500', bg: 'bg-green-50', text: 'text-green-700', label: 'On Track' },
 }
 
-const PO_EVENT_CFG: Record<POEventType, { dot: string; label: string }> = {
-  chase_sent:           { dot: 'bg-blue-400',   label: 'Chase sent'     },
-  supplier_reply:       { dot: 'bg-amber-400',  label: 'Supplier reply' },
-  date_change_proposed: { dot: 'bg-violet-400', label: 'Date proposed'  },
-  date_change_applied:  { dot: 'bg-green-500',  label: 'Date applied'   },
-  manual_note:          { dot: 'bg-gray-400',   label: 'Note'           },
-  decision_recorded:    { dot: 'bg-red-400',    label: 'Decision'       },
-}
 
-function poEventIcon(type: POEventType) {
-  if (type === 'chase_sent')           return <Send className="w-2.5 h-2.5" />
-  if (type === 'supplier_reply')       return <MessageSquare className="w-2.5 h-2.5" />
-  if (type === 'date_change_proposed') return <Calendar className="w-2.5 h-2.5" />
-  if (type === 'date_change_applied')  return <Check className="w-2.5 h-2.5" />
-  if (type === 'manual_note')          return <FileText className="w-2.5 h-2.5" />
-  if (type === 'decision_recorded')    return <AlertCircle className="w-2.5 h-2.5" />
-  return null
-}
 
-function simulatePOReply(po: PO): { proposal: DateChangeProposal; replyText: string } {
-  const sup = getSupplier(po.supplierId)?.name ?? po.supplierId
-  const isPostDispatch = ['In Transit', 'Partially Delivered'].includes(po.status)
-  const today = new Date().toISOString().slice(0, 10)
-
-  if (isPostDispatch) {
-    const cur = new Date(po.revisedDelivery ?? po.expectedDelivery)
-    const nw  = new Date(cur.getTime() + 7 * 86400000)
-    const nwStr = nw.toISOString().slice(0, 10)
-    return {
-      proposal: { field: 'delivery', oldDate: po.revisedDelivery ?? po.expectedDelivery, newDate: nwStr, sourceEmail: `RE: Chase – ${po.product} – ${today}` },
-      replyText: `Dear Buying Team,\n\nRe: ${po.id} (${po.product})\n\nThe shipment has cleared customs but is experiencing port congestion. We now estimate delivery on ${formatDate(nwStr)} (revised from ${formatDate(po.revisedDelivery ?? po.expectedDelivery)}).\n\nNote: ex-factory date remains ${formatDate(getXFactoryDate(po).toISOString().slice(0, 10))} — goods left our facility on schedule. This is a transit delay only.\n\nApologies for the inconvenience.\n\nBest regards,\n${sup}`,
-    }
-  }
-  const xf    = getXFactoryDate(po)
-  const nxf   = new Date(xf.getTime() + 14 * 86400000)
-  const nxfStr = nxf.toISOString().slice(0, 10)
-  return {
-    proposal: { field: 'xFactory', oldDate: xf.toISOString().slice(0, 10), newDate: nxfStr, sourceEmail: `RE: Chase – ${po.product} – ${today}` },
-    replyText: `Dear Buying Team,\n\nRe: ${po.id} (${po.product})\n\nWe have experienced a production delay due to raw material availability. We now anticipate ex-factory on ${formatDate(nxfStr)} (previously ${formatDate(xf.toISOString().slice(0, 10))}).\n\nWe apologise for the inconvenience and will prioritise this line.\n\nBest regards,\n${sup}`,
-  }
-}
 
 const STATUS_CONFIG: Record<POStatus, { bg: string; text: string; dot: string; border: string }> = {
   'On track':              { bg: 'bg-green-50',  text: 'text-green-700',  dot: 'bg-green-500',   border: 'border-green-200' },
@@ -947,121 +911,6 @@ function getSubcategory(p: InventoryProduct): string {
 }
 
 // ── Chase Thread Panel ────────────────────────────────────────────────────────
-function ChaseThreadPanel({
-  thread, group, supplier, expandedIds, onToggleExpand,
-  onSimulateReply, onSendFollowUp, onDismissFollowUp,
-}: {
-  thread:           ChaseThread
-  group:            ActionGroup
-  supplier:         { name: string; id: string } | undefined
-  expandedIds:      Set<string>
-  onToggleExpand:   (id: string) => void
-  onSimulateReply:  () => void
-  onSendFollowUp:   (msgId: string) => void
-  onDismissFollowUp:(msgId: string) => void
-}) {
-  const statusPillCls =
-    thread.status === 'resolved'      ? 'bg-green-100 text-green-700' :
-    thread.status === 'reply-received'? 'bg-amber-100 text-amber-700' :
-    'bg-blue-100 text-blue-700'
-  const statusLabel =
-    thread.status === 'resolved'       ? 'Resolved' :
-    thread.status === 'reply-received' ? 'Reply received' :
-    'Awaiting reply'
-  const startedDate = new Date(thread.startedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
-
-  return (
-    <div className="h-full flex flex-col overflow-hidden">
-      {/* Header */}
-      <div className="px-4 py-2.5 border-b border-gray-100 bg-gray-50 shrink-0">
-        <div className="flex items-center justify-between mb-0.5">
-          <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Chase Thread</span>
-          <span className={`text-[9px] font-semibold px-2 py-0.5 rounded-full ${statusPillCls}`}>{statusLabel}</span>
-        </div>
-        <div className="text-xs font-semibold text-gray-800 truncate">{supplier?.name ?? group.supplierId}</div>
-        <div className="text-[10px] text-gray-400 mt-0.5">{group.pos.length} PO{group.pos.length > 1 ? 's' : ''} · Started {startedDate}</div>
-      </div>
-
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-2.5 space-y-2">
-        {thread.messages.filter(m => m.status !== 'dismissed').map((msg, idx, arr) => {
-          const isLatest   = idx === arr.length - 1
-          const isExpanded = expandedIds.has(msg.id) || isLatest
-          const senderLbl  = msg.sender === 'you' ? 'You' : msg.sender === 'agent' ? 'Agent' : msg.sender
-          const senderCls  = msg.sender === 'you' ? 'text-indigo-700' : msg.sender === 'agent' ? 'text-purple-600' : 'text-amber-700'
-          const borderCls  = msg.sender === 'you' ? 'border-indigo-100' : msg.sender === 'agent' ? 'border-purple-100' : 'border-amber-200'
-          const bgCls      = msg.sender === 'you' ? 'bg-indigo-50/40' : msg.sender === 'agent' ? 'bg-purple-50/40' : 'bg-amber-50/30'
-          const timeStr    = new Date(msg.timestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
-          const snippet    = msg.body.split('\n').find(l => l.trim())?.slice(0, 45) ?? ''
-
-          const statusBadge =
-            msg.status === 'sent'            ? <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-600 font-semibold border border-indigo-100 whitespace-nowrap">Sent</span> :
-            msg.status === 'auto-sent'       ? <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-green-50 text-green-600 font-semibold border border-green-100 whitespace-nowrap">Auto-sent</span> :
-            msg.status === 'awaiting-review' ? <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600 font-semibold border border-amber-200 whitespace-nowrap">Awaiting review</span> :
-            <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 font-semibold whitespace-nowrap">Received</span>
-
-          return (
-            <div key={msg.id} className={`rounded-xl border overflow-hidden ${borderCls}`}>
-              <button
-                className={`w-full flex items-center justify-between px-3 py-2 text-left ${bgCls} hover:brightness-95 transition-colors`}
-                onClick={() => onToggleExpand(msg.id)}
-              >
-                <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                  <span className={`text-[10px] font-bold shrink-0 ${senderCls}`}>{senderLbl}</span>
-                  <span className="text-[9px] text-gray-400 shrink-0">{timeStr}</span>
-                  {!isExpanded && <span className="text-[9px] text-gray-500 truncate">{snippet}…</span>}
-                </div>
-                <div className="flex items-center gap-1 shrink-0 ml-1">
-                  {statusBadge}
-                  <ChevronDown className={`w-3 h-3 text-gray-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
-                </div>
-              </button>
-              {isExpanded && (
-                <div className="px-3 py-2.5 bg-white">
-                  <pre className="text-[10px] text-gray-700 leading-relaxed whitespace-pre-wrap font-sans">{msg.body}</pre>
-                  {msg.status === 'awaiting-review' && isLatest && (
-                    <div className="mt-2.5 pt-2 border-t border-gray-100 flex gap-2">
-                      <button
-                        onClick={() => onSendFollowUp(msg.id)}
-                        className="flex-1 h-7 rounded-lg bg-indigo-600 text-white text-[10px] font-semibold hover:bg-indigo-700 flex items-center justify-center gap-1"
-                      >
-                        <Send className="w-2.5 h-2.5" /> Review &amp; Send
-                      </button>
-                      <button
-                        onClick={() => onDismissFollowUp(msg.id)}
-                        className="px-2.5 h-7 rounded-lg border border-gray-200 text-[10px] font-semibold text-gray-500 hover:bg-gray-50"
-                      >
-                        Dismiss
-                      </button>
-                    </div>
-                  )}
-                  {msg.status === 'auto-sent' && isLatest && (
-                    <div className="mt-1.5 text-[9px] text-green-600 italic">
-                      Automatically sent per Agent Settings → {msg.emailType}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )
-        })}
-      </div>
-
-      {/* DEMO — simulate supplier reply */}
-      {thread.status === 'awaiting-reply' && (
-        <div className="p-3 border-t border-gray-100 shrink-0">
-          <button
-            onClick={onSimulateReply}
-            className="w-full py-2 rounded-lg border-2 border-dashed border-gray-200 text-[10px] font-semibold text-gray-400 hover:border-amber-300 hover:text-amber-600 hover:bg-amber-50/30 transition-colors"
-          >
-            DEMO — Simulate supplier reply
-          </button>
-        </div>
-      )}
-    </div>
-  )
-}
-
 function AlertDigest() {
   const [filterCat, setFilterCat]         = useState<Category | ''>('')
   const [filterSubcat, setFilterSubcat]   = useState('')
@@ -4123,6 +3972,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
   const [freightOverrides, setFreightOverrides] = useState<Record<string, 'Sea' | 'Air'>>({})
   const [freightReasons, setFreightReasons]     = useState<Record<string, string>>({})
   const [freightSplits, setFreightSplits]       = useState<Record<string, { air: number; sea: number }>>({})
+  const [recommendMode, setRecommendMode]       = useState<'cost' | 'margin'>('margin')
   const [selectedIds, setSelectedIds]           = useState<Set<string>>(new Set())
   const [toast, setToast]                       = useState<string | null>(null)
   const [inquiries, setInquiries]               = useState<Record<string, InquiryThread>>(() => ({ ...SEEDED_THREADS }))
@@ -4239,68 +4089,100 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
             </div>
           )}
 
-          {/* Product banner — full width, no inputs */}
-          <div className="bg-white border border-gray-100 rounded-xl p-5 shadow-sm flex items-start gap-5">
-            <img src={p.imageUrl} className="w-20 h-20 rounded-lg object-cover shrink-0" alt={p.name} />
-            <div className="flex-1 min-w-0">
-              <div className="text-base font-bold text-gray-900">{p.name}</div>
-              <div className="text-xs text-gray-400 mb-2">{p.sku} · {p.category}</div>
-              <div className="flex gap-2 flex-wrap mb-2">
-                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border ${ac.bg} ${ac.text} ${ac.border}`}>
-                  <span className={`w-1.5 h-1.5 rounded-full ${ac.dot}`} />{curStatus}
-                </span>
-                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold ${riskCls}`}>
-                  {p.stockoutRisk} Risk
-                </span>
+          {/* Product header — identity + KPIs in one card */}
+          {(() => {
+            const gm = getMarginForWindow(p.marginPct, p.id, timeRange)
+            const gmTextCls = gm > 25 ? 'text-green-700' : gm >= 10 ? 'text-amber-700' : 'text-red-700'
+            return (
+              <div className="bg-white border border-gray-100 rounded-xl p-5 shadow-sm flex items-center gap-4">
+                {/* Image */}
+                <img src={p.imageUrl} className="w-16 h-16 rounded-lg object-cover shrink-0" alt={p.name} />
+                {/* Identity + actions */}
+                <div className="w-56 shrink-0 min-w-0">
+                  <div className="text-sm font-bold text-gray-900 leading-snug">{p.name}</div>
+                  <div className="text-[11px] text-gray-400 mb-2">{p.sku} · {p.category}</div>
+                  <div className="flex gap-1.5 flex-wrap mb-2.5">
+                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border ${ac.bg} ${ac.text} ${ac.border}`}>
+                      <span className={`w-1.5 h-1.5 rounded-full ${ac.dot}`} />{curStatus}
+                    </span>
+                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold ${riskCls}`}>
+                      {p.stockoutRisk} Risk
+                    </span>
+                  </div>
+                  <div className="flex gap-1.5 items-center flex-wrap">
+                    {curStatus === 'Draft' && (
+                      <button onClick={() => {
+                        if (isOverrideFreight && !freightReasons[p.id]?.trim()) {
+                          showToast('Please add a reason for the freight override before sending.'); return
+                        }
+                        setStatusOverrides(o => ({ ...o, [p.id]: 'Pending Approval' }))
+                        setPoHistory(h => ({ ...h, [p.id]: [...(h[p.id] ?? []), { action: 'Sent to manager', by: 'Emma (Merchandiser)', date: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) }] }))
+                        showToast(`${p.name} sent to manager for approval.`)
+                      }} className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors">
+                        Send to Manager
+                      </button>
+                    )}
+                    {curStatus === 'Rejected' && (
+                      <button onClick={() => {
+                        if (isOverrideFreight && !freightReasons[p.id]?.trim()) {
+                          showToast('Please add a reason for the freight override before sending.'); return
+                        }
+                        const changes: string[] = []
+                        if (editQty > 0 && editQty !== p.recommendedReorderQty) changes.push(`Qty: ${p.recommendedReorderQty} → ${editQty}`)
+                        if (editCostPrice > 0 && editCostPrice !== p.costPrice) changes.push(`Cost price: £${p.costPrice} → £${editCostPrice}`)
+                        if (editExFactory && editExFactory !== p.exFactoryDate) changes.push(`Ex-Factory: ${p.exFactoryDate} → ${editExFactory}`)
+                        const changeStr = changes.length > 0 ? changes.join(', ') : 'no fields changed'
+                        const today = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+                        setStatusOverrides(o => ({ ...o, [p.id]: 'Pending Approval' }))
+                        setPoHistory(h => ({ ...h, [p.id]: [...(h[p.id] ?? []), { action: `Resubmitted with changes: ${changeStr}`, by: 'Emma (Merchandiser)', date: today }] }))
+                        _sharedResubmits.add(p.id)
+                        showToast(`${p.name} resubmitted for approval.`)
+                      }} className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors">
+                        Resubmit to Manager
+                      </button>
+                    )}
+                    {curStatus === 'Approved' && (
+                      <button onClick={() => {
+                        setStatusOverrides(o => ({ ...o, [p.id]: 'Sent' }))
+                        showToast(`${p.name} pushed to Order App.`)
+                      }} className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors">
+                        Push to Order App
+                      </button>
+                    )}
+                    <button onClick={() => setOpenInquiryId(p.id)}
+                      className="h-7 px-2.5 text-[10px] font-medium rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 transition-colors flex items-center gap-1"
+                      title="Send supplier inquiry">
+                      <Mail className="w-3 h-3" />Inquire
+                    </button>
+                  </div>
+                </div>
+                {/* Divider */}
+                <div className="w-px self-stretch bg-gray-100 shrink-0 mx-1" />
+                {/* KPIs */}
+                <div className="flex-1 grid grid-cols-5 gap-3">
+                  {[
+                    { label: 'Stock Value',     value: `£${p.stockValue.toLocaleString()}`,         pop: '↓ -3.2% vs last month', popCls: 'text-red-400' },
+                    { label: 'Weeks of Stock',  value: `${p.weeksOfStock.toFixed(1)}w`,             pop: '↑ +0.4w vs last week',  popCls: 'text-green-600' },
+                    { label: 'Monthly Revenue', value: `£${(p.monthlyRevenue / 1000).toFixed(1)}k`, pop: '↑ +7.1% vs last month', popCls: 'text-green-600' },
+                    { label: 'Stockout Risk',   value: p.stockoutRisk, badge: riskCls },
+                  ].map(({ label, value, badge, pop, popCls }) => (
+                    <div key={label} className="text-center">
+                      <div className="text-[10px] text-gray-400 mb-0.5">{label}</div>
+                      {badge
+                        ? <span className={`inline-flex px-2 py-0.5 rounded-full text-[11px] font-bold ${badge}`}>{value}</span>
+                        : <div className="text-sm font-bold text-gray-900">{value}</div>}
+                      {pop && <div className={`text-[10px] mt-0.5 ${popCls}`}>{pop}</div>}
+                    </div>
+                  ))}
+                  <div className="text-center">
+                    <div className="text-[10px] text-gray-400 mb-0.5">Gross Margin</div>
+                    <div className={`text-sm font-bold ${gmTextCls}`}>{gm}%</div>
+                    <div className="text-[10px] text-gray-400 mt-0.5">{timeRange === '1m' ? 'Last 4 wks' : timeRange === '6m' ? 'Last 6 mo' : 'Last 12 mo'}</div>
+                  </div>
+                </div>
               </div>
-              <div className="flex gap-2 items-center">
-                {curStatus === 'Draft' && (
-                  <button onClick={() => {
-                    if (isOverrideFreight && !freightReasons[p.id]?.trim()) {
-                      showToast('Please add a reason for the freight override before sending.'); return
-                    }
-                    setStatusOverrides(o => ({ ...o, [p.id]: 'Pending Approval' }))
-                    setPoHistory(h => ({ ...h, [p.id]: [...(h[p.id] ?? []), { action: 'Sent to manager', by: 'Emma (Merchandiser)', date: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) }] }))
-                    showToast(`${p.name} sent to manager for approval.`)
-                  }} className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors">
-                    Send to Manager
-                  </button>
-                )}
-                {curStatus === 'Rejected' && (
-                  <button onClick={() => {
-                    if (isOverrideFreight && !freightReasons[p.id]?.trim()) {
-                      showToast('Please add a reason for the freight override before sending.'); return
-                    }
-                    const changes: string[] = []
-                    if (editQty > 0 && editQty !== p.recommendedReorderQty) changes.push(`Qty: ${p.recommendedReorderQty} → ${editQty}`)
-                    if (editCostPrice > 0 && editCostPrice !== p.costPrice) changes.push(`Cost price: £${p.costPrice} → £${editCostPrice}`)
-                    if (editExFactory && editExFactory !== p.exFactoryDate) changes.push(`Ex-Factory: ${p.exFactoryDate} → ${editExFactory}`)
-                    const changeStr = changes.length > 0 ? changes.join(', ') : 'no fields changed'
-                    const today = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
-                    setStatusOverrides(o => ({ ...o, [p.id]: 'Pending Approval' }))
-                    setPoHistory(h => ({ ...h, [p.id]: [...(h[p.id] ?? []), { action: `Resubmitted with changes: ${changeStr}`, by: 'Emma (Merchandiser)', date: today }] }))
-                    _sharedResubmits.add(p.id)
-                    showToast(`${p.name} resubmitted for approval.`)
-                  }} className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors">
-                    Resubmit to Manager
-                  </button>
-                )}
-                {curStatus === 'Approved' && (
-                  <button onClick={() => {
-                    setStatusOverrides(o => ({ ...o, [p.id]: 'Sent' }))
-                    showToast(`${p.name} pushed to Order App.`)
-                  }} className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors">
-                    Push to Order App
-                  </button>
-                )}
-                <button onClick={() => setOpenInquiryId(p.id)}
-                  className="h-7 px-2.5 text-[10px] font-medium rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 transition-colors flex items-center gap-1"
-                  title="Send supplier inquiry">
-                  <Mail className="w-3 h-3" />Inquire
-                </button>
-              </div>
-            </div>
-          </div>
+            )
+          })()}
 
           {/* Editable fields */}
           <div className="bg-white border border-gray-100 rounded-xl px-5 py-4 shadow-sm space-y-2">
@@ -4351,189 +4233,303 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
             const activeMode: 'Sea' | 'Air' | 'Split' = freightSplits[p.id]
               ? 'Split'
               : (freightOverrides[p.id] ?? p.recommendedFreight) === 'Air' ? 'Air' : 'Sea'
-            const showOverrideReason = activeMode === 'Split' || (activeMode as string) !== p.recommendedFreight
+
+            // Margin scenario data
+            const scenarios = p.freightScenarios
+            const seaMarginVal  = scenarios?.sea.predicted6moGrossMargin   ?? null
+            const airMarginVal  = scenarios?.air.predicted6moGrossMargin   ?? null
+            const splitMarginVal = scenarios?.split.predicted6moGrossMargin ?? null
+            const hasMarginData = seaMarginVal !== null && airMarginVal !== null
+            const bestMargin    = hasMarginData ? Math.max(seaMarginVal!, airMarginVal!, splitMarginVal ?? 0) : null
+
+            // Effective recommended mode: margin mode picks option with highest margin
+            const marginWinner = hasMarginData
+              ? (airMarginVal! >= seaMarginVal! ? 'Air' : 'Sea') as 'Sea' | 'Air'
+              : p.recommendedFreight as 'Sea' | 'Air'
+            const recMode = (recommendMode === 'margin' && hasMarginData ? marginWinner : p.recommendedFreight) as 'Sea' | 'Air'
+
+            const showOverrideReason = !!(freightSplits[p.id]) || (freightOverrides[p.id] !== undefined && freightOverrides[p.id] !== recMode)
+            const recOpts = freightOpts[recMode]
+            const altMode = (recMode === 'Sea' ? 'Air' : 'Sea') as 'Sea' | 'Air'
+            const altOpts = freightOpts[altMode]
+            const altDelta = altOpts.totalCost - recOpts.totalCost
+            const heroSelected = activeMode === recMode
+
+            // Per-option margins and deltas vs best
+            const getMargin = (m: 'Sea' | 'Air' | 'Split') =>
+              m === 'Sea' ? seaMarginVal : m === 'Air' ? airMarginVal : splitMarginVal
+            const marginDeltaVsBest = (m: 'Sea' | 'Air' | 'Split') => {
+              const v = getMargin(m)
+              return hasMarginData && v !== null && bestMargin !== null ? v - bestMargin : null
+            }
+            const recMarginVal  = getMargin(recMode)
+            const altMarginVsRec = hasMarginData && getMargin(altMode) !== null && recMarginVal !== null
+              ? getMargin(altMode)! - recMarginVal : null
+
             return (
               <div className="bg-white border border-gray-100 rounded-xl p-5 shadow-sm">
-                <div className="text-sm font-semibold text-gray-800 mb-3">Freight Options</div>
-                {/* Suggested freight */}
-                <div className="flex items-center gap-2 mb-3 text-[11px] text-gray-500">
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-700 text-[10px] font-semibold">
-                    {p.recommendedFreight === 'Air' ? '✈️' : '🚢'} Suggested: {p.recommendedFreight}
-                  </span>
-                  <span>{p.recommendedFreight === 'Sea' ? 'lowest landed cost at this lead time' : 'required to meet receipt date'}</span>
-                </div>
-                {/* Mode selector tabs */}
-                <div className="flex items-center bg-gray-100 rounded-lg p-0.5 gap-0.5 mb-4 w-fit">
-                  {(['Sea', 'Air', 'Split'] as const).map(mode => {
-                    const active = activeMode === mode
-                    return (
-                      <button key={mode} onClick={() => {
-                        if (mode === 'Sea') {
-                          setFreightOverrides(o => ({ ...o, [p.id]: 'Sea' }))
-                          setFreightSplits(s => { const n = { ...s }; delete n[p.id]; return n })
-                        } else if (mode === 'Air') {
-                          setFreightOverrides(o => ({ ...o, [p.id]: 'Air' }))
-                          setFreightSplits(s => { const n = { ...s }; delete n[p.id]; return n })
-                        } else {
-                          setFreightSplits(s => ({ ...s, [p.id]: { air: Math.round(qty * 0.3), sea: Math.round(qty * 0.7) } }))
-                        }
-                      }}
-                        className={`h-7 px-3 rounded-md text-xs font-semibold transition-colors ${active ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
-                        {mode === 'Sea' ? '🚢 Sea' : mode === 'Air' ? '✈️ Air' : '↔ Split'}
-                      </button>
-                    )
-                  })}
-                </div>
-                {/* Single mode: show both cards */}
-                {activeMode !== 'Split' && (
-                  <div className="grid grid-cols-2 gap-3">
-                    {(['Sea', 'Air'] as const).map(method => {
-                      const opts = freightOpts[method]
-                      const isSelected    = activeMode === method
-                      const isRecommended = p.recommendedFreight === method
-                      return (
-                        <button key={method} onClick={() => {
-                          setFreightOverrides(o => ({ ...o, [p.id]: method }))
-                          setFreightSplits(s => { const n = { ...s }; delete n[p.id]; return n })
-                        }}
-                          className={`text-left p-4 rounded-xl border-2 transition-all ${
-                            isSelected
-                              ? isRecommended ? 'border-indigo-500 bg-indigo-50' : 'border-amber-400 bg-amber-50'
-                              : 'border-gray-200 bg-gray-50/40 hover:bg-gray-50'
-                          }`}>
-                          <div className="flex items-center justify-between mb-2">
-                            <span className="text-sm font-bold text-gray-900">{method === 'Sea' ? '🚢 Sea' : '✈️ Air'}</span>
-                            <div className="flex items-center gap-1.5">
-                              {isRecommended && <span className="px-2 py-0.5 bg-indigo-600 text-white text-[10px] font-bold rounded-full">Recommended</span>}
-                              {isSelected    && <span className="text-[10px] font-semibold text-indigo-600">● Selected</span>}
-                            </div>
-                          </div>
-                          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
-                            <div><span className="text-gray-400">Lead time</span><div className="font-semibold text-gray-800">{opts.leadTime}</div></div>
-                            <div><span className="text-gray-400">Ex-Factory</span><div className="font-semibold text-gray-800">{opts.exFactory}</div></div>
-                            <div><span className="text-gray-400">Receipt</span><div className="font-semibold text-gray-800">{opts.receipt}</div></div>
-                            <div><span className="text-gray-400">Unit cost</span><div className="font-semibold text-gray-800">£{opts.unitCost.toFixed(2)}</div></div>
-                            <div><span className="text-gray-400">Total cost</span><div className="font-bold text-gray-900">£{opts.totalCost.toLocaleString()}</div></div>
-                          </div>
-                        </button>
-                      )
-                    })}
+                <div className="flex items-center justify-between mb-3">
+                  <div className="text-sm font-semibold text-gray-800">Freight Options</div>
+                  <div className="flex items-center gap-0.5 rounded-full border border-gray-200 p-0.5 text-[10px]">
+                    <button
+                      onClick={() => setRecommendMode('cost')}
+                      className={`px-2.5 py-0.5 rounded-full font-medium transition-colors ${recommendMode === 'cost' ? 'bg-indigo-600 text-white' : 'text-gray-500 hover:text-gray-700'}`}
+                    >Lowest cost</button>
+                    <button
+                      onClick={() => setRecommendMode('margin')}
+                      className={`px-2.5 py-0.5 rounded-full font-medium transition-colors ${recommendMode === 'margin' ? 'bg-indigo-600 text-white' : 'text-gray-500 hover:text-gray-700'}`}
+                    >Highest margin</button>
                   </div>
-                )}
-                {/* Split mode */}
-                {activeMode === 'Split' && freightSplits[p.id] && (() => {
-                  const split = freightSplits[p.id]
-                  const airPct = qty > 0 ? Math.round(split.air / qty * 100) : 0
-                  const airUnitCost = freightOpts.Air.unitCost
-                  const seaUnitCost = freightOpts.Sea.unitCost
-                  const airTotal = Math.round(split.air * airUnitCost)
-                  const seaTotal = Math.round(split.sea * seaUnitCost)
-                  const combinedTotal = airTotal + seaTotal
-                  const splitValid = split.air + split.sea === qty
-                  return (
-                    <div className="space-y-3">
-                      <div className="grid grid-cols-2 gap-3">
-                        <div className="bg-sky-50 border border-sky-200 rounded-xl p-4">
-                          <div className="text-sm font-bold text-sky-700 mb-2">✈️ Air</div>
-                          <label className="text-[11px] text-gray-500 block mb-1">Units by Air</label>
-                          <input type="number" min={0} max={qty} value={split.air}
-                            onChange={e => setFreightSplits(s => ({ ...s, [p.id]: { air: Number(e.target.value), sea: qty - Number(e.target.value) } }))}
-                            className="w-full rounded-lg border border-sky-200 bg-white px-2 py-1 text-xs font-bold text-gray-900 focus:outline-none focus:ring-1 focus:ring-sky-400" />
-                          <div className="text-[11px] text-gray-500 mt-1.5">Unit cost £{freightOpts.Air.unitCost.toFixed(2)}</div>
-                        </div>
-                        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
-                          <div className="text-sm font-bold text-blue-700 mb-2">🚢 Sea</div>
-                          <label className="text-[11px] text-gray-500 block mb-1">Units by Sea</label>
-                          <input type="number" min={0} max={qty} value={split.sea}
-                            onChange={e => setFreightSplits(s => ({ ...s, [p.id]: { sea: Number(e.target.value), air: qty - Number(e.target.value) } }))}
-                            className="w-full rounded-lg border border-blue-200 bg-white px-2 py-1 text-xs font-bold text-gray-900 focus:outline-none focus:ring-1 focus:ring-blue-400" />
-                          <div className="text-[11px] text-gray-500 mt-1.5">Unit cost £{freightOpts.Sea.unitCost.toFixed(2)}</div>
-                        </div>
-                      </div>
-                      {!splitValid && (
-                        <div className="text-xs text-red-600 font-semibold">Air + Sea units must equal total order qty ({qty.toLocaleString()})</div>
+                </div>
+                {/* Hero card — recommended option */}
+                <button
+                  onClick={() => {
+                    setFreightOverrides(o => ({ ...o, [p.id]: recMode }))
+                    setFreightSplits(s => { const n = { ...s }; delete n[p.id]; return n })
+                  }}
+                  className={`w-full text-left p-4 rounded-xl border-2 transition-all mb-3 ${
+                    heroSelected
+                      ? 'border-indigo-500 bg-indigo-50'
+                      : 'border-indigo-200 bg-white hover:bg-indigo-50/30'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-sm font-bold text-gray-900">
+                      {recMode === 'Sea' ? '🚢 Sea freight' : '✈️ Air freight'}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 bg-indigo-600 text-white text-[10px] font-bold rounded-full">Recommended</span>
+                      {recommendMode === 'cost' && altDelta > 0 && (
+                        <span className="text-[10px] font-semibold text-green-700 bg-green-50 border border-green-100 px-2 py-0.5 rounded-full">
+                          saves £{altDelta.toLocaleString()} vs {altMode}
+                        </span>
                       )}
-                      <div className="h-2 rounded-full bg-blue-100 overflow-hidden">
-                        <div className="h-full bg-sky-500 rounded-full transition-all" style={{ width: `${airPct}%` }} />
-                      </div>
-                      <div className="flex justify-between text-[10px] text-gray-500">
-                        <span>✈️ Air {airPct}%</span><span>🚢 Sea {100 - airPct}%</span>
-                      </div>
-                      {splitValid && (
-                        <div className="space-y-2">
-                          <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Raising 2 POs simultaneously</div>
-                          <div className="grid grid-cols-2 gap-3">
-                            <div className="bg-sky-50 border border-sky-200 rounded-xl px-4 py-3 text-[11px]">
-                              <div className="font-bold text-sky-700 mb-2">✈️ Air PO</div>
-                              <div className="space-y-1">
-                                <div className="flex justify-between"><span className="text-gray-400">Units</span><span className="font-semibold text-gray-900">{split.air.toLocaleString()}</span></div>
-                                <div className="flex justify-between"><span className="text-gray-400">Unit cost</span><span className="font-semibold text-gray-900">£{airUnitCost.toFixed(2)}</span></div>
-                                <div className="flex justify-between border-t border-sky-100 pt-1 mt-1"><span className="text-gray-500 font-semibold">Total</span><span className="font-bold text-sky-800">£{airTotal.toLocaleString()}</span></div>
-                                <div className="flex justify-between"><span className="text-gray-400">Receipt</span><span className="font-semibold text-gray-900">{freightOpts.Air.receipt}</span></div>
-                              </div>
-                            </div>
-                            <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-[11px]">
-                              <div className="font-bold text-blue-700 mb-2">🚢 Sea PO</div>
-                              <div className="space-y-1">
-                                <div className="flex justify-between"><span className="text-gray-400">Units</span><span className="font-semibold text-gray-900">{split.sea.toLocaleString()}</span></div>
-                                <div className="flex justify-between"><span className="text-gray-400">Unit cost</span><span className="font-semibold text-gray-900">£{seaUnitCost.toFixed(2)}</span></div>
-                                <div className="flex justify-between border-t border-blue-100 pt-1 mt-1"><span className="text-gray-500 font-semibold">Total</span><span className="font-bold text-blue-800">£{seaTotal.toLocaleString()}</span></div>
-                                <div className="flex justify-between"><span className="text-gray-400">Receipt</span><span className="font-semibold text-gray-900">{freightOpts.Sea.receipt}</span></div>
-                              </div>
-                            </div>
-                          </div>
-                          <div className="flex justify-end items-center gap-2 text-xs text-gray-500 pt-1">
-                            <span>Combined total</span>
-                            <span className="font-bold text-gray-900 text-sm">£{combinedTotal.toLocaleString()}</span>
-                          </div>
-                        </div>
+                      {recommendMode === 'margin' && hasMarginData && altMarginVsRec !== null && altMarginVsRec < 0 && (
+                        <span className="text-[10px] font-semibold text-green-700 bg-green-50 border border-green-100 px-2 py-0.5 rounded-full">
+                          +£{Math.abs(altMarginVsRec).toLocaleString()} margin vs {altMode}
+                        </span>
                       )}
                     </div>
-                  )
-                })()}
-                {/* Override reason */}
-                {showOverrideReason && (
-                  <div className="mt-3">
-                    <label className="text-xs font-semibold text-amber-700 block mb-1">
-                      Reason for override <span className="text-gray-400 font-normal">(required before sending to manager)</span>
-                    </label>
-                    <textarea rows={2} placeholder="Why are you overriding the recommended freight method?"
-                      value={freightReasons[p.id] ?? ''}
-                      onChange={e => setFreightReasons(r => ({ ...r, [p.id]: e.target.value }))}
-                      className="w-full rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-gray-700 resize-none focus:outline-none focus:ring-1 focus:ring-amber-400 placeholder:text-gray-400"
-                    />
                   </div>
+                  <div className="grid grid-cols-5 gap-x-3 gap-y-1 text-[11px]">
+                    <div><span className="text-gray-400">Lead time</span><div className="font-semibold text-gray-800 mt-0.5">{recOpts.leadTime}</div></div>
+                    <div><span className="text-gray-400">Receipt date</span><div className="font-semibold text-gray-800 mt-0.5">{recOpts.receipt}</div></div>
+                    <div><span className="text-gray-400">Unit cost</span><div className="font-semibold text-gray-800 mt-0.5">£{recOpts.unitCost.toFixed(2)}</div></div>
+                    <div><span className="text-gray-400">Total cost</span><div className="font-bold text-gray-900 mt-0.5">£{recOpts.totalCost.toLocaleString()}</div></div>
+                    {hasMarginData && recMarginVal !== null && (
+                      <div>
+                        <span className="text-gray-400">6mo margin</span>
+                        <div className="font-bold text-gray-900 mt-0.5">£{recMarginVal.toLocaleString()}</div>
+                        {(() => { const d = marginDeltaVsBest(recMode); return d !== null && d < 0 ? <div className="text-[9px] text-red-500 font-semibold">−£{Math.abs(d).toLocaleString()} vs best</div> : null })()}
+                      </div>
+                    )}
+                  </div>
+                </button>
+                {/* Alternatives */}
+                <details className="group" open={showOverrideReason}>
+                  <summary className="cursor-pointer list-none flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-800 select-none">
+                    <svg className="w-3 h-3 transition-transform group-open:rotate-90 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" />
+                    </svg>
+                    Compare other freight options (2 alternatives)
+                  </summary>
+                  <div className="mt-2 space-y-1.5">
+                    {/* Air/Sea alternative — full grid */}
+                    <button
+                      onClick={() => {
+                        setFreightOverrides(o => ({ ...o, [p.id]: altMode }))
+                        setFreightSplits(s => { const n = { ...s }; delete n[p.id]; return n })
+                      }}
+                      className={`w-full text-left px-3 py-3 rounded-lg border transition-all ${
+                        activeMode === altMode ? 'border-amber-400 bg-amber-50' : 'border-gray-200 bg-gray-50/40 hover:bg-gray-50'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-[11px] font-semibold text-gray-700">{altMode === 'Sea' ? '🚢 Sea' : '✈️ Air'}</span>
+                        <span className={`text-[10px] font-semibold tabular-nums ${altDelta > 0 ? 'text-red-500' : 'text-green-600'}`}>
+                          {altDelta > 0 ? '+' : ''}£{altDelta.toLocaleString()} vs recommended
+                        </span>
+                      </div>
+                      <div className={`grid gap-x-3 text-[10px] ${hasMarginData ? 'grid-cols-5' : 'grid-cols-4'}`}>
+                        <div><div className="text-gray-400">Lead time</div><div className="font-medium text-gray-600 mt-0.5">{altOpts.leadTime}</div></div>
+                        <div><div className="text-gray-400">Receipt date</div><div className="font-medium text-gray-600 mt-0.5">{altOpts.receipt}</div></div>
+                        <div><div className="text-gray-400">Unit cost</div><div className="font-medium text-gray-600 mt-0.5">£{altOpts.unitCost.toFixed(2)}</div></div>
+                        <div><div className="text-gray-400">Total cost</div><div className="font-semibold text-gray-700 mt-0.5">£{altOpts.totalCost.toLocaleString()}</div></div>
+                        {hasMarginData && getMargin(altMode) !== null && (
+                          <div>
+                            <div className="text-gray-400">6mo margin</div>
+                            <div className="font-semibold text-gray-700 mt-0.5">£{getMargin(altMode)!.toLocaleString()}</div>
+                            {(() => { const d = marginDeltaVsBest(altMode); return d !== null && d < 0 ? <div className="text-[9px] text-red-500 font-semibold">−£{Math.abs(d).toLocaleString()} vs best</div> : null })()}
+                          </div>
+                        )}
+                      </div>
+                    </button>
+                    {/* Split — compact row when not selected, inline configurator when selected */}
+                    {(() => {
+                      const splitActive = activeMode === 'Split'
+                      const split = freightSplits[p.id] ?? { air: Math.round(qty * 0.3), sea: Math.round(qty * 0.7) }
+                      const airPct = qty > 0 ? Math.round(split.air / qty * 100) : 30
+                      const airUnitCost = freightOpts.Air.unitCost
+                      const seaUnitCost = freightOpts.Sea.unitCost
+                      const airTotal = Math.round(split.air * airUnitCost)
+                      const seaTotal = Math.round(split.sea * seaUnitCost)
+                      const combinedTotal = airTotal + seaTotal
+                      const splitDelta = combinedTotal - recOpts.totalCost
+                      const blendedUnit = qty > 0 ? combinedTotal / qty : 0
+                      const splitValid = split.air + split.sea === qty
+                      if (!splitActive) {
+                        return (
+                          <button
+                            onClick={() => setFreightSplits(s => ({ ...s, [p.id]: { air: Math.round(qty * 0.3), sea: Math.round(qty * 0.7) } }))}
+                            className="w-full text-left px-3 py-3 rounded-lg border border-gray-200 bg-gray-50/40 hover:bg-gray-50 transition-all"
+                          >
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="text-[11px] font-semibold text-gray-700">↔ Split</span>
+                              <span className={`text-[10px] font-semibold tabular-nums ${splitDelta > 0 ? 'text-red-500' : 'text-green-600'}`}>
+                                {splitDelta > 0 ? '+' : ''}£{splitDelta.toLocaleString()} vs recommended
+                              </span>
+                            </div>
+                            <div className={`grid gap-x-3 text-[10px] ${hasMarginData ? 'grid-cols-5' : 'grid-cols-4'}`}>
+                              <div><div className="text-gray-400">Lead time</div><div className="font-medium text-gray-600 mt-0.5">mixed</div></div>
+                              <div><div className="text-gray-400">Receipt date</div><div className="font-medium text-gray-600 mt-0.5">{freightOpts.Sea.receipt}</div></div>
+                              <div><div className="text-gray-400">Blended cost</div><div className="font-medium text-gray-600 mt-0.5">£{blendedUnit.toFixed(2)}</div></div>
+                              <div><div className="text-gray-400">Total cost</div><div className="font-semibold text-gray-700 mt-0.5">£{combinedTotal.toLocaleString()}</div></div>
+                              {hasMarginData && splitMarginVal !== null && (
+                                <div>
+                                  <div className="text-gray-400">6mo margin</div>
+                                  <div className="font-semibold text-gray-700 mt-0.5">£{splitMarginVal.toLocaleString()}</div>
+                                  {(() => { const d = marginDeltaVsBest('Split'); return d !== null && d < 0 ? <div className="text-[9px] text-red-500 font-semibold">−£{Math.abs(d).toLocaleString()} vs best</div> : null })()}
+                                </div>
+                              )}
+                            </div>
+                          </button>
+                        )
+                      }
+                      return (
+                        <div className="rounded-lg border border-amber-400 bg-amber-50">
+                          {/* Header */}
+                          <div className="flex items-center justify-between px-3 pt-3 pb-2 border-b border-amber-200">
+                            <div className="flex items-center gap-2 text-[11px]">
+                              <span className="font-semibold text-gray-800">↔ Split</span>
+                              <span className="text-gray-500">{airPct}% Air · {100 - airPct}% Sea</span>
+                            </div>
+                            <span className={`text-[10px] font-semibold tabular-nums ${splitDelta > 0 ? 'text-red-500' : 'text-green-600'}`}>
+                              {splitDelta > 0 ? '+' : ''}£{splitDelta.toLocaleString()} vs recommended
+                            </span>
+                          </div>
+                          <div className="px-3 pt-3 pb-3 space-y-3">
+                            {/* Input cards */}
+                            <div className="grid grid-cols-2 gap-3">
+                              <div className="bg-sky-50 border border-sky-200 rounded-xl p-3">
+                                <div className="text-xs font-bold text-sky-700 mb-1.5">✈️ Air</div>
+                                <label className="text-[10px] text-gray-500 block mb-1">Units by Air</label>
+                                <input type="number" min={0} max={qty} value={split.air}
+                                  onChange={e => setFreightSplits(s => ({ ...s, [p.id]: { air: Number(e.target.value), sea: qty - Number(e.target.value) } }))}
+                                  className="w-full rounded-lg border border-sky-200 bg-white px-2 py-1 text-xs font-bold text-gray-900 focus:outline-none focus:ring-1 focus:ring-sky-400" />
+                                <div className="text-[10px] text-gray-500 mt-1.5">£{airUnitCost.toFixed(2)}/unit · receipt {freightOpts.Air.receipt}</div>
+                              </div>
+                              <div className="bg-blue-50 border border-blue-200 rounded-xl p-3">
+                                <div className="text-xs font-bold text-blue-700 mb-1.5">🚢 Sea</div>
+                                <label className="text-[10px] text-gray-500 block mb-1">Units by Sea</label>
+                                <input type="number" min={0} max={qty} value={split.sea}
+                                  onChange={e => setFreightSplits(s => ({ ...s, [p.id]: { sea: Number(e.target.value), air: qty - Number(e.target.value) } }))}
+                                  className="w-full rounded-lg border border-blue-200 bg-white px-2 py-1 text-xs font-bold text-gray-900 focus:outline-none focus:ring-1 focus:ring-blue-400" />
+                                <div className="text-[10px] text-gray-500 mt-1.5">£{seaUnitCost.toFixed(2)}/unit · receipt {freightOpts.Sea.receipt}</div>
+                              </div>
+                            </div>
+                            {!splitValid && (
+                              <div className="text-xs text-red-600 font-semibold">Air + Sea units must equal total order qty ({qty.toLocaleString()})</div>
+                            )}
+                            {/* Allocation slider */}
+                            <div className="h-2 rounded-full bg-blue-100 overflow-hidden">
+                              <div className="h-full bg-sky-500 rounded-full transition-all" style={{ width: `${airPct}%` }} />
+                            </div>
+                            <div className="flex justify-between text-[10px] text-gray-500">
+                              <span>✈️ Air {airPct}%</span><span>🚢 Sea {100 - airPct}%</span>
+                            </div>
+                            {/* Two-PO summary */}
+                            {splitValid && (
+                              <div className="space-y-2">
+                                <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Raising 2 POs simultaneously</div>
+                                <div className="grid grid-cols-2 gap-3">
+                                  <div className="bg-sky-50 border border-sky-200 rounded-xl px-3 py-2.5 text-[10px]">
+                                    <div className="font-bold text-sky-700 mb-1.5">✈️ Air PO</div>
+                                    <div className="space-y-1">
+                                      <div className="flex justify-between"><span className="text-gray-400">Units</span><span className="font-semibold text-gray-900">{split.air.toLocaleString()}</span></div>
+                                      <div className="flex justify-between"><span className="text-gray-400">Unit cost</span><span className="font-semibold text-gray-900">£{airUnitCost.toFixed(2)}</span></div>
+                                      <div className="flex justify-between border-t border-sky-100 pt-1 mt-1"><span className="text-gray-500 font-semibold">Total</span><span className="font-bold text-sky-800">£{airTotal.toLocaleString()}</span></div>
+                                      <div className="flex justify-between"><span className="text-gray-400">Receipt</span><span className="font-semibold text-gray-900">{freightOpts.Air.receipt}</span></div>
+                                    </div>
+                                  </div>
+                                  <div className="bg-blue-50 border border-blue-200 rounded-xl px-3 py-2.5 text-[10px]">
+                                    <div className="font-bold text-blue-700 mb-1.5">🚢 Sea PO</div>
+                                    <div className="space-y-1">
+                                      <div className="flex justify-between"><span className="text-gray-400">Units</span><span className="font-semibold text-gray-900">{split.sea.toLocaleString()}</span></div>
+                                      <div className="flex justify-between"><span className="text-gray-400">Unit cost</span><span className="font-semibold text-gray-900">£{seaUnitCost.toFixed(2)}</span></div>
+                                      <div className="flex justify-between border-t border-blue-100 pt-1 mt-1"><span className="text-gray-500 font-semibold">Total</span><span className="font-bold text-blue-800">£{seaTotal.toLocaleString()}</span></div>
+                                      <div className="flex justify-between"><span className="text-gray-400">Receipt</span><span className="font-semibold text-gray-900">{freightOpts.Sea.receipt}</span></div>
+                                    </div>
+                                  </div>
+                                </div>
+                                <div className="flex justify-end items-center gap-2 text-xs text-gray-500 pt-1">
+                                  <span>Combined total</span>
+                                  <span className="font-bold text-gray-900 text-sm">£{combinedTotal.toLocaleString()}</span>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )
+                    })()}
+                  </div>
+                  {/* Override reason */}
+                  {showOverrideReason && (
+                    <div className="mt-3">
+                      <label className="text-xs font-semibold text-amber-700 block mb-1">
+                        Reason for override <span className="text-gray-400 font-normal">(required before sending to manager)</span>
+                      </label>
+                      <textarea rows={2} placeholder="Why are you overriding the recommended freight method?"
+                        value={freightReasons[p.id] ?? ''}
+                        onChange={e => setFreightReasons(r => ({ ...r, [p.id]: e.target.value }))}
+                        className="w-full rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-gray-700 resize-none focus:outline-none focus:ring-1 focus:ring-amber-400 placeholder:text-gray-400"
+                      />
+                    </div>
+                  )}
+                </details>
+                {/* How is this calculated? */}
+                {hasMarginData && (
+                  <details className="mt-3 group">
+                    <summary className="cursor-pointer list-none text-[10px] text-indigo-500 hover:text-indigo-700 font-medium select-none">
+                      ▸ How is 6mo gross margin calculated?
+                    </summary>
+                    <div className="mt-2 bg-gray-50 border border-gray-100 rounded-xl p-3 text-[10px] text-gray-600 space-y-2">
+                      <p className="font-semibold text-gray-700">Predicted 6-month gross margin</p>
+                      <p className="text-gray-500 italic">Indicative model — hand-tuned for demo purposes. Based on expected sales, margin per unit, and estimated stockout impact by freight option.</p>
+                      {(['Sea', 'Air', 'Split'] as const).filter(m => getMargin(m) !== null).map(m => {
+                        const scen: FreightScenarioData | undefined = scenarios?.[m.toLowerCase() as 'sea' | 'air' | 'split']
+                        if (!scen) return null
+                        const a = scen.assumptions
+                        return (
+                          <div key={m} className="border border-gray-200 rounded-lg p-2 space-y-1.5">
+                            <div className="font-semibold text-gray-700">{m === 'Sea' ? '🚢' : m === 'Air' ? '✈️' : '↔'} {m} freight — <span className="text-indigo-700">£{scen.predicted6moGrossMargin.toLocaleString()}</span></div>
+                            <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-gray-500">
+                              <span>Forecast units (6mo): <b className="text-gray-700">{a.forecastUnits.toLocaleString()}</b></span>
+                              <span>Selling price: <b className="text-gray-700">£{a.sellingPrice.toFixed(2)}</b></span>
+                              <span>Cost incl. freight: <b className="text-gray-700">£{a.costPerUnitWithFreight.toFixed(2)}</b></span>
+                              <span>Stockout days: <b className="text-gray-700">{a.stockoutDays}</b></span>
+                              <span>Est. lost sales: <b className="text-gray-700">{a.lostUnits.toLocaleString()} units</b></span>
+                              <span>Recovery rate: <b className="text-gray-700">{a.lostSaleRecoveryPct}%</b></span>
+                            </div>
+                            <div className="text-gray-400 pt-0.5 border-t border-gray-100">
+                              Formula: (captured units × margin/unit) − (lost units × margin/unit × (1 − recovery rate))
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </details>
                 )}
               </div>
-            )
-          })()}
-
-          {/* KPI strip */}
-          {(() => {
-            const gm = getMarginForWindow(p.marginPct, p.id, timeRange)
-            const gmBorderCls = gm > 25 ? 'border-l-green-400' : gm >= 10 ? 'border-l-amber-400' : 'border-l-red-400'
-            const gmTextCls   = gm > 25 ? 'text-green-700'    : gm >= 10 ? 'text-amber-700'    : 'text-red-700'
-            return (
-          <div className="grid grid-cols-5 gap-3">
-            {[
-              { label: 'Stock Value',     value: `£${p.stockValue.toLocaleString()}`, pop: '↓ -3.2% vs last month', popCls: 'text-red-400' },
-              { label: 'Weeks of Stock',  value: `${p.weeksOfStock.toFixed(1)}w`,     pop: '↑ +0.4w vs last week',  popCls: 'text-green-600' },
-              { label: 'Monthly Revenue', value: `£${(p.monthlyRevenue / 1000).toFixed(1)}k`, pop: '↑ +7.1% vs last month', popCls: 'text-green-600' },
-              { label: 'Stockout Risk',   value: p.stockoutRisk, badge: riskCls },
-            ].map(({ label, value, badge, pop, popCls }) => (
-              <div key={label} className="bg-white border border-gray-100 rounded-xl px-4 py-3 shadow-sm text-center">
-                {badge ? <span className={`inline-flex px-2 py-0.5 rounded-full text-[11px] font-bold ${badge}`}>{value}</span>
-                       : <div className="text-lg font-bold text-gray-900">{value}</div>}
-                <div className="text-[10px] text-gray-400 mt-1">{label}</div>
-                {pop && <div className={`text-[9px] mt-0.5 ${popCls}`}>{pop}</div>}
-              </div>
-            ))}
-            <div className={`bg-white border border-gray-100 rounded-xl px-4 py-3 shadow-sm text-center border-l-4 ${gmBorderCls}`}>
-              <div className={`text-lg font-bold ${gmTextCls}`}>{gm}%</div>
-              <div className="text-[10px] text-gray-400 mt-1">Gross Margin</div>
-              <div className="text-[9px] text-gray-400 mt-0.5">{timeRange === '1m' ? 'Last 4 wks' : timeRange === '6m' ? 'Last 6 mo' : 'Last 12 mo'}</div>
-            </div>
-          </div>
             )
           })()}
 
@@ -6070,113 +6066,45 @@ function ManagerReorderView() {
   )
 }
 // ── Kanban Panel ─────────────────────────────────────────────────────────────
-// ── PO Line Drawer ────────────────────────────────────────────────────────────
-function POLineDrawer({
-  po, events, lastChased, onClose, onAddEvent, onNavigateToNeg,
+// ── PO Detail Pane ────────────────────────────────────────────────────────────
+function PODetailPane({
+  po, onAddEvent, fromActionDrawer = false, showHeader = true, onClose,
 }: {
   po:               PO
-  events:           POEvent[]
-  lastChased:       string | undefined
-  onClose:          () => void
-  onAddEvent:       (poId: string, event: POEvent) => void
-  onNavigateToNeg?: (recId: string) => void
+  onAddEvent?:      (poId: string, event: POEvent) => void
+  fromActionDrawer?: boolean
+  showHeader?:      boolean
+  onClose?:         () => void
 }) {
   const rag       = computeRAG(po)
   const rc        = RAG_CFG[rag]
   const sup       = getSupplier(po.supplierId)
   const xfDate    = getXFactoryDate(po)
   const isPostDsp = ['In Transit', 'Partially Delivered'].includes(po.status)
-
-  const [drawerTab,       setDrawerTab]       = useState<'status-decisions' | 'product'>('status-decisions')
-  const [noteInput,       setNoteInput]       = useState('')
-  const [isSimulating,    setIsSimulating]    = useState(false)
-  const [pendingProposal, setPendingProposal] = useState<DateChangeProposal | null>(null)
-  const [replyText,       setReplyText]       = useState('')
-  const [lateDecision,    setLateDecision]    = useState<'cancel' | 'cpr' | 'accept' | null>(null)
-  const [decisionDone,    setDecisionDone]    = useState(false)
-  const [whyExpanded,     setWhyExpanded]     = useState(false)
+  const isDelivered = po.status === 'Delivered'
+  const today     = new Date()
+  const delivDate = new Date(po.revisedDelivery ?? po.expectedDelivery)
+  const isDeliveryOverdue = delivDate < today && !isDelivered
 
   const product      = getLinkedProduct(po.id)
   const openPOs      = product ? ALL_POS.filter(p => PO_PRODUCT_MAP[p.id] === PO_PRODUCT_MAP[po.id] && p.status !== 'Delivered') : []
-  const totalOnOrder = openPOs.reduce((sum, p) => sum + p.quantity, 0)
+  const totalOnOrder = openPOs.reduce((s, p) => s + p.quantity, 0)
+  void totalOnOrder
 
-  const isEligibleLate = rag === 'red' && po.status === 'Ex-factory delay'
-  const orderValueNum  = parseInt(po.orderValue.replace(/[^0-9]/g, ''), 10) || 0
-  const daysLate       = Math.max(0, Math.ceil((new Date().getTime() - new Date(po.expectedDelivery).getTime()) / 86400000))
-  const cprPct         = Math.min(15, Math.round(daysLate * 0.5))
+  const [productOpen, setProductOpen] = useState(false)
+  const [noteText, setNoteText] = useState('')
 
-  type LateDec = 'cancel' | 'cpr' | 'accept'
-  const PO_REC_MAP: Record<string, { rec: LateDec; cardRationale: string; bullets: string[] }> = {
-    'PO-2756': {
-      rec: 'cpr',
-      cardRationale: `Best £/wk trade-off — 8.5w cover means cancellation isn't urgent.`,
-      bullets: [
-        "Eastern Textiles' on-time rate is 54% and deteriorating — a CPR sets a commercial precedent for this supplier.",
-        "8.5 weeks of cover on Wide Leg Trousers means a stockout from this delay is unlikely.",
-        `CPR ${cprPct}% recovers ~£${Math.round(orderValueNum * cprPct / 100).toLocaleString()} without blocking intake or requiring spot-sourcing.`,
-      ],
-    },
-    'PO-2834': {
-      rec: 'cpr',
-      cardRationale: `3w cover on Floral Midi Dress is too tight to cancel; CPR secures the stock with compensation.`,
-      bullets: [
-        "Floral Midi Dress is at 3w cover and classified low-stock — cancellation would almost certainly cause a stockout.",
-        "Accepting late at no penalty rewards a deteriorating supplier and sets a bad precedent across Eastern Textiles' 18 open POs.",
-        `CPR ${cprPct}% (~£${Math.round(orderValueNum * cprPct / 100).toLocaleString()}) compensates for the delay while locking in delivery within ${Math.ceil(daysLate / 7)} weeks.`,
-      ],
-    },
-  }
-  const poRec = PO_REC_MAP[po.id] ?? null
-
-  const addNote = () => {
-    if (!noteInput.trim()) return
-    onAddEvent(po.id, { id: `note-${Date.now()}`, type: 'manual_note', timestamp: new Date().toISOString(), body: noteInput.trim(), author: 'buyer' })
-    setNoteInput('')
-  }
-
-  const handleSimulate = () => {
-    setIsSimulating(true)
-    setTimeout(() => {
-      const { proposal, replyText: rt } = simulatePOReply(po)
-      setPendingProposal(proposal)
-      setReplyText(rt)
-      onAddEvent(po.id, { id: `reply-${Date.now()}`, type: 'supplier_reply', timestamp: new Date().toISOString(), body: rt, author: 'agent' })
-      setIsSimulating(false)
-    }, 2000)
-  }
-
-  const applyProposal = () => {
-    if (!pendingProposal) return
-    onAddEvent(po.id, { id: `applied-${Date.now()}`, type: 'date_change_applied', timestamp: new Date().toISOString(),
-      body: `Date change applied to Order App: ${pendingProposal.field === 'xFactory' ? 'X-factory' : 'Delivery'} updated ${formatDate(pendingProposal.oldDate)} → ${formatDate(pendingProposal.newDate)}. Source: ${pendingProposal.sourceEmail}`, author: 'buyer' })
-    setPendingProposal(p => p ? { ...p, decision: 'applied' } : null)
-  }
-
-  const queueProposal = () => {
-    if (!pendingProposal) return
-    onAddEvent(po.id, { id: `queued-${Date.now()}`, type: 'date_change_proposed', timestamp: new Date().toISOString(),
-      body: `Date change queued for approval: ${pendingProposal.field === 'xFactory' ? 'X-factory' : 'Delivery'} ${formatDate(pendingProposal.oldDate)} → ${formatDate(pendingProposal.newDate)}`, author: 'agent' })
-    setPendingProposal(p => p ? { ...p, decision: 'queued' } : null)
-  }
-
-  const recordDecision = (d: 'cancel' | 'cpr' | 'accept') => {
-    setLateDecision(d)
-    const body = d === 'cancel' ? `Decision: Cancel PO. Est. stock cover loss ~3 weeks. Alternative sourcing required.`
-                : d === 'cpr'   ? `Decision: Request CPR ${cprPct}% (~£${Math.round(orderValueNum * cprPct / 100).toLocaleString()} saving). Negotiation to follow.`
-                :                 `Decision: Accept late delivery. New intake week confirmed with warehouse.`
-    onAddEvent(po.id, { id: `dec-${Date.now()}`, type: 'decision_recorded', timestamp: new Date().toISOString(), body, author: 'buyer' })
-    setDecisionDone(true)
-  }
-
-  const sortedEvents = [...events].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-  const isOverdue = new Date() > new Date(po.expectedDelivery)
+  const timeline = [
+    { label: 'Order created', date: po.createdOn ? new Date(po.createdOn).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—', done: true, overdue: false },
+    { label: 'Ex-factory',    date: xfDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }), done: xfDate < today, overdue: xfDate < today && !isPostDsp && !isDelivered },
+    { label: 'Dispatched',    date: isPostDsp || isDelivered ? 'Confirmed' : 'Pending', done: isPostDsp || isDelivered, overdue: xfDate < today && !isPostDsp && !isDelivered },
+    { label: po.revisedDelivery ? 'Revised delivery' : 'Expected delivery', date: formatDate(po.revisedDelivery ?? po.expectedDelivery), done: isDelivered, overdue: isDeliveryOverdue },
+  ]
 
   return (
-    <div className="fixed inset-0 z-50 flex">
-      <div className="flex-1 bg-black/30" onClick={onClose} />
-      <div className="w-[540px] bg-white h-full flex flex-col shadow-2xl overflow-hidden">
-
-        {/* Header */}
+    <>
+      {/* Header */}
+      {showHeader && (
         <div className="flex items-start justify-between px-5 pt-4 pb-3 border-b border-gray-100 shrink-0">
           <div>
             <div className="flex items-center gap-2 flex-wrap">
@@ -6188,436 +6116,173 @@ function POLineDrawer({
             </div>
             <div className="text-xs text-gray-400 mt-0.5">{po.product} · {sup?.name ?? po.supplierId}</div>
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 transition-colors shrink-0">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        {/* Tab bar */}
-        <div className="flex border-b border-gray-100 shrink-0 px-5">
-          {[
-            { id: 'status-decisions' as const, label: 'Status & decisions' },
-            { id: 'product'      as const, label: 'Product', disabled: !product },
-          ].map(t => (
-            <button
-              key={t.id}
-              onClick={() => !t.disabled && setDrawerTab(t.id)}
-              disabled={t.disabled}
-              className={`relative h-9 px-3 text-xs font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-                drawerTab === t.id
-                  ? 'text-indigo-600 after:absolute after:bottom-0 after:left-0 after:right-0 after:h-0.5 after:bg-indigo-600 after:rounded-t'
-                  : 'text-gray-500 hover:text-gray-800'
-              }`}
-            >
-              {t.label}
+          {onClose && (
+            <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 transition-colors shrink-0">
+              <X className="w-4 h-4" />
             </button>
+          )}
+        </div>
+      )}
+
+      {/* Scrollable body */}
+      <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+
+        {/* Reference banner — only when not from action drawer */}
+        {!fromActionDrawer && (
+          <div className="flex items-center gap-2 bg-gray-50 rounded-xl px-3.5 py-2.5 border border-gray-200">
+            <Info className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+            <span className="text-[11px] text-gray-500">Reference view — actions are managed in the <strong className="text-gray-700">Actions tab</strong></span>
+          </div>
+        )}
+
+        {/* Key facts */}
+        <div className="grid grid-cols-4 gap-2">
+          {[
+            { label: 'Ex-factory', value: xfDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }), sub: isPostDsp ? 'Dispatched' : xfDate < today ? 'Overdue' : 'Upcoming' },
+            { label: po.revisedDelivery ? 'Revised delivery' : 'Expected delivery', value: formatDate(po.revisedDelivery ?? po.expectedDelivery), sub: po.revisedDelivery ? formatDate(po.expectedDelivery) : null },
+            { label: 'Order value', value: po.orderValue, sub: `${po.freight} freight` },
+            { label: 'Quantity', value: po.quantity.toLocaleString(), sub: `${po.skus} SKU${po.skus !== 1 ? 's' : ''}` },
+          ].map(({ label, value, sub }) => (
+            <div key={label} className="bg-gray-50 rounded-xl p-3 border border-gray-100 text-center">
+              <div className="text-[10px] text-gray-400 mb-1 leading-tight">{label}</div>
+              <div className="text-xs font-bold text-gray-900 leading-tight">{value}</div>
+              {sub && <div className="text-[9px] text-gray-400 mt-0.5">{sub}</div>}
+            </div>
           ))}
         </div>
 
-        {/* Status & decisions tab */}
-        {drawerTab === 'status-decisions' && (
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
-
-          {/* PO summary */}
-          <div className="grid grid-cols-3 gap-3 bg-gray-50 rounded-xl p-3.5 border border-gray-100">
-            <div>
-              <div className="text-[10px] text-gray-400"><Tt tip="Ex-factory (ex-fty): the date goods leave the supplier's factory. Delays here cascade into late delivery.">Ex-fty</Tt></div>
-              <div className="text-xs font-semibold text-gray-800">{xfDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</div>
-              {isPostDsp && <div className="text-[9px] text-indigo-500 font-medium">Historical (dispatched)</div>}
-            </div>
-            <div>
-              <div className="text-[10px] text-gray-400">{po.revisedDelivery ? 'Revised delivery' : 'Expected delivery'}</div>
-              <div className="text-xs font-semibold text-gray-800">{formatDate(po.revisedDelivery ?? po.expectedDelivery)}</div>
-              {po.revisedDelivery && <div className="text-[10px] text-gray-400 line-through">{formatDate(po.expectedDelivery)}</div>}
-            </div>
-            <div>
-              <div className="text-[10px] text-gray-400">Value · Freight</div>
-              <div className="text-xs font-semibold text-gray-800">{po.orderValue}</div>
-              <div className="text-[10px] text-gray-400">{po.freight} · {po.quantity.toLocaleString()} units</div>
-            </div>
-          </div>
-
-          {/* Last chased */}
-          {lastChased && (
-            <div className="flex items-center gap-2 text-[11px] text-gray-500">
-              <Clock className="w-3.5 h-3.5 text-gray-400 shrink-0" />
-              Last chased: {new Date(lastChased).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
-            </div>
-          )}
-
-          {/* Product context strip */}
-          {product && (
-            <div className="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2 border border-gray-100 text-[11px] text-gray-600">
-              <div className="flex items-center gap-3">
-                <span><span className="font-semibold text-gray-900">{product.weeksOfStock.toFixed(1)}w</span> cover</span>
-                <span className="text-gray-300">·</span>
-                <span><span className="font-semibold text-gray-900">{totalOnOrder > 0 ? ((po.quantity / totalOnOrder) * 100).toFixed(0) : 0}%</span> of open orders for this SKU</span>
-              </div>
-              <button
-                onClick={() => setDrawerTab('product')}
-                className="text-indigo-500 hover:text-indigo-700 transition-colors whitespace-nowrap shrink-0 ml-3"
-              >
-                View full product detail →
-              </button>
-            </div>
-          )}
-
-          {/* Negotiated CP strip — shown when this PO was raised via a CP negotiation */}
-          {PO_NEG_MAP[po.id] && (() => {
-            const recId  = PO_NEG_MAP[po.id]
-            const thread = SEEDED_THREADS[recId]
-            const rec    = REORDER_RECOMMENDATIONS.find(r => r.id === recId)
-            const agreedCP = thread?.rounds[thread.rounds.length - 1]?.supplierReply?.offeredCP ?? null
-            if (!agreedCP || !rec) return null
-            const saving = Math.round((rec.costPrice - agreedCP) * rec.recommendedReorderQty)
-            return (
-              <div className="flex items-center justify-between bg-emerald-50 rounded-lg px-3 py-2 border border-emerald-100 text-[11px]">
-                <div className="text-emerald-700">
-                  Negotiated CP: <span className="font-semibold text-emerald-900">£{agreedCP.toFixed(2)}</span>
-                  <span className="mx-1.5 text-emerald-300">·</span>
-                  saved <span className="font-semibold text-emerald-900">£{saving.toLocaleString()}</span> vs opening CP
+        {/* PO lifecycle timeline */}
+        <div className="bg-white border border-gray-100 rounded-xl p-3.5 shadow-sm">
+          <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-3">PO lifecycle</div>
+          <div className="space-y-0">
+            {timeline.map((step, i) => (
+              <div key={step.label} className="flex gap-3">
+                <div className="flex flex-col items-center shrink-0">
+                  <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${step.overdue ? 'bg-red-500' : step.done ? 'bg-green-500' : 'bg-gray-200'}`}>
+                    {step.done && !step.overdue ? <Check className="w-3 h-3 text-white" /> : step.overdue ? <AlertTriangle className="w-3 h-3 text-white" /> : <span className="w-1.5 h-1.5 rounded-full bg-gray-400" />}
+                  </div>
+                  {i < timeline.length - 1 && <div className="w-0.5 flex-1 bg-gray-100 min-h-[20px] my-1" />}
                 </div>
-                <button
-                  onClick={() => onNavigateToNeg?.(recId)}
-                  className="text-indigo-500 hover:text-indigo-700 transition-colors whitespace-nowrap shrink-0 ml-3 font-medium"
-                >
-                  View negotiation →
-                </button>
-              </div>
-            )
-          })()}
-
-          {/* Late decision card */}
-          {isEligibleLate && !decisionDone && (
-            <div className="bg-red-50 rounded-xl p-3.5 border border-red-200 space-y-2">
-              <div className="text-[10px] font-semibold text-red-600 uppercase tracking-wide">Decision required — {daysLate} days past delivery window</div>
-              <div className="text-xs text-red-700">Select the commercial response to record in the event log:</div>
-              <div className={`grid grid-cols-3 gap-2 ${poRec ? 'pt-4' : 'pt-0.5'}`}>
-                {([
-                  { key: 'cancel' as const, label: 'Cancel',          sub: 'Est. cover',  val: '–3 wks',
-                    recCls:    'bg-red-100 border-2 border-red-400 text-red-800 hover:bg-red-200 shadow-sm',
-                    nonRecCls: 'bg-red-50 border border-red-200 text-red-700 hover:bg-red-100' },
-                  { key: 'cpr' as const,    label: `CPR ${cprPct}%`,  sub: 'Est. saving', val: `£${Math.round(orderValueNum * cprPct / 100).toLocaleString()}`,
-                    recCls:    'bg-amber-100 border-2 border-amber-400 text-amber-800 hover:bg-amber-200 shadow-sm',
-                    nonRecCls: 'bg-amber-50 border border-amber-200 text-amber-700 hover:bg-amber-100' },
-                  { key: 'accept' as const, label: 'Accept late',     sub: 'New intake',  val: `+${Math.ceil(daysLate / 7)} wks`,
-                    recCls:    'bg-green-100 border-2 border-green-400 text-green-800 hover:bg-green-200 shadow-sm',
-                    nonRecCls: 'bg-green-50 border border-green-200 text-green-700 hover:bg-green-100' },
-                ] as Array<{ key: LateDec; label: string; sub: string; val: string; recCls: string; nonRecCls: string }>).map(opt => {
-                  const isRec = poRec?.rec === opt.key
-                  const cardCls = isRec ? opt.recCls : opt.nonRecCls
-                  return (
-                    <div key={opt.key} className="relative">
-                      {isRec && (
-                        <div className="absolute -top-3.5 left-0 right-0 flex justify-center pointer-events-none">
-                          <span className="inline-flex items-center px-1.5 py-0.5 rounded-full bg-indigo-600 text-white text-[9px] font-semibold tracking-wide whitespace-nowrap">
-                            Recommended
-                          </span>
-                        </div>
-                      )}
-                      <button
-                        onClick={() => recordDecision(opt.key)}
-                        className={`w-full rounded-lg p-2.5 border text-center transition-all ${lateDecision === opt.key ? 'ring-2 ring-offset-1 ring-indigo-400' : ''} ${cardCls}`}
-                      >
-                        <div className="text-xs font-bold">
-                          {opt.key === 'cpr' ? <Tt tip="Commercial Price Reduction: a discount negotiated with the supplier to offset the cost impact of a late delivery.">CPR {cprPct}%</Tt> : opt.label}
-                        </div>
-                        <div className="text-[10px] mt-0.5 opacity-70">{opt.sub}</div>
-                        <div className="text-[11px] font-semibold mt-0.5">{opt.val}</div>
-                        {isRec && poRec && (
-                          <div className="text-[9px] mt-1.5 leading-snug opacity-80 font-normal">{poRec.cardRationale}</div>
-                        )}
-                      </button>
-                    </div>
-                  )
-                })}
-              </div>
-
-              {/* Why this recommendation? */}
-              {poRec && (
-                <div className="pt-1">
-                  <button
-                    onClick={() => setWhyExpanded(e => !e)}
-                    className="flex items-center gap-1 text-[10px] text-indigo-500 hover:text-indigo-700 transition-colors font-medium"
-                  >
-                    <ChevronRight className={`w-3 h-3 transition-transform ${whyExpanded ? 'rotate-90' : ''}`} />
-                    Why this recommendation?
-                  </button>
-                  {whyExpanded && (
-                    <ul className="mt-2 space-y-1.5 pl-4">
-                      {poRec.bullets.map((b, i) => (
-                        <li key={i} className="text-[10px] text-gray-600 leading-snug list-disc">{b}</li>
-                      ))}
-                    </ul>
-                  )}
+                <div className="pb-3">
+                  <div className="flex items-center gap-2">
+                    <span className={`text-[11px] font-semibold ${step.overdue ? 'text-red-600' : step.done ? 'text-gray-700' : 'text-gray-400'}`}>{step.label}</span>
+                    {step.overdue && <span className="text-[9px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full font-semibold">Overdue</span>}
+                  </div>
+                  <div className="text-[10px] text-gray-400 mt-0.5">{step.date}</div>
                 </div>
-              )}
-            </div>
-          )}
-          {decisionDone && (
-            <div className="flex items-center gap-2 bg-gray-50 rounded-xl p-3 border border-gray-100">
-              <Check className="w-3.5 h-3.5 text-green-500 shrink-0" />
-              <span className="text-xs text-gray-600">Decision recorded — see event log.</span>
-            </div>
-          )}
-
-          {/* Pending date change proposal */}
-          {pendingProposal && !pendingProposal.decision && (
-            <div className="bg-violet-50 rounded-xl p-3.5 border border-violet-200 space-y-2">
-              <div className="text-[10px] font-semibold text-violet-600 uppercase tracking-wide">
-                Proposed {pendingProposal.field === 'xFactory' ? 'X-factory' : 'Delivery'} date change
-                {pendingProposal.field === 'delivery' && <span className="ml-2 text-[9px] font-normal normal-case text-gray-500">(X-factory unchanged — goods dispatched)</span>}
               </div>
-              <div className="flex items-center gap-2 text-xs">
-                <span className="text-gray-500">{formatDate(pendingProposal.oldDate)}</span>
-                <ChevronRight className="w-3 h-3 text-gray-400" />
-                <span className="font-bold text-violet-700">{formatDate(pendingProposal.newDate)}</span>
-              </div>
-              <div className="text-[10px] text-gray-400">Source: {pendingProposal.sourceEmail}</div>
-              <div className="flex gap-2">
-                <button onClick={applyProposal} className="flex-1 h-7 rounded-lg bg-violet-600 text-white text-xs font-semibold hover:bg-violet-700 transition-colors">Apply to Order App</button>
-                <button onClick={queueProposal} className="flex-1 h-7 rounded-lg border border-violet-300 text-violet-700 text-xs font-semibold hover:bg-violet-50 transition-colors">Queue for approval</button>
-              </div>
-            </div>
-          )}
-          {pendingProposal?.decision && (
-            <div className="flex items-center gap-2 bg-gray-50 rounded-xl p-3 border border-gray-100">
-              <Check className="w-3.5 h-3.5 text-green-500 shrink-0" />
-              <span className="text-xs text-gray-600">
-                {pendingProposal.decision === 'applied' ? 'Date change applied to Order App.' : 'Date change queued for approval.'}
-              </span>
-            </div>
-          )}
-
-          {/* Supplier reply */}
-          {replyText && (
-            <div className="border border-amber-200 rounded-xl overflow-hidden">
-              <div className="px-3.5 py-2 bg-amber-50 border-b border-amber-100 flex items-center gap-2">
-                <MessageSquare className="w-3.5 h-3.5 text-amber-500" />
-                <span className="text-[11px] font-semibold text-amber-700">Simulated supplier reply</span>
-              </div>
-              <pre className="p-3.5 text-[10px] text-gray-600 leading-relaxed whitespace-pre-wrap font-sans">{replyText}</pre>
-            </div>
-          )}
-
-          {/* Simulate reply button */}
-          {!replyText && (
-            <button onClick={handleSimulate} disabled={isSimulating}
-              className="w-full h-8 rounded-lg border border-gray-200 bg-white text-xs font-semibold text-gray-600 hover:bg-gray-50 transition-colors flex items-center justify-center gap-1.5 disabled:opacity-60">
-              {isSimulating
-                ? <><div className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />Waiting for supplier…</>
-                : <><MessageSquare className="w-3.5 h-3.5 text-gray-400" />Simulate supplier reply</>}
-            </button>
-          )}
-
-          {/* Event log */}
-          <div>
-            <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2.5">Event log</div>
-            {isOverdue && sortedEvents.length === 0 && (
-              <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-2.5 text-[11px] text-amber-800">
-                <span className="shrink-0 mt-0.5">⚠</span>
-                <span>This PO is overdue but has no chase activity logged. Log a chase or simulate a supplier reply below.</span>
-              </div>
-            )}
-            {sortedEvents.length === 0
-              ? <div className="text-xs text-gray-400 text-center py-4">No events logged. The agent will record chases, supplier replies, and status changes here.</div>
-              : (
-                <div className="space-y-1">
-                  {sortedEvents.map((ev, idx) => {
-                    const cfg = PO_EVENT_CFG[ev.type]
-                    return (
-                      <div key={ev.id} className="flex gap-3">
-                        <div className="flex flex-col items-center shrink-0">
-                          <div className={`w-5 h-5 rounded-full ${cfg.dot} flex items-center justify-center text-white mt-0.5`}>
-                            {poEventIcon(ev.type)}
-                          </div>
-                          {idx < sortedEvents.length - 1 && <div className="w-0.5 flex-1 bg-gray-100 min-h-[16px] my-0.5" />}
-                        </div>
-                        <div className="pb-3 flex-1 min-w-0">
-                          <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
-                            <span className="text-[10px] font-semibold text-gray-500">{cfg.label}</span>
-                            <span className="text-[9px] text-gray-400">· {new Date(ev.timestamp).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
-                            {ev.author === 'agent' && <span className="ml-auto inline-flex items-center gap-0.5 px-1 bg-purple-50 text-purple-600 rounded text-[9px] font-semibold"><Bot className="w-2 h-2" />Agent</span>}
-                            {ev.author === 'buyer' && <span className="ml-auto inline-flex items-center gap-0.5 px-1 bg-blue-50 text-blue-600 rounded text-[9px] font-semibold"><User className="w-2 h-2" />You</span>}
-                          </div>
-                          <p className="text-[11px] text-gray-600 leading-relaxed">{ev.body}</p>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              )
-            }
-          </div>
-
-          {/* Add note */}
-          <div className="border-t border-gray-100 pt-3">
-            <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1.5">Add note</div>
-            <div className="flex gap-2">
-              <textarea
-                className="flex-1 text-[11px] text-gray-700 leading-relaxed p-2.5 rounded-lg border border-gray-200 bg-gray-50 resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-200"
-                rows={2} placeholder="Log a call, offline conversation, or update…"
-                value={noteInput} onChange={e => setNoteInput(e.target.value)}
-              />
-              <button onClick={addNote} disabled={!noteInput.trim()}
-                className="self-end h-8 w-8 rounded-lg bg-indigo-600 text-white flex items-center justify-center hover:bg-indigo-700 transition-colors disabled:opacity-40 shrink-0">
-                <Plus className="w-3.5 h-3.5" />
-              </button>
-            </div>
+            ))}
           </div>
         </div>
-        )}
 
-        {/* Product tab */}
-        {drawerTab === 'product' && product && (
-          <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
-
-            {/* Identity */}
-            <div className="flex items-center gap-3 bg-gray-50 rounded-xl p-3.5 border border-gray-100">
-              <img src={product.imageUrl} alt={product.name}
-                className="w-14 h-14 rounded-xl object-cover shrink-0 border border-gray-200 bg-white" />
-              <div className="min-w-0 flex-1">
-                <div className="text-sm font-bold text-gray-900 truncate">{product.name}</div>
-                <div className="text-[10px] text-gray-400 mt-0.5">{product.sku} · {product.supplier}</div>
-                <div className="mt-1.5">
-                  <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${
-                    product.stockoutRisk === 'High'   ? 'bg-red-100 text-red-700' :
-                    product.stockoutRisk === 'Medium' ? 'bg-amber-100 text-amber-700' :
-                    'bg-green-100 text-green-700'}`}>
-                    {product.stockoutRisk} stockout risk
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* Stock position */}
-            <div className="bg-white border border-gray-100 rounded-xl p-3.5 shadow-sm space-y-3">
-              <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Stock position</div>
-              <div className="grid grid-cols-3 gap-3 text-center">
-                <div>
-                  <div className="text-base font-bold text-gray-900">{product.currentStock.toLocaleString()}</div>
-                  <div className="text-[10px] text-gray-400">Current stock</div>
-                </div>
-                <div>
-                  <div className="text-base font-bold text-gray-900">{product.weeksOfStock.toFixed(1)}w</div>
-                  <div className="text-[10px] text-gray-400">Weeks cover</div>
-                </div>
-                <div>
-                  <div className="text-base font-bold text-gray-900">{product.weeklySales.toLocaleString()}</div>
-                  <div className="text-[10px] text-gray-400">Weekly sales</div>
-                </div>
-              </div>
-              {/* Stock bar */}
-              <div>
-                <div className="flex items-center justify-between text-[9px] text-gray-400 mb-1">
-                  <span>0</span>
-                  <span>Safety: {product.safetyStock.toLocaleString()}</span>
-                  <span>Max: {product.maxLevel.toLocaleString()}</span>
-                </div>
-                <div className="h-2 rounded-full bg-gray-100 relative overflow-hidden">
-                  <div
-                    className={`absolute left-0 top-0 h-full rounded-full ${
-                      product.stockoutRisk === 'High' ? 'bg-red-400' :
-                      product.stockoutRisk === 'Medium' ? 'bg-amber-400' : 'bg-indigo-400'}`}
-                    style={{ width: `${Math.min(100, product.currentStock / product.maxLevel * 100)}%` }}
-                  />
-                  <div
-                    className="absolute top-0 h-full w-0.5 bg-amber-500 z-10"
-                    style={{ left: `${Math.min(100, product.safetyStock / product.maxLevel * 100)}%` }}
-                  />
-                </div>
-                <div className="flex items-center gap-3 mt-1.5">
-                  <span className="flex items-center gap-1 text-[9px] text-gray-500">
-                    <span className="w-2 h-2 rounded-sm bg-indigo-400" />Current stock
-                  </span>
-                  <span className="flex items-center gap-1 text-[9px] text-gray-500">
-                    <span className="w-2 h-1 bg-amber-500 rounded-sm" />Safety stock
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* Commercial */}
-            <div className="bg-white border border-gray-100 rounded-xl p-3.5 shadow-sm">
-              <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-3">Commercial</div>
-              <div className="grid grid-cols-3 gap-3 text-center">
-                <div>
-                  <div className="text-sm font-bold text-gray-900">£{product.costPrice.toFixed(2)}</div>
-                  <div className="text-[10px] text-gray-400">Cost price</div>
-                </div>
-                <div>
-                  <div className="text-sm font-bold text-gray-900">£{product.sellingPrice.toFixed(2)}</div>
-                  <div className="text-[10px] text-gray-400">Selling price</div>
-                </div>
-                <div>
-                  <div className="text-sm font-bold text-indigo-600">{(product.marginPct * 100).toFixed(0)}%</div>
-                  <div className="text-[10px] text-gray-400">Gross margin</div>
-                </div>
-              </div>
-              <div className="border-t border-gray-100 mt-3 pt-3 flex items-center justify-between">
-                <span className="text-[11px] text-gray-500">Monthly revenue</span>
-                <span className="text-xs font-semibold text-gray-900">£{(product.monthlyRevenue / 1000).toFixed(1)}k</span>
-              </div>
-              <div className="flex items-center justify-between pt-1">
-                <span className="text-[11px] text-gray-500">Stock value (current)</span>
-                <span className="text-xs font-semibold text-gray-900">£{product.stockValue.toLocaleString()}</span>
-              </div>
-            </div>
-
-            {/* Open order book */}
-            <div className="bg-white border border-gray-100 rounded-xl p-3.5 shadow-sm">
-              <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-3">Open order book — this product</div>
-              <div className="grid grid-cols-2 gap-3 mb-3">
-                <div className="text-center bg-indigo-50 rounded-xl p-2.5 border border-indigo-100">
-                  <div className="text-sm font-bold text-indigo-700">{totalOnOrder.toLocaleString()}</div>
-                  <div className="text-[10px] text-indigo-500">Units on order</div>
-                  <div className="text-[9px] text-gray-400">{openPOs.length} open PO{openPOs.length !== 1 ? 's' : ''}</div>
-                </div>
-                <div className="text-center bg-gray-50 rounded-xl p-2.5">
-                  <div className="text-sm font-bold text-gray-900">
-                    {totalOnOrder > 0 ? ((po.quantity / totalOnOrder) * 100).toFixed(0) : 0}%
+        {/* Product & stock context — collapsible */}
+        {product && (
+          <div className="border border-gray-100 rounded-xl overflow-hidden shadow-sm">
+            <button onClick={() => setProductOpen(o => !o)} className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors text-left">
+              <span className="text-[11px] font-semibold text-gray-700">Product &amp; stock context</span>
+              <ChevronDown className={`w-3.5 h-3.5 text-gray-400 transition-transform ${productOpen ? 'rotate-180' : ''}`} />
+            </button>
+            {productOpen && (
+              <div className="px-4 py-3 space-y-4 bg-white">
+                {/* Identity */}
+                <div className="flex items-center gap-3">
+                  <img src={product.imageUrl} alt={product.name} className="w-12 h-12 rounded-xl object-cover shrink-0 border border-gray-200" />
+                  <div>
+                    <div className="text-xs font-bold text-gray-900">{product.name}</div>
+                    <div className="text-[10px] text-gray-400 mt-0.5">{product.sku} · {product.supplier}</div>
+                    <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-full mt-1 ${product.stockoutRisk === 'High' ? 'bg-red-100 text-red-700' : product.stockoutRisk === 'Medium' ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}`}>{product.stockoutRisk} stockout risk</span>
                   </div>
-                  <div className="text-[10px] text-gray-400">This PO's share</div>
-                  <div className="text-[9px] text-gray-400">{po.quantity.toLocaleString()} units</div>
                 </div>
-              </div>
-              {openPOs.length > 0 && (
-                <div className="space-y-0.5">
-                  {openPOs.map(p => {
-                    const pRag = computeRAG(p)
-                    return (
-                      <div key={p.id}
-                        className={`flex items-center gap-2 text-[10px] py-1.5 px-2 rounded-lg ${
-                          p.id === po.id ? 'bg-indigo-50 text-indigo-700 font-semibold' : 'text-gray-500 hover:bg-gray-50'}`}>
-                        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${pRag === 'red' ? 'bg-red-500' : pRag === 'amber' ? 'bg-amber-400' : 'bg-green-400'}`} />
-                        <span className="font-mono">{p.id}</span>
-                        <span className="flex-1 truncate text-[9px] opacity-70">{getSupplier(p.supplierId)?.name}</span>
-                        <span>{p.quantity.toLocaleString()} units</span>
-                        {p.id === po.id && <span className="text-[9px] bg-indigo-100 text-indigo-600 px-1 rounded font-bold">this PO</span>}
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
-
-            {/* Size breakdown */}
-            {product.sizeBreakdown && product.sizeBreakdown.length > 1 && (
-              <div className="bg-white border border-gray-100 rounded-xl p-3.5 shadow-sm">
-                <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-3">Size breakdown</div>
-                <div className="flex flex-wrap gap-1.5">
-                  {product.sizeBreakdown.map(band => (
-                    <div key={band.label} className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold ${band.color}`}>
-                      {band.label} <span className="opacity-70">{band.pct}%</span>
+                {/* Stock metrics */}
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  {[
+                    { val: product.currentStock.toLocaleString(), label: 'Current stock' },
+                    { val: `${product.weeksOfStock.toFixed(1)}w`, label: 'Weeks cover' },
+                    { val: product.weeklySales.toLocaleString(), label: 'Weekly sales' },
+                  ].map(({ val, label }) => (
+                    <div key={label} className="bg-gray-50 rounded-lg p-2.5">
+                      <div className="text-sm font-bold text-gray-900">{val}</div>
+                      <div className="text-[10px] text-gray-400">{label}</div>
                     </div>
                   ))}
                 </div>
+                {/* Stock bar */}
+                <div className="h-2 rounded-full bg-gray-100 relative overflow-hidden">
+                  <div className={`absolute left-0 top-0 h-full rounded-full ${product.stockoutRisk === 'High' ? 'bg-red-400' : product.stockoutRisk === 'Medium' ? 'bg-amber-400' : 'bg-indigo-400'}`} style={{ width: `${Math.min(100, product.currentStock / product.maxLevel * 100)}%` }} />
+                  <div className="absolute top-0 h-full w-0.5 bg-amber-500 z-10" style={{ left: `${Math.min(100, product.safetyStock / product.maxLevel * 100)}%` }} />
+                </div>
+                {/* Commercial */}
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  {[
+                    { val: `£${product.costPrice.toFixed(2)}`, label: 'Cost price' },
+                    { val: `£${product.sellingPrice.toFixed(2)}`, label: 'Selling price' },
+                    { val: `${(product.marginPct * 100).toFixed(0)}%`, label: 'Gross margin' },
+                  ].map(({ val, label }) => (
+                    <div key={label} className="text-center">
+                      <div className="text-xs font-bold text-gray-900">{val}</div>
+                      <div className="text-[10px] text-gray-400">{label}</div>
+                    </div>
+                  ))}
+                </div>
+                {/* Open order book */}
+                <div>
+                  <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">Open orders — this SKU</div>
+                  <div className="space-y-0.5">
+                    {openPOs.map(p => {
+                      const pRag = computeRAG(p)
+                      return (
+                        <div key={p.id} className={`flex items-center gap-2 text-[10px] py-1.5 px-2 rounded-lg ${p.id === po.id ? 'bg-indigo-50 text-indigo-700 font-semibold' : 'text-gray-500'}`}>
+                          <span className={`w-1.5 h-1.5 rounded-full ${pRag === 'red' ? 'bg-red-500' : pRag === 'amber' ? 'bg-amber-400' : 'bg-green-400'}`} />
+                          <span className="font-mono">{p.id}</span>
+                          <span className="flex-1 truncate opacity-70">{getSupplier(p.supplierId)?.name}</span>
+                          <span>{p.quantity.toLocaleString()} units</span>
+                          {p.id === po.id && <span className="text-[9px] bg-indigo-100 text-indigo-600 px-1 rounded font-bold">this PO</span>}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
               </div>
             )}
-
           </div>
         )}
 
+        {/* Bottom affordances */}
+        <div className="space-y-2 pt-1">
+          {onAddEvent && (
+            <div className="border border-gray-100 rounded-xl p-3 space-y-2">
+              <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Add note</div>
+              <div className="flex gap-2">
+                <textarea className="flex-1 text-[11px] text-gray-700 p-2.5 rounded-lg border border-gray-200 bg-gray-50 resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-200" rows={2} placeholder="Log a call, update, or observation…" value={noteText} onChange={e => setNoteText(e.target.value)} />
+                <button onClick={() => { if (!noteText.trim()) return; onAddEvent(po.id, { id: `note-${Date.now()}`, type: 'manual_note', timestamp: new Date().toISOString(), body: noteText.trim(), author: 'buyer' }); setNoteText('') }} disabled={!noteText.trim()} className="self-end h-8 w-8 rounded-lg bg-indigo-600 text-white flex items-center justify-center hover:bg-indigo-700 transition-colors disabled:opacity-40 shrink-0">
+                  <Plus className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
+          <button className="w-full h-8 rounded-lg border border-gray-200 text-[11px] text-gray-500 hover:bg-gray-50 transition-colors flex items-center justify-center gap-1.5">
+            <ChevronRight className="w-3.5 h-3.5 text-gray-400" />View in Reorder app
+          </button>
+        </div>
+
+      </div>
+    </>
+  )
+}
+
+// ── PO Line Drawer ────────────────────────────────────────────────────────────
+function POLineDrawer({
+  po, onClose, onAddEvent,
+}: {
+  po:         PO
+  onClose:    () => void
+  onAddEvent?: (poId: string, event: POEvent) => void
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex">
+      <div className="flex-1 bg-black/30" onClick={onClose} />
+      <div className="w-[540px] bg-white h-full flex flex-col shadow-2xl overflow-hidden">
+        <PODetailPane po={po} onAddEvent={onAddEvent} showHeader fromActionDrawer={false} onClose={onClose} />
       </div>
     </div>
   )
@@ -6910,25 +6575,52 @@ export function KanbanPanel({
 }
 
 // ── PO Monitoring View ────────────────────────────────────────────────────────
-function POMonitoringView({ initialOpenPO, onNavigateToNeg }: { initialOpenPO?: string | null; onNavigateToNeg?: (recId: string) => void }) {
+function POMonitoringView({ initialOpenPO, onNavigateToNeg: _onNavigateToNeg }: { initialOpenPO?: string | null; onNavigateToNeg?: (recId: string) => void }) {
   const [subTab,           setSubTab]           = useState<'actions' | 'allpos' | 'suppliers' | 'agentlog'>('actions')
   const [poEventsMap,      setPoEventsMap]      = useState<Map<string, POEvent[]>>(new Map(Object.entries(SEED_PO_EVENTS)))
-  const [lastChasedMap] = useState<Map<string, string>>(new Map())
+  const [lastChasedMap] = useState<Map<string, string>>(new Map()); void lastChasedMap
   const [selectedPOId,     setSelectedPOId]     = useState<string | null>(initialOpenPO ?? null)
 
   useEffect(() => { if (initialOpenPO) setSelectedPOId(initialOpenPO) }, [initialOpenPO])
   const [settingsOpen,     setSettingsOpen]     = useState(false)
-  const [selectedSupId,    setSelectedSupId]    = useState<string | null>(null)
   const [sendModal,        setSendModal]        = useState<{ supplierId: string; poIds: string[] } | null>(null)
   const [emailDraft,       setEmailDraft]       = useState('')
   const [poSearch,         setPoSearch]         = useState('')
   const [chaseThreads,     setChaseThreads]     = useState<Record<string, ChaseThread>>({})
-  const [expandedMsgIds,   setExpandedMsgIds]   = useState<Set<string>>(new Set())
+  const [expandedMsgIds,   setExpandedMsgIds]   = useState<Set<string>>(new Set()); void expandedMsgIds; void setExpandedMsgIds
   const [chaseDraftMap,    setChaseDraftMap]    = useState<Record<string, string>>({})
-  const [chaseHistoryOpen, setChaseHistoryOpen] = useState(false)
+  const [chaseHistoryOpen, setChaseHistoryOpen] = useState(false); void chaseHistoryOpen; void setChaseHistoryOpen
   const [poStatusFilter,   setPoStatusFilter]   = useState('all')
   const [poSupFilter,      setPoSupFilter]      = useState('all')
   const [settingsAccordion, setSettingsAccordion] = useState<string | null>(null)
+  // Actions queue state
+  const [drawerCardKey,    setDrawerCardKey]    = useState<string | null>(null)
+  const [snoozedCards,     setSnoozedCards]     = useState<Set<string>>(new Set())
+  const [actTypeFilter,    setActTypeFilter]    = useState('all')
+  const [urgencyFilter,    setUrgencyFilter]    = useState('all')
+  const [sortMode,         setSortMode]         = useState<'urgency_value' | 'alpha'>('urgency_value')
+  const [drawerDecision,   setDrawerDecision]   = useState<Record<string, 'cancel' | 'cpr' | 'accept_late'>>({})
+  const [proposedMutations,setProposedMutations]= useState<Record<string, Array<{poId:string;field:string;oldVal:string;newVal:string}>>>({})
+  const [selectedActionPill,setSelectedActionPill]= useState<Record<string,string>>({})
+  const [drawerView,        setDrawerView]        = useState<'action' | 'po-detail'>('action')
+  const [drawerViewPOId,    setDrawerViewPOId]    = useState<string | null>(null)
+  const [counterProposeDate,setCounterProposeDate]= useState<Record<string,string>>({})
+  const [rejectReason,      setRejectReason]      = useState<Record<string,string>>({})
+  const [logNoteOpen,       setLogNoteOpen]       = useState<Record<string,boolean>>({})
+  const [logNoteType,       setLogNoteType]       = useState<Record<string,'call'|'note'|'internal'>>({})
+  const [logNoteText,       setLogNoteText]       = useState<Record<string,string>>({})
+  const [snoozeConfirmOpen, setSnoozeConfirmOpen] = useState<Record<string,boolean>>({})
+  const [dismissConfirmOpen,setDismissConfirmOpen]= useState<Record<string,boolean>>({})
+  const [resolvedCards,     setResolvedCards]     = useState<Set<string>>(new Set())
+  const [triggerExpanded,   setTriggerExpanded]   = useState<Record<string,boolean>>({})
+  // DP2 — reply received decision
+  const [dp2Action,  setDp2Action]  = useState<Record<string, 'apply_changes' | 'counter_propose' | 'reject_escalate' | 'reply_question'>>({})
+  const [dp2Draft,   setDp2Draft]   = useState<Record<string, string>>({})
+  // DP3 — no reply overdue decision
+  const [dp3Action,  setDp3Action]  = useState<Record<string, 'followup_chase' | 'escalate_manager' | 'switch_phone' | 'accept_silence'>>({})
+  const [dp3Draft,   setDp3Draft]   = useState<Record<string, string>>({})
+  // DP4 — resolution confirmation done (skip confirmation step)
+  const [dp4Done,    setDp4Done]    = useState<Set<string>>(new Set())
 
   const addPOEvent = (poId: string, event: POEvent) => {
     setPoEventsMap(prev => { const next = new Map(prev); next.set(poId, [...(next.get(poId) ?? []), event]); return next })
@@ -6950,38 +6642,109 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg }: { initialOpenPO?: 
   const onTrackPOs     = ALL_POS.filter(p => classifyPO(p) === 'on_track')
 
   const daysOverdue = (po: PO) => Math.ceil((today.getTime() - new Date(po.expectedDelivery).getTime()) / 86400000)
-  const daysUntil   = (po: PO) => Math.ceil((new Date(po.expectedDelivery).getTime() - today.getTime()) / 86400000)
+  const daysUntil   = (po: PO) => Math.ceil((new Date(po.expectedDelivery).getTime() - today.getTime()) / 86400000); void daysUntil
 
   // ActionGroup is declared at module level — see below
   const makeGroups = (pos: PO[], type: ActionGroup['type']): ActionGroup[] => {
     const bySupplier = pos.reduce((acc, po) => { acc[po.supplierId] = [...(acc[po.supplierId] ?? []), po]; return acc }, {} as Record<string, PO[]>)
     return Object.entries(bySupplier).map(([supplierId, ps]) => ({ supplierId, type, pos: ps }))
   }
+  const TRIGGER_MESSAGES: Record<string, TriggerMessage> = {
+    'NK-at_risk': {
+      sender: 'Nordic Knitwear', senderEmail: 'production@nordicknitwear.dk',
+      timestamp: '2026-04-03T14:22:00Z',
+      body: 'Hi Debenhams team,\n\nI\'m writing to inform you of an unavoidable delay to PO-2901 (Cotton Knit Jumpers). Our primary yarn supplier in Denmark has experienced a mechanical failure at their main spinning facility, which has pushed our yarn receipt back by 10 days.\n\nWe are currently forecasting a revised ex-factory date of 27 April (was 20 April). We have explored air freight but the cost uplift is not viable on this margin. We are committed to no further slippage beyond 27 April and will provide weekly production updates.\n\nKind regards,\nOliver Hansen\nNordic Knitwear Production',
+      agentSummary: 'Requested 7-day push on PO-2901 (20 Apr → 27 Apr). Cited mechanical failure at primary yarn mill in Denmark — yarn receipt delayed 10 days. Air freight ruled out on cost. No QC concerns flagged.',
+    },
+    'TB-at_risk': {
+      sender: 'Trendy Boots UK', senderEmail: 'orders@trendyboots.co.uk',
+      timestamp: '2026-04-05T09:47:00Z',
+      body: 'Dear Debenhams Buying Team,\n\nPlease be advised that PO-2845 (Ankle Strap Heels) will require a revised delivery date. Our factory in Portugal is experiencing a capacity constraint due to a larger-than-expected spring order from another retailer that has taken priority on the production line.\n\nWe are now forecasting delivery of 6 May (original: 22 April). We apologise for the inconvenience and are working to recover as much lead time as possible. We will confirm the final ex-factory date no later than 10 April.\n\nBest regards,\nSophia Turner\nTrendy Boots UK',
+      agentSummary: 'Requested 14-day push on PO-2845 (22 Apr → 6 May). Cited factory capacity constraint in Portugal — spring order from another retailer took production priority. Final ex-factory date to be confirmed by 10 Apr.',
+    },
+    'UF-late_dc': {
+      sender: 'Urban Footwear', senderEmail: 'logistics@urbanfootwear.com',
+      timestamp: '2026-04-18T11:15:00Z',
+      body: 'Hi team,\n\nQuick update on PO-2976 (Canvas Lo-Top Trainers). Goods are packed and ready. We are targeting dispatch on 30 April via our usual freight forwarder (DHL Supply Chain). However, we have not yet received the final booking confirmation from DHL — we\'re chasing and expect to confirm within 48 hours.\n\nPlease confirm your DC receiving slot is still available for w/c 14 May. Let us know if there are any issues.\n\nThanks,\nMarcus Reid\nUrban Footwear Logistics',
+      agentSummary: 'Goods packed for PO-2976, targeting 30 Apr dispatch via DHL Supply Chain. Freight booking not yet confirmed — expecting within 48 hrs. Requesting DC slot confirmation for w/c 14 May.',
+    },
+    'SS-overdue': {
+      sender: 'Summer Styles Ltd', senderEmail: 'production@summerstyles.co.uk',
+      timestamp: '2026-04-10T16:03:00Z',
+      body: 'Dear Debenhams team,\n\nI wanted to give you an early heads-up regarding PO-2891 (Floral Maxi Dress). We have encountered a fabric QC failure — a dye lot inconsistency was identified during final inspection, affecting approximately 40% of the batch.\n\nThe affected fabric has been quarantined and we are sourcing a replacement dye lot. This will add a minimum of 14 days to our production schedule. We understand the impact this has on your intake planning and are doing everything possible to minimise further delay.\n\nWe will provide a revised ex-factory date by end of week.\n\nSincerely,\nAmelia Clarke\nSummer Styles Production',
+      agentSummary: 'PO-2891 delayed by fabric QC failure — dye lot inconsistency in ~40% of batch. Affected fabric quarantined, replacement being sourced. Minimum 14-day impact. Revised ex-factory date due end of this week. No dispatch imminent.',
+    },
+  }
   const actionGroups: ActionGroup[] = [
     ...makeGroups(overduePOs, 'overdue'),
     ...makeGroups(atRiskPOs, 'at_risk'),
     ...makeGroups(preDispatchPOs, 'late_dc'),
-  ]
+  ].map(g => ({ ...g, triggerMessage: TRIGGER_MESSAGES[`${g.supplierId}-${g.type}`] }))
 
-  const selectedGroup    = actionGroups.find(g => g.supplierId === selectedSupId) ?? actionGroups[0] ?? null
-  const selectedSupplier = selectedGroup ? getSupplier(selectedGroup.supplierId) : null
+  // Consolidate by supplier: one entry per supplier across all issue types
+  const supplierEntries = (() => {
+    const map: Record<string, ActionGroup[]> = {}
+    actionGroups.forEach(g => { map[g.supplierId] = [...(map[g.supplierId] ?? []), g] })
+    return Object.entries(map).map(([supplierId, groups]) => ({
+      supplierId,
+      groups,
+      primaryGroup: groups.find(g => g.type === 'overdue') ?? groups.find(g => g.type === 'at_risk') ?? groups[0],
+      allPos: groups.flatMap(g => g.pos),
+    }))
+  })()
 
-  const generateDraftEmail = (group: ActionGroup): string => {
-    const sup = getSupplier(group.supplierId)
+  // Map each PO id → its issue type (for per-PO badges in the right panel)
+  const poTypeMap = new Map(actionGroups.flatMap(g => g.pos.map(p => [p.id, g.type] as const))); void poTypeMap
+
+  // ── Card helpers ────────────────────────────────────────────────────────────
+  const parseOrderVal = (v: string) => parseInt(v.replace(/[^0-9]/g, '')) || 0
+  const urgWt = (g: ActionGroup) => g.type === 'overdue' ? 3 : g.type === 'at_risk' ? 2 : 1
+  const cardKey = (g: ActionGroup) => `${g.supplierId}-${g.type}`
+  const getCardState = (g: ActionGroup): 'agent-drafted' | 'decision-needed' | 'awaiting-reply' | 'reply-received' | 'no-reply-overdue' | 'snoozed' => {
+    if (snoozedCards.has(cardKey(g))) return 'snoozed'
+    const thread = chaseThreads[g.supplierId]
+    if (thread?.status === 'reply-received') return 'reply-received'
+    if (thread?.status === 'no-reply-overdue') return 'no-reply-overdue'
+    if (thread?.status === 'awaiting-reply') return 'awaiting-reply'
+    if (g.type === 'overdue' && Math.max(...g.pos.map(p => daysOverdue(p))) >= 14) return 'decision-needed'
+    return 'agent-drafted'
+  }
+  const cardScore = (g: ActionGroup) => urgWt(g) * g.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0)
+
+  const generateDraftEmail = (groups: ActionGroup[]): string => {
+    if (groups.length === 0) return ''
+    const sup = getSupplier(groups[0].supplierId)
     if (!sup) return ''
-    const poList = group.pos.map(p => `- ${p.id}: ${p.product} (Due: ${formatDate(p.expectedDelivery)})`).join('\n')
-    if (group.type === 'overdue') {
-      const maxDays = Math.max(...group.pos.map(p => daysOverdue(p)))
-      return `Dear ${sup.name} Team,\n\nWe are writing to urgently follow up on ${group.pos.length} purchase order${group.pos.length > 1 ? 's' : ''} that ${group.pos.length > 1 ? 'are' : 'is'} now overdue by up to ${maxDays} days:\n\n${poList}\n\nPlease confirm:\n1. Current dispatch status\n2. Revised ex-factory date\n3. Freight booking reference\n\nWe require an urgent response by end of business today.\n\nKind regards,\nDebenhams Buying Team`
+    if (groups.length === 1) {
+      const g = groups[0]
+      const poList = g.pos.map(p => `- ${p.id}: ${p.product} (Due: ${formatDate(p.expectedDelivery)})`).join('\n')
+      if (g.type === 'overdue') {
+        const maxDays = Math.max(...g.pos.map(p => daysOverdue(p)))
+        return `Dear ${sup.name} Team,\n\nWe are writing to urgently follow up on ${g.pos.length} purchase order${g.pos.length > 1 ? 's' : ''} that ${g.pos.length > 1 ? 'are' : 'is'} now overdue by up to ${maxDays} days:\n\n${poList}\n\nPlease confirm:\n1. Current dispatch status\n2. Revised ex-factory date\n3. Freight booking reference\n\nWe require an urgent response by end of business today.\n\nKind regards,\nDebenhams Buying Team`
+      }
+      if (g.type === 'at_risk') {
+        return `Dear ${sup.name} Team,\n\nWe are writing regarding date change requests for the following purchase orders:\n\n${poList}\n\nPlease provide:\n1. Root cause of the delay\n2. Confirmation of revised delivery schedule\n3. Mitigation actions being taken\n\nPlease respond within 48 hours.\n\nKind regards,\nDebenhams Buying Team`
+      }
+      return `Dear ${sup.name} Team,\n\nPre-dispatch chase for the following orders due for delivery shortly:\n\n${poList}\n\nPlease confirm:\n1. Goods packed and ready for collection\n2. Freight forwarder booking reference\n3. Expected handover date\n\nKind regards,\nDebenhams Buying Team`
     }
-    if (group.type === 'at_risk') {
-      return `Dear ${sup.name} Team,\n\nWe are writing regarding date change requests for the following purchase orders:\n\n${poList}\n\nPlease provide:\n1. Root cause of the delay\n2. Confirmation of revised delivery schedule\n3. Mitigation actions being taken\n\nPlease respond within 48 hours.\n\nKind regards,\nDebenhams Buying Team`
-    }
-    return `Dear ${sup.name} Team,\n\nPre-dispatch chase for the following orders due for delivery shortly:\n\n${poList}\n\nPlease confirm:\n1. Goods packed and ready for collection\n2. Freight forwarder booking reference\n3. Expected handover date\n\nKind regards,\nDebenhams Buying Team`
+    // Multi-issue consolidated email
+    const sections = groups.map(g => {
+      const poList = g.pos.map(p => `  - ${p.id}: ${p.product} (Due: ${formatDate(p.expectedDelivery)})`).join('\n')
+      if (g.type === 'overdue') {
+        const maxDays = Math.max(...g.pos.map(p => daysOverdue(p)))
+        return `OVERDUE ORDERS (${g.pos.length} PO${g.pos.length > 1 ? 's' : ''}, up to ${maxDays}d late):\n${poList}\nAction required: confirm dispatch status, revised ex-factory date, and freight booking.`
+      }
+      if (g.type === 'at_risk') {
+        return `DATE CHANGE REQUESTS (${g.pos.length} PO${g.pos.length > 1 ? 's' : ''}):\n${poList}\nAction required: provide root cause, revised delivery schedule, and mitigation actions.`
+      }
+      return `PRE-DISPATCH CONFIRMATION (${g.pos.length} PO${g.pos.length > 1 ? 's' : ''}):\n${poList}\nAction required: confirm goods are packed, freight forwarder booking reference, and expected handover date.`
+    }).join('\n\n')
+    const totalPos = groups.reduce((s, g) => s + g.pos.length, 0)
+    return `Dear ${sup.name} Team,\n\nWe are writing regarding ${totalPos} purchase order${totalPos > 1 ? 's' : ''} that require your urgent attention. This email covers multiple open issues — please respond to each section below.\n\n${sections}\n\nPlease respond to all points above within 24 hours.\n\nKind regards,\nDebenhams Buying Team`
   }
 
   // ── Thread helpers ──────────────────────────────────────────────────────────
-  const getThreadKey = (g: ActionGroup) => `${g.supplierId}-${g.type}`
+  const getThreadKey = (g: ActionGroup) => g.supplierId
 
   const generateSupplierReply = (g: ActionGroup): string => {
     const sup = getSupplier(g.supplierId)
@@ -7031,9 +6794,10 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg }: { initialOpenPO?: 
     return `Dear ${name} Team,\n\nThank you for confirming the freight booking details. We have updated our systems accordingly.\n\nWe will monitor progress and will be in touch if any issues arise at our DC.\n\nKind regards,\nDebenhams Buying Team`
   }
 
-  const handleStartThread = (group: ActionGroup, editedBody?: string) => {
-    const key  = getThreadKey(group)
-    const body = editedBody ?? generateDraftEmail(group)
+  const handleStartThread = (groups: ActionGroup[], editedBody?: string) => {
+    const primary = groups[0]
+    const key  = primary.supplierId
+    const body = editedBody ?? generateDraftEmail(groups)
     const msgId = `msg-${Date.now()}`
     const thread: ChaseThread = {
       status: 'awaiting-reply',
@@ -7042,7 +6806,7 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg }: { initialOpenPO?: 
     }
     setChaseThreads(prev => ({ ...prev, [key]: thread }))
     setExpandedMsgIds(new Set())
-    addPOEvent(group.pos[0].id, { id: `ev-${Date.now()}`, type: 'chase_sent', timestamp: new Date().toISOString(), body: `Chase email sent to ${getSupplier(group.supplierId)?.name}.`, author: 'agent' })
+    addPOEvent(primary.pos[0].id, { id: `ev-${Date.now()}`, type: 'chase_sent', timestamp: new Date().toISOString(), body: `Chase email sent to ${getSupplier(primary.supplierId)?.name}.`, author: 'agent' })
   }
 
   const handleSimulateReply = (group: ActionGroup) => {
@@ -7056,40 +6820,126 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg }: { initialOpenPO?: 
     const sup = getSupplier(group.supplierId)
     const replyMsg: ChaseThreadMsg  = { id: replyId,  sender: sup?.name ?? group.supplierId, timestamp: new Date().toISOString(), body: replyBody, status: 'received' }
     const followMsg: ChaseThreadMsg = { id: followId, sender: 'agent', timestamp: new Date().toISOString(), body: followUpBody, status: cfg?.autoSend ? 'auto-sent' : 'awaiting-review', emailType }
-
     setChaseThreads(prev => {
       const cur = prev[key]
       if (!cur) return prev
       return { ...prev, [key]: { ...cur, status: 'reply-received', messages: [...cur.messages, replyMsg, followMsg] } }
     })
-    setExpandedMsgIds(new Set())  // latest auto-expands
+    // Generate proposed PO mutations (push expected dates forward ~3-5 weeks)
+    const newDate = (base: string, weeks: number) => {
+      const d = new Date(base); d.setDate(d.getDate() + weeks * 7); return d.toISOString().split('T')[0]
+    }
+    const mutations = group.pos.map((p, i) => ({
+      poId: p.id,
+      field: 'Expected delivery',
+      oldVal: formatDate(p.expectedDelivery),
+      newVal: formatDate(newDate(p.expectedDelivery, 3 + i)),
+    }))
+    setProposedMutations(prev => ({ ...prev, [group.supplierId]: mutations }))
+    setExpandedMsgIds(new Set())
   }
 
-  const handleSendFollowUp = (group: ActionGroup, msgId: string) => {
+  const generateDP2Draft = (action: string, sup: { name: string }, muts: Array<{poId: string; field: string; oldVal: string; newVal: string}>): string => {
+    const nl = '\n'
+    const closing = nl + nl + 'Kind regards,' + nl + 'Debenhams Buying Team'
+    if (action === 'apply_changes') {
+      const mutLines = muts.map(m => `- ${m.poId}: ${m.field} updated from ${m.oldVal} to ${m.newVal}`).join(nl)
+      return `Dear ${sup.name} Team,${nl}${nl}Thank you for your reply. We confirm acceptance of the proposed changes:${nl}${nl}${mutLines}${nl}${nl}We have updated our systems accordingly. Please ensure freight is booked in line with the revised schedule.${closing}`
+    }
+    if (action === 'counter_propose') {
+      return `Dear ${sup.name} Team,${nl}${nl}Thank you for your response. We are unable to accept the proposed dates as they stand and would like to discuss a revised schedule.${nl}${nl}Could you please confirm whether an earlier delivery is achievable? We are flexible on specific dates and would appreciate your earliest possible commitment.${closing}`
+    }
+    if (action === 'reject_escalate') {
+      return `Dear ${sup.name} Team,${nl}${nl}Thank you for your response. After review, we are unable to accept the proposed changes. The original contractual delivery dates remain in effect.${nl}${nl}This matter has been escalated internally. Please revert with a plan to meet the original schedule, or we will need to review our options.${closing}`
+    }
+    if (action === 'reply_question') {
+      return `Dear ${sup.name} Team,${nl}${nl}Thank you for your reply. Before we can confirm our response, we need some clarification on the following points:${nl}${nl}1. [Add your question here]${nl}${nl}Please respond at your earliest convenience so we can proceed.${closing}`
+    }
+    return ''
+  }
+
+  const generateDP3Draft = (action: string, group: ActionGroup, sup: { name: string }, daysSinceChase: number): string => {
+    const nl = '\n'
+    const closing = nl + nl + 'Kind regards,' + nl + 'Debenhams Buying Team'
+    if (action === 'followup_chase') {
+      const poList = group.pos.map(p => `- ${p.id}: ${p.product}`).join(nl)
+      return `Dear ${sup.name} Team,${nl}${nl}We sent you a chase email ${daysSinceChase} days ago regarding the following orders and have not yet received a response:${nl}${nl}${poList}${nl}${nl}This is now urgent. Please confirm the current status of these orders and provide a revised delivery timeline by end of business today.${nl}${nl}Failure to respond will require us to escalate this matter.${closing}`
+    }
+    if (action === 'escalate_manager') {
+      const poList = group.pos.map(p => `- ${p.id}: ${p.product} (Due: ${formatDate(p.expectedDelivery)})`).join(nl)
+      return `Dear [Manager Name],${nl}${nl}I'm escalating the following supplier issue for your awareness.${nl}${nl}Supplier: ${sup.name}${nl}Issue: No response received to chase email sent ${daysSinceChase} days ago.${nl}${nl}Affected orders:${nl}${poList}${nl}${nl}Recommended action: [Add recommendation here]${nl}${nl}Please advise on how to proceed.${nl}${nl}Regards,${nl}[Your name]`
+    }
+    return ''
+  }
+
+  const handleApplyChanges = (group: ActionGroup, action: string, replyDraft: string, sendReply: boolean, cardKey: string) => {
     const key = getThreadKey(group)
+    const ts = new Date().toISOString()
+    const muts = proposedMutations[group.supplierId] ?? []
+    const actionLabel = action === 'apply_changes' ? 'Apply proposed changes' : action === 'counter_propose' ? 'Counter-propose' : action === 'reject_escalate' ? 'Reject and escalate' : 'Reply with question'
+
     setChaseThreads(prev => {
       const cur = prev[key]
       if (!cur) return prev
-      return { ...prev, [key]: { ...cur, status: 'resolved', messages: cur.messages.map(m => m.id === msgId ? { ...m, status: 'sent' as const } : m) } }
+      const newMsgs = sendReply
+        ? [...cur.messages, { id: `msg-${Date.now()}`, sender: 'you' as const, timestamp: ts, body: replyDraft, status: 'sent' as const }]
+        : cur.messages
+      const sysEv: ThreadSystemEvent = { id: `sys-${Date.now()}`, timestamp: ts, body: `Decision recorded: ${actionLabel}` }
+      const mutEvs: ThreadSystemEvent[] = muts.map((m, i) => ({
+        id: `sys-${Date.now() + i + 1}`, timestamp: ts, body: `${m.field} updated: ${m.oldVal} → ${m.newVal} (${m.poId})`
+      }))
+      const resolvedEv: ThreadSystemEvent = { id: `sys-${Date.now() + muts.length + 1}`, timestamp: ts, body: 'Action resolved' }
+      return {
+        ...prev,
+        [key]: { ...cur, status: 'resolved', messages: newMsgs, systemEvents: [...(cur.systemEvents ?? []), sysEv, ...mutEvs, resolvedEv] }
+      }
     })
+    setProposedMutations(prev => { const n = { ...prev }; delete n[group.supplierId]; return n })
+    setResolvedCards(prev => { const n = new Set(prev); n.add(cardKey); return n })
   }
 
-  const handleDismissFollowUp = (group: ActionGroup, msgId: string) => {
+  const handleNoReplyTrigger = (group: ActionGroup) => {
     const key = getThreadKey(group)
+    const ts = new Date().toISOString()
     setChaseThreads(prev => {
       const cur = prev[key]
       if (!cur) return prev
-      return { ...prev, [key]: { ...cur, messages: cur.messages.map(m => m.id === msgId ? { ...m, status: 'dismissed' as const } : m) } }
+      const sysEv: ThreadSystemEvent = { id: `sys-${Date.now()}`, timestamp: ts, body: 'No reply received after 3 days — action escalated to overdue' }
+      return { ...prev, [key]: { ...cur, status: 'no-reply-overdue', systemEvents: [...(cur.systemEvents ?? []), sysEv] } }
     })
   }
 
-  const toggleExpandMsg = (msgId: string) => {
-    setExpandedMsgIds(prev => {
-      const next = new Set(prev)
-      if (next.has(msgId)) next.delete(msgId); else next.add(msgId)
-      return next
+  const handleDP3Action = (group: ActionGroup, action: string, draft: string, cardKey: string) => {
+    const key = getThreadKey(group)
+    const ts = new Date().toISOString()
+    if (action === 'accept_silence') {
+      const sysEv: ThreadSystemEvent = { id: `sys-${Date.now()}`, timestamp: ts, body: 'Action closed — supplier silence accepted' }
+      setChaseThreads(prev => {
+        const cur = prev[key]
+        if (!cur) return prev
+        return { ...prev, [key]: { ...cur, status: 'resolved', systemEvents: [...(cur.systemEvents ?? []), sysEv] } }
+      })
+      setResolvedCards(prev => { const n = new Set(prev); n.add(cardKey); return n })
+      return
+    }
+    if (action === 'switch_phone') {
+      setLogNoteOpen(prev => ({ ...prev, [cardKey]: true }))
+      return
+    }
+    const sysEvLabel = action === 'followup_chase' ? 'Follow-up chase sent' : 'Escalated to manager'
+    const sysEv: ThreadSystemEvent = { id: `sys-${Date.now()}`, timestamp: ts, body: sysEvLabel }
+    const newStatus = action === 'followup_chase' ? 'awaiting-reply' as const : 'awaiting-reply' as const
+    setChaseThreads(prev => {
+      const cur = prev[key]
+      if (!cur) return prev
+      const newMsg: ChaseThreadMsg = { id: `msg-${Date.now()}`, sender: 'you', timestamp: ts, body: draft, status: 'sent' }
+      return { ...prev, [key]: { ...cur, status: newStatus, messages: [...cur.messages, newMsg], systemEvents: [...(cur.systemEvents ?? []), sysEv] } }
     })
   }
+
+
+
+
 
   const AGENT_LOG: AgentLogEntry[] = [
     { time: '2026-05-01T11:30:00Z', type: 'low_confidence', message: 'Supplier reply from Next Sourcing (Striped Cotton Tee — REC-006) is non-committal. No specific CP proposed. Agent cannot assess margin impact. Flagged for buyer review.' },
@@ -7126,7 +6976,7 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg }: { initialOpenPO?: 
     <div className="flex-1 overflow-y-auto relative">
 
       {selectedPO && (
-        <POLineDrawer po={selectedPO} events={poEventsMap.get(selectedPO.id) ?? []} lastChased={lastChasedMap.get(selectedPO.id)} onClose={() => setSelectedPOId(null)} onAddEvent={addPOEvent} onNavigateToNeg={onNavigateToNeg} />
+        <POLineDrawer po={selectedPO} onClose={() => setSelectedPOId(null)} onAddEvent={addPOEvent} />
       )}
 
       {/* Send confirm modal */}
@@ -7228,281 +7078,1136 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg }: { initialOpenPO?: 
         </div>
 
         {/* ── ACTIONS ── */}
-        {subTab === 'actions' && (
+        {subTab === 'actions' && (() => {
+          // ── Queue data ───────────────────────────────────────────────────
+          const awaitingUser   = actionGroups.filter(g => ['agent-drafted','decision-needed','reply-received'].includes(getCardState(g))).length
+          const valueAtRisk    = [...overduePOs, ...atRiskPOs].reduce((s, p) => s + parseOrderVal(p.orderValue), 0)
+          const decisionsPend  = actionGroups.filter(g => getCardState(g) === 'decision-needed').length
+          const awaitingReply  = actionGroups.filter(g => getCardState(g) === 'awaiting-reply').length
+
+          const filtered = actionGroups.filter(g => {
+            if (actTypeFilter === 'chase'       && g.type !== 'overdue')  return false
+            if (actTypeFilter === 'date_change' && g.type !== 'at_risk')  return false
+            if (actTypeFilter === 'dc_booking'  && g.type !== 'late_dc')  return false
+            if (actTypeFilter === 'decision'    && getCardState(g) !== 'decision-needed') return false
+            if (urgencyFilter  === 'overdue'    && g.type !== 'overdue')  return false
+            if (urgencyFilter  === 'at_risk'    && g.type !== 'at_risk')  return false
+            if (urgencyFilter  === 'routine'    && g.type !== 'late_dc')  return false
+            return true
+          })
+          const sorted = [...filtered].sort((a, b) =>
+            sortMode === 'alpha'
+              ? (getSupplier(a.supplierId)?.name ?? '').localeCompare(getSupplier(b.supplierId)?.name ?? '')
+              : cardScore(b) - cardScore(a)
+          )
+          const withHeaders = sorted.map((g, i) => ({ g, showHeader: i === 0 || sorted[i-1].supplierId !== g.supplierId }))
+
+          // ── Drawer data ──────────────────────────────────────────────────
+          const drawerGroup    = actionGroups.find(g => cardKey(g) === drawerCardKey) ?? null
+          const drawerSup      = drawerGroup ? getSupplier(drawerGroup.supplierId) : null
+          const drawerThread   = drawerGroup ? chaseThreads[drawerGroup.supplierId] : null
+          const drawerState    = drawerGroup ? getCardState(drawerGroup) : null
+          const drawerAllGrps  = drawerGroup ? (supplierEntries.find(e => e.supplierId === drawerGroup.supplierId)?.groups ?? [drawerGroup]) : []
+          const drawerDraftKey = drawerGroup?.supplierId ?? ''
+          const drawerDefault  = drawerGroup ? generateDraftEmail(drawerAllGrps) : ''
+          const drawerDraft    = chaseDraftMap[drawerDraftKey] ?? drawerDefault
+          const drawerDirty    = drawerDraft !== drawerDefault
+          const drawerMuts     = drawerGroup ? (proposedMutations[drawerGroup.supplierId] ?? []) : []
+          const drawerDecChoice = drawerCardKey ? drawerDecision[drawerCardKey] : undefined
+          const drawerMaxOverdue = drawerGroup?.type === 'overdue' ? Math.max(...drawerGroup.pos.map(p => daysOverdue(p))) : 0
+          const drawerOrderVal   = drawerGroup ? drawerGroup.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0) : 0
+          const cprPct = 10
+          const cprSaving = Math.round(drawerOrderVal * cprPct / 100)
+          const drawerViewPO = drawerViewPOId ? (ALL_POS.find(p => p.id === drawerViewPOId) ?? null) : null
+          const drawerCurrentPill = drawerCardKey
+            ? (selectedActionPill[drawerCardKey] ?? (
+                drawerGroup?.type === 'at_risk' ? 'approve_date' :
+                drawerGroup?.type === 'late_dc' ? 'confirm_booking' :
+                drawerState === 'decision-needed' ? 'decision' : 'chase'
+              ))
+            : 'chase'
+          const hasExplicitSelection = !!(drawerCardKey && selectedActionPill[drawerCardKey])
+          const drawerUiState: 'A' | 'B' | 'C' | 'D' | 'E' | 'F' = (() => {
+            if (!drawerCardKey) return 'A'
+            if (resolvedCards.has(drawerCardKey)) return 'E'
+            if (drawerState === 'reply-received') return 'D'
+            if (drawerState === 'no-reply-overdue') return 'F'
+            if (drawerState === 'awaiting-reply') return 'C'
+            if (hasExplicitSelection) return 'B'
+            return 'A'
+          })()
+          // DP2 derived state
+          const currentDp2Action = drawerCardKey ? (dp2Action[drawerCardKey] ?? 'apply_changes') : 'apply_changes'
+          const dp2DefaultDraft = (drawerGroup && drawerSup) ? generateDP2Draft(currentDp2Action, drawerSup, drawerMuts) : ''
+          const currentDp2Draft = drawerCardKey ? (dp2Draft[drawerCardKey] ?? dp2DefaultDraft) : dp2DefaultDraft
+          // DP3 derived state
+          const currentDp3Action = drawerCardKey ? (dp3Action[drawerCardKey] ?? 'followup_chase') : 'followup_chase'
+          const daysSinceChase = drawerThread ? Math.floor((Date.now() - new Date(drawerThread.startedAt).getTime()) / 86400000) : 3
+          const dp3DefaultDraft = (drawerGroup && drawerSup) ? generateDP3Draft(currentDp3Action, drawerGroup, drawerSup, Math.max(daysSinceChase, 3)) : ''
+          const currentDp3Draft = drawerCardKey ? (dp3Draft[drawerCardKey] ?? dp3DefaultDraft) : dp3DefaultDraft
+          const selectedActionLabel = (() => {
+            if (!drawerCardKey) return ''
+            const pill = selectedActionPill[drawerCardKey]
+            return ({ chase:'Chase supplier', decision:'Make commercial decision', approve_date:'Approve date change', counter:'Counter-propose', reject:'Reject', confirm_booking:'Confirm DC booking', alt_slot:'Request alternate slot' } as Record<string,string>)[pill] ?? pill
+          })()
+          const cpDate = drawerCardKey ? (counterProposeDate[drawerCardKey] ?? '') : ''
+          const rrText = drawerCardKey ? (rejectReason[drawerCardKey] ?? '') : ''
+          const nl = '\n'
+          const actionDraftBody = (() => {
+            if (!drawerGroup || !drawerSup) return ''
+            const pill = drawerCurrentPill
+            const closing = nl + nl + 'Kind regards,' + nl + 'Debenhams Buying Team'
+            const poList = drawerGroup.pos.map(p => '- ' + p.id + ': ' + p.product + ' (Due: ' + formatDate(p.expectedDelivery) + ')').join(nl)
+            if (pill === 'approve_date') return 'Dear ' + drawerSup.name + ' Team,' + nl + nl + 'Thank you for advising of the revised schedule. We confirm acceptance of the updated dates for:' + nl + nl + poList + nl + nl + 'Please update your records and ensure freight is booked accordingly.' + closing
+            if (pill === 'counter') {
+              const d = cpDate ? new Date(cpDate).toLocaleDateString('en-GB', {day:'numeric', month:'long', year:'numeric'}) : '[DATE TBC]'
+              return 'Dear ' + drawerSup.name + ' Team,' + nl + nl + 'Thank you for your communication. We are unable to accept the dates as proposed and would like to counter-propose delivery by ' + d + ' for:' + nl + nl + poList + nl + nl + 'Please confirm whether this revised schedule is achievable.' + closing
+            }
+            if (pill === 'reject') {
+              const rp = rrText ? (nl + nl + 'Reason: ' + rrText) : ''
+              return 'Dear ' + drawerSup.name + ' Team,' + nl + nl + 'We formally reject the proposed date changes for the following orders:' + rp + nl + nl + poList + nl + nl + 'The original delivery dates remain contractually binding. Please advise on your plan to meet the original schedule.' + closing
+            }
+            if (pill === 'confirm_booking') return 'Dear ' + drawerSup.name + ' Team,' + nl + nl + 'We confirm the DC delivery booking for:' + nl + nl + poList + nl + nl + 'Please ensure goods are ready at the confirmed slot and share your freight booking reference.' + closing
+            if (pill === 'alt_slot') return 'Dear ' + drawerSup.name + ' Team,' + nl + nl + 'We are writing to request an alternate delivery slot for:' + nl + nl + poList + nl + nl + 'The current booking does not align with our receiving schedule. Please provide available alternative dates.' + closing
+            if (pill === 'decision' && drawerDecChoice) {
+              const decPoList = drawerGroup.pos.map(p => '- ' + p.id + ': ' + p.product).join(nl)
+              if (drawerDecChoice === 'cancel') return 'Dear ' + drawerSup.name + ' Team,' + nl + nl + 'Following our review, we are cancelling the following orders:' + nl + decPoList + nl + nl + 'Please confirm and advise on any cancellation charges.' + closing
+              if (drawerDecChoice === 'cpr') return 'Dear ' + drawerSup.name + ' Team,' + nl + nl + 'We would like to negotiate a CPR of ' + cprPct + '% on the following delayed orders:' + nl + decPoList + nl + nl + 'Please confirm acceptance in writing.' + closing
+              return 'Dear ' + drawerSup.name + ' Team,' + nl + nl + 'We will accept the late delivery for:' + nl + decPoList + nl + nl + 'Please confirm the revised delivery date.' + closing
+            }
+            return chaseDraftMap[drawerDraftKey] ?? drawerDefault
+          })()
+          const isLogNoteOpen = !!(drawerCardKey && logNoteOpen[drawerCardKey])
+          const currentLogNoteType = drawerCardKey ? (logNoteType[drawerCardKey] ?? 'note') : 'note'
+          const currentLogNoteText = drawerCardKey ? (logNoteText[drawerCardKey] ?? '') : ''
+          const isSnoozeConfirm = !!(drawerCardKey && snoozeConfirmOpen[drawerCardKey])
+          const isDismissConfirm = !!(drawerCardKey && dismissConfirmOpen[drawerCardKey])
+          type DrawerThreadEntry =
+            | { kind: 'outbound';      id: string; sender: string; timestamp: string; body: string; poIds: string[] }
+            | { kind: 'inbound';       id: string; sender: string; timestamp: string; body: string }
+            | { kind: 'agent_summary'; id: string; timestamp: string; mutations: typeof drawerMuts }
+            | { kind: 'note';          id: string; author: string;  timestamp: string; body: string; noteType?: 'call' | 'note' | 'internal' }
+            | { kind: 'system_event';  id: string; timestamp: string; body: string }
+          const drawerThreadEntries: DrawerThreadEntry[] = (() => {
+            if (!drawerGroup) return []
+            const entries: DrawerThreadEntry[] = []
+            const messages = drawerThread?.messages ?? []
+            messages.forEach((m, idx) => {
+              if (m.sender === 'you' || m.sender === 'agent') {
+                entries.push({ kind: 'outbound' as const, id: m.id, sender: m.sender === 'you' ? 'You' : 'Agent (sent on your behalf)', timestamp: m.timestamp, body: m.body, poIds: drawerGroup.pos.map(p => p.id) })
+              } else {
+                entries.push({ kind: 'inbound' as const, id: m.id, sender: m.sender, timestamp: m.timestamp, body: m.body })
+                // If the next message is agent summary (awaiting-review), inject an agent_summary entry
+                const next = messages[idx + 1]
+                if (next?.sender === 'agent' && next.status === 'awaiting-review' && drawerMuts.length > 0) {
+                  const agentTs = new Date(new Date(m.timestamp).getTime() + 5000).toISOString()
+                  entries.push({ kind: 'agent_summary' as const, id: `agsum-${m.id}`, timestamp: agentTs, mutations: drawerMuts })
+                }
+              }
+            })
+            drawerGroup.pos.forEach(p => {
+              ;(poEventsMap.get(p.id) ?? []).filter(e => e.type === 'manual_note').forEach(e => {
+                const body = e.body
+                const noteType: 'call' | 'note' | 'internal' = body.startsWith('[Call] ') ? 'call' : body.startsWith('[Internal] ') ? 'internal' : 'note'
+                entries.push({ kind: 'note' as const, id: e.id, author: e.author === 'buyer' ? 'You' : 'Agent', timestamp: e.timestamp, body, noteType })
+              })
+            })
+            ;(drawerThread?.systemEvents ?? []).forEach(e => {
+              entries.push({ kind: 'system_event' as const, id: e.id, timestamp: e.timestamp, body: e.body })
+            })
+            return entries.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+          })()
+
+          const drawerTrigger      = drawerGroup?.triggerMessage ?? null
+          const triggerIsExpanded  = !!(drawerCardKey && triggerExpanded[drawerCardKey])
+
+          // ── State → visual mapping ───────────────────────────────────────
+          const stateBar   = { 'agent-drafted': 'bg-purple-500', 'decision-needed': 'bg-red-500', 'awaiting-reply': 'bg-gray-300', 'reply-received': 'bg-blue-500', 'no-reply-overdue': 'bg-amber-500', 'snoozed': 'bg-gray-200' }
+          const statePillCls = { 'agent-drafted': 'bg-purple-100 text-purple-700', 'decision-needed': 'bg-red-100 text-red-700', 'awaiting-reply': 'bg-gray-100 text-gray-500', 'reply-received': 'bg-blue-100 text-blue-700', 'no-reply-overdue': 'bg-amber-100 text-amber-700', 'snoozed': 'bg-gray-100 text-gray-400' }
+          const statePillLbl = { 'agent-drafted': 'Agent drafted', 'decision-needed': 'Decision needed', 'awaiting-reply': 'Awaiting reply', 'reply-received': 'Reply received', 'no-reply-overdue': 'No reply — overdue', 'snoozed': 'Snoozed' }
+          const stateCTA     = { 'agent-drafted': 'Review draft', 'decision-needed': 'Make decision', 'awaiting-reply': 'View thread', 'reply-received': 'Review reply', 'no-reply-overdue': 'No reply — act', 'snoozed': 'Unsnoozed' }
+          const actionTypeLbl = (g: ActionGroup) => g.type === 'overdue' ? 'Chase' : g.type === 'at_risk' ? 'Approve date change' : 'Confirm DC booking'
+          const actionTypeCls = (g: ActionGroup) => g.type === 'overdue' ? 'bg-red-50 text-red-600' : g.type === 'at_risk' ? 'bg-orange-50 text-orange-600' : 'bg-amber-50 text-amber-600'
+
+          const headline = (g: ActionGroup) => {
+            const totalVal = g.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0)
+            const valStr = totalVal > 0 ? ` · £${totalVal.toLocaleString()} at risk` : ''
+            if (g.type === 'overdue') return `${g.pos.length} PO${g.pos.length > 1 ? 's' : ''} overdue by up to ${Math.max(...g.pos.map(p => daysOverdue(p)))} days${valStr}`
+            if (g.type === 'at_risk') return `${g.pos.length} date change${g.pos.length > 1 ? 's' : ''} requested${valStr}`
+            return `${g.pos.length} PO${g.pos.length > 1 ? 's' : ''} with unconfirmed DC booking${valStr}`
+          }
+          const agentRec = (g: ActionGroup, state: string) => {
+            if (state === 'awaiting-reply') return 'Waiting for supplier response — no action needed'
+            if (state === 'reply-received') return 'Agent summary: supplier replied — review proposed date changes'
+            if (state === 'decision-needed') return `Agent observation: ${Math.max(...g.pos.map(p => daysOverdue(p)))}d late — cancellation or CPR may recover margin`
+            if (g.type === 'overdue') return `Agent recommends: urgent chase covering ${g.pos.length > 1 ? 'all ' + g.pos.length + ' orders' : 'this order'}`
+            if (g.type === 'at_risk') return 'Agent recommends: request root cause and revised schedule'
+            return 'Agent recommends: confirm freight forwarder booking reference'
+          }
+
+          return (
           <>
-            <div className="grid grid-cols-4 gap-3">
-              {([
-                { label: 'On track',     count: onTrackPOs.length,     color: 'bg-green-500',  text: 'text-green-700',  bg: 'bg-green-50',  border: 'border-green-100'  },
-                { label: 'Late DC booking', count: preDispatchPOs.length, color: 'bg-amber-400',  text: 'text-amber-700',  bg: 'bg-amber-50',  border: 'border-amber-100'  },
-                { label: 'At Risk',      count: atRiskPOs.length,      color: 'bg-orange-500', text: 'text-orange-700', bg: 'bg-orange-50', border: 'border-orange-100' },
-                { label: 'Overdue',      count: overduePOs.length,     color: 'bg-red-600',    text: 'text-red-700',    bg: 'bg-red-50',    border: 'border-red-100'    },
-              ] as const).map(({ label, count, color, text, bg, border }) => (
-                <div key={label} className={`rounded-xl border p-4 ${bg} ${border}`}>
-                  <div className={`text-2xl font-bold ${text}`}>{count}</div>
+            {/* ── Stats strip ───────────────────────────────────────────── */}
+            <div className="grid grid-cols-4 gap-3 mb-1">
+              {[
+                { label: 'Actions awaiting you', value: awaitingUser,   color: 'text-gray-900', bg: 'bg-white border border-gray-100' },
+                { label: '£ value at risk',       value: `£${valueAtRisk.toLocaleString()}`, color: 'text-red-600',   bg: 'bg-red-50 border border-red-100' },
+                { label: 'Decisions pending',     value: decisionsPend, color: 'text-red-700',  bg: 'bg-red-50 border border-red-100' },
+                { label: 'Awaiting reply',         value: awaitingReply, color: 'text-gray-500', bg: 'bg-gray-50 border border-gray-100' },
+              ].map(({ label, value, color, bg }) => (
+                <div key={label} className={`rounded-xl p-4 ${bg}`}>
+                  <div className={`text-2xl font-bold ${color}`}>{value}</div>
                   <div className="text-xs text-gray-500 font-medium mt-0.5">{label}</div>
-                  <div className="mt-2 h-1.5 rounded-full bg-white/60 overflow-hidden">
-                    <div className={`h-full rounded-full ${color}`} style={{ width: `${Math.min(100, (count / ALL_POS.length) * 200)}%` }} />
-                  </div>
                 </div>
               ))}
             </div>
+            {/* Secondary status pills */}
+            <div className="flex items-center gap-2 flex-wrap pb-1">
+              {[
+                { label: 'On track',      count: onTrackPOs.length,      cls: 'bg-green-50 text-green-700 border-green-100' },
+                { label: 'Late DC',       count: preDispatchPOs.length,   cls: 'bg-amber-50 text-amber-700 border-amber-100' },
+                { label: 'At risk',       count: atRiskPOs.length,        cls: 'bg-orange-50 text-orange-700 border-orange-100' },
+                { label: 'Overdue',       count: overduePOs.length,       cls: 'bg-red-50 text-red-700 border-red-100' },
+              ].map(({ label, count, cls }) => (
+                <span key={label} className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold border ${cls}`}>
+                  <span className="font-bold">{count}</span> {label}
+                </span>
+              ))}
+            </div>
 
-            <div className="flex gap-4 min-h-[500px]">
-              {/* Left action list */}
-              <div className="w-64 shrink-0 bg-white border border-gray-100 rounded-2xl shadow-sm flex flex-col overflow-hidden">
-                <div className="px-4 py-3 border-b border-gray-100 bg-gray-50">
-                  <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Today's Actions · {actionGroups.length} Items</span>
-                </div>
-                <div className="flex-1 overflow-y-auto divide-y divide-gray-50">
-                  {actionGroups.map(g => {
-                    const sup = getSupplier(g.supplierId)
-                    const isSelected = selectedGroup?.supplierId === g.supplierId && selectedGroup?.type === g.type
-                    const actionLabel = g.type === 'overdue' ? 'Overdue' : g.type === 'at_risk' ? 'Date Change' : 'DC Booking'
-                    const actionCls   = g.type === 'overdue' ? 'bg-red-100 text-red-700' : g.type === 'at_risk' ? 'bg-orange-100 text-orange-700' : 'bg-amber-100 text-amber-700'
-                    return (
-                      <button key={`${g.supplierId}-${g.type}`} onClick={() => setSelectedSupId(g.supplierId)}
-                        className={`w-full text-left px-4 py-3 flex items-start gap-3 hover:bg-gray-50 transition-colors ${isSelected ? 'bg-indigo-50 border-l-[3px] border-indigo-500' : ''}`}>
-                        <span className="shrink-0 mt-0.5">
-                          {g.type === 'overdue'      && <AlertTriangle className="w-4 h-4 text-red-500" />}
-                          {g.type === 'at_risk'      && <Clock className="w-4 h-4 text-orange-400" />}
-                          {g.type === 'late_dc' && <Mail className="w-4 h-4 text-amber-500" />}
-                        </span>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-1.5 mb-0.5">
-                            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${actionCls}`}>{actionLabel}</span>
-                            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${actionCls}`}>{g.pos.length}</span>
-                          </div>
-                          <div className="text-xs font-semibold text-gray-800 truncate">{sup?.name ?? g.supplierId}</div>
-                          <div className="text-[10px] text-gray-400 mt-0.5">
-                            {g.type === 'overdue'      && `${g.pos.length} overdue PO${g.pos.length > 1 ? 's' : ''}`}
-                            {g.type === 'at_risk'      && `${g.pos.length} date change${g.pos.length > 1 ? 's' : ''}`}
-                            {g.type === 'late_dc' && <><Tt tip="Distribution Centre booking: the appointment slot to receive goods at the DC. Must be booked in advance; a missed or late booking delays stock reaching the shop floor.">DC booking</Tt> needed · {g.pos.length} PO{g.pos.length > 1 ? 's' : ''}</>}
-                          </div>
-                        </div>
-                      </button>
-                    )
-                  })}
-                </div>
+            {/* ── Filter bar ────────────────────────────────────────────── */}
+            <div className="flex items-center gap-2 flex-wrap bg-white border border-gray-100 rounded-xl px-4 py-3 shadow-sm">
+              <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mr-1">Filter</span>
+              {[
+                { value: 'all',         label: 'All types' },
+                { value: 'chase',       label: 'Chase' },
+                { value: 'date_change', label: 'Date change' },
+                { value: 'dc_booking',  label: 'DC booking' },
+                { value: 'decision',    label: 'Decision' },
+              ].map(opt => (
+                <button key={opt.value} onClick={() => setActTypeFilter(opt.value)}
+                  className={`px-3 py-1 rounded-lg text-xs font-semibold transition-colors ${actTypeFilter === opt.value ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                  {opt.label}
+                </button>
+              ))}
+              <div className="w-px h-4 bg-gray-200 mx-1" />
+              {[
+                { value: 'all',      label: 'Any urgency' },
+                { value: 'overdue',  label: 'Overdue' },
+                { value: 'at_risk',  label: 'At risk' },
+                { value: 'routine',  label: 'Routine' },
+              ].map(opt => (
+                <button key={opt.value} onClick={() => setUrgencyFilter(opt.value)}
+                  className={`px-3 py-1 rounded-lg text-xs font-semibold transition-colors ${urgencyFilter === opt.value ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                  {opt.label}
+                </button>
+              ))}
+              <div className="ml-auto flex items-center gap-1.5">
+                <span className="text-[10px] text-gray-400 font-medium">Sort:</span>
+                <button onClick={() => setSortMode(m => m === 'urgency_value' ? 'alpha' : 'urgency_value')}
+                  className="px-3 py-1 rounded-lg text-xs font-semibold bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors">
+                  {sortMode === 'urgency_value' ? '↓ Value at risk' : 'A–Z Supplier'}
+                </button>
               </div>
+            </div>
 
-              {/* Right detail */}
-              {selectedGroup && selectedSupplier && (
-                <div className="flex-1 flex flex-col gap-3 min-w-0">
-                  {/* Supplier header card */}
-                  <div className="bg-white border border-gray-100 rounded-2xl shadow-sm p-5">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-xl bg-indigo-100 flex items-center justify-center shrink-0">
-                          <Building2 className="w-4.5 h-4.5 text-indigo-600" />
+            {/* ── Queue + Drawer ─────────────────────────────────────────── */}
+            <div className="relative flex gap-0 min-h-[500px]">
+              {/* Queue */}
+              <div className={`flex-1 space-y-1 transition-opacity duration-200 ${drawerCardKey ? 'opacity-40 pointer-events-none select-none' : ''}`}>
+                {withHeaders.length === 0 && (
+                  <div className="flex flex-col items-center justify-center py-20 text-gray-400">
+                    <Check className="w-10 h-10 mb-3 text-green-300" />
+                    <p className="text-sm font-semibold">No actions match the current filters</p>
+                    <p className="text-xs mt-1">Adjust filters above or check back later</p>
+                  </div>
+                )}
+                {withHeaders.map(({ g, showHeader }) => {
+                  const sup   = getSupplier(g.supplierId)
+                  const state = getCardState(g)
+                  const ck    = cardKey(g)
+                  const isOpen = drawerCardKey === ck
+                  return (
+                    <div key={ck}>
+                      {/* Supplier divider header */}
+                      {showHeader && (
+                        <div className="flex items-center gap-3 pt-3 pb-1 px-1">
+                          <div className="w-5 h-5 rounded-md bg-indigo-100 flex items-center justify-center shrink-0">
+                            <Building2 className="w-3 h-3 text-indigo-600" />
+                          </div>
+                          <span className="text-xs font-bold text-gray-700">{sup?.name ?? g.supplierId}</span>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            {sup && (
+                              <>
+                                <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${sup.onTimeRate >= 80 ? 'bg-green-50 text-green-700 border-green-100' : sup.onTimeRate >= 70 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'}`}>OTR {sup.onTimeRate}%</span>
+                                <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${sup.avgDelayDays > 7 ? 'bg-red-50 text-red-700 border-red-100' : sup.avgDelayDays > 3 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-gray-100 text-gray-600 border-gray-200'}`}>Avg delay {sup.avgDelayDays}d</span>
+                                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full border bg-gray-100 text-gray-600 border-gray-200">{sup.openPOs} open POs</span>
+                              </>
+                            )}
+                          </div>
                         </div>
-                        <div>
-                          <div className="text-sm font-bold text-gray-900">{selectedSupplier.name}</div>
-                          <div className="text-xs text-gray-400">{SUPPLIER_EMAILS[selectedGroup.supplierId]}</div>
+                      )}
+                      {/* Action card */}
+                      <div
+                        onClick={() => setDrawerCardKey(isOpen ? null : ck)}
+                        className={`relative flex items-stretch bg-white border rounded-xl shadow-sm cursor-pointer transition-all hover:shadow-md ${isOpen ? 'border-indigo-300 ring-2 ring-indigo-200' : 'border-gray-100'} ${state === 'snoozed' ? 'opacity-50' : ''}`}
+                      >
+                        {/* Left colour bar */}
+                        <div className={`w-1 rounded-l-xl shrink-0 ${stateBar[state]}`} />
+                        <div className="flex-1 p-4 min-w-0">
+                          <div className="flex items-center gap-2 mb-2 flex-wrap">
+                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${statePillCls[state]}`}>{statePillLbl[state]}</span>
+                            <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-md ${actionTypeCls(g)}`}>{actionTypeLbl(g)}</span>
+                          </div>
+                          <div className="text-sm font-bold text-gray-900 mb-0.5">{headline(g)}</div>
+                          <div className="text-xs text-gray-500 mb-1.5">
+                            {g.pos.length <= 2
+                              ? g.pos.map(p => p.id).join(', ')
+                              : `${g.pos[0].id}, ${g.pos[1].id} +${g.pos.length - 2} more`
+                            }
+                          </div>
+                          <div className="text-xs text-gray-400 italic">{agentRec(g, state)}</div>
+                        </div>
+                        <div className="flex flex-col items-end justify-between p-4 shrink-0 gap-3">
+                          <button
+                            onClick={e => { e.stopPropagation(); setDrawerCardKey(isOpen ? null : ck) }}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors whitespace-nowrap ${state === 'agent-drafted' ? 'bg-purple-600 hover:bg-purple-700 text-white' : state === 'decision-needed' ? 'bg-red-600 hover:bg-red-700 text-white' : state === 'reply-received' ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}
+                          >{stateCTA[state]}</button>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={e => { e.stopPropagation(); setSnoozedCards(prev => { const n = new Set(prev); n.has(ck) ? n.delete(ck) : n.add(ck); return n }) }}
+                              className="text-[10px] text-gray-400 hover:text-gray-600 font-medium transition-colors"
+                            >{snoozedCards.has(ck) ? 'Unsnooze' : 'Snooze 3d'}</button>
+                          </div>
                         </div>
                       </div>
-                      {selectedGroup.type === 'overdue'      && <span className="text-xs font-bold px-3 py-1 rounded-full bg-red-100 text-red-700">{Math.max(...selectedGroup.pos.map(p => daysOverdue(p)))} DAYS LATE</span>}
-                      {selectedGroup.type === 'at_risk'      && <span className="text-xs font-bold px-3 py-1 rounded-full bg-orange-100 text-orange-700">DATE CHANGE REQUESTED</span>}
-                      {selectedGroup.type === 'late_dc' && <span className="text-xs font-bold px-3 py-1 rounded-full bg-amber-100 text-amber-700">LATE DC BOOKING</span>}
                     </div>
-                    <div className="grid grid-cols-4 gap-3 mt-4">
-                      {[
-                        { label: 'On-Time Rate', value: `${selectedSupplier.onTimeRate}%` },
-                        { label: 'Avg Delay',    value: `${selectedSupplier.avgDelayDays}d` },
-                        { label: 'Open POs',     value: String(selectedSupplier.openPOs) },
-                        { label: 'Lead Time',    value: `${selectedSupplier.contractualLeadTimeDays}d` },
-                      ].map(({ label, value }) => (
-                        <div key={label} className="bg-gray-50 rounded-xl px-3 py-2 text-center">
-                          <div className="text-sm font-bold text-gray-900">{value}</div>
-                          <div className="text-[10px] text-gray-400 mt-0.5">{label}</div>
+                  )
+                })}
+              </div>
+
+              {/* ── Drawer ────────────────────────────────────────────────── */}
+              {drawerCardKey && drawerGroup && drawerSup && (
+                <div
+                  className="fixed top-0 right-0 bottom-0 bg-white border-l border-gray-100 shadow-2xl flex flex-col z-40 overflow-hidden transition-[width] duration-200 ease-out"
+                  style={{ width: drawerView === 'action' ? 520 : 640 }}
+                  onKeyDown={e => { if (e.key === 'Escape') { if (drawerView === 'po-detail') { setDrawerView('action'); setDrawerViewPOId(null) } else setDrawerCardKey(null) } }}
+                >
+                  {/* Drawer header */}
+                  <div className="px-6 pt-5 pb-4 border-b border-gray-100 shrink-0">
+                    {drawerView === 'action' ? (
+                      <>
+                        <div className="flex items-start justify-between gap-3 mb-3">
+                          <div>
+                            <div className="flex items-center gap-2 mb-0.5">
+                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${drawerState ? statePillCls[drawerState] : ''}`}>{drawerState ? statePillLbl[drawerState] : ''}</span>
+                              <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-md ${actionTypeCls(drawerGroup)}`}>{actionTypeLbl(drawerGroup)}</span>
+                            </div>
+                            <div className="text-base font-bold text-gray-900">{drawerSup.name}</div>
+                            <div className="text-xs text-gray-400 mt-0.5">{SUPPLIER_EMAILS[drawerGroup.supplierId]} · {drawerGroup.pos.length} PO{drawerGroup.pos.length > 1 ? 's' : ''}</div>
+                          </div>
+                          <button onClick={() => setDrawerCardKey(null)} className="p-1 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 shrink-0"><X className="w-4 h-4" /></button>
                         </div>
-                      ))}
-                    </div>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${drawerSup.onTimeRate >= 80 ? 'bg-green-50 text-green-700 border-green-100' : drawerSup.onTimeRate >= 70 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'}`}>OTR {drawerSup.onTimeRate}%</span>
+                          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${drawerSup.avgDelayDays > 7 ? 'bg-red-50 text-red-700 border-red-100' : drawerSup.avgDelayDays > 3 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-gray-100 text-gray-600 border-gray-200'}`}>Avg delay {drawerSup.avgDelayDays}d</span>
+                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full border bg-gray-100 text-gray-600 border-gray-200">{drawerSup.openPOs} open POs</span>
+                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full border bg-indigo-50 text-indigo-700 border-indigo-100">Lead {drawerSup.contractualLeadTimeDays}d</span>
+                        </div>
+                      </>
+                    ) : (
+                      /* View 2 breadcrumb */
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => { setDrawerView('action'); setDrawerViewPOId(null) }}
+                          className="flex items-center gap-1 text-xs text-indigo-600 hover:text-indigo-800 font-semibold transition-colors"
+                        >
+                          <ChevronLeft className="w-3.5 h-3.5" />{drawerSup.name}
+                        </button>
+                        <span className="text-gray-300">/</span>
+                        <span className="text-xs text-gray-700 font-semibold">{drawerViewPOId}</span>
+                        <button onClick={() => setDrawerCardKey(null)} className="ml-auto p-1 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 shrink-0"><X className="w-4 h-4" /></button>
+                      </div>
+                    )}
                   </div>
 
-                  {/* PO cards ← → Draft email split */}
-                  <div className="flex gap-3 flex-1 min-h-0">
-                    {/* PO cards */}
-                    <div className="flex-1 space-y-2 overflow-y-auto">
-                      {selectedGroup.pos.map(po => (
-                        <div key={po.id} className="bg-white border border-gray-100 rounded-xl p-4 shadow-sm">
-                          <div className="flex items-start justify-between gap-2">
-                            <div>
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <span className="text-xs font-bold text-gray-900">{po.id}</span>
-                                <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${selectedGroup.type === 'overdue' ? 'bg-red-100 text-red-700' : selectedGroup.type === 'at_risk' ? 'bg-orange-100 text-orange-700' : 'bg-amber-100 text-amber-700'}`}>
-                                  {selectedGroup.type === 'overdue' ? `${daysOverdue(po)} days overdue` : selectedGroup.type === 'at_risk' ? 'Date change' : `due in ${daysUntil(po)}d`}
-                                </span>
-                              </div>
-                              <div className="text-xs text-gray-600 mt-1">{po.product}</div>
-                            </div>
-                            <button onClick={() => setSelectedPOId(po.id)} className="shrink-0 text-[10px] text-indigo-600 hover:underline font-medium whitespace-nowrap">View →</button>
-                          </div>
-                          <div className="grid grid-cols-3 gap-2 mt-3">
-                            <div><div className="text-[10px] text-gray-400">Expected</div><div className="text-xs font-semibold text-gray-700">{formatDate(po.expectedDelivery)}</div></div>
-                            {po.revisedDelivery && <div><div className="text-[10px] text-gray-400">Revised</div><div className="text-xs font-semibold text-orange-600">{formatDate(po.revisedDelivery)}</div></div>}
-                            <div><div className="text-[10px] text-gray-400">Value</div><div className="text-xs font-semibold text-gray-700">{po.orderValue}</div></div>
-                            <div><div className="text-[10px] text-gray-400">Qty</div><div className="text-xs font-semibold text-gray-700">{po.quantity.toLocaleString()}</div></div>
-                          </div>
-                        </div>
-                      ))}
+                  {/* Drawer body */}
+                  <div className="flex-1 overflow-y-auto flex flex-col">
+
+                    {/* ── View 1: Action panels ───────────────────────────── */}
+                    {drawerView === 'action' && (
+                    <>
+
+                    {/* PO table — click a row to open PO detail (View 2) */}
+                    <div className="border-b border-gray-100 px-6 py-3 shrink-0">
+                      <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">POs in this action</div>
+                      <div className="space-y-0.5">
+                        {drawerGroup.pos.map(p => {
+                          const pRag = computeRAG(p)
+                          const ragDot = pRag === 'red' ? 'bg-red-500' : pRag === 'amber' ? 'bg-amber-400' : 'bg-green-400'
+                          return (
+                            <button
+                              key={p.id}
+                              onClick={() => { setDrawerViewPOId(p.id); setDrawerView('po-detail') }}
+                              className="w-full flex items-center gap-2 text-[11px] py-1.5 px-2 rounded-lg text-left hover:bg-indigo-50 hover:text-indigo-900 text-gray-600 transition-colors group"
+                            >
+                              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${ragDot}`} />
+                              <span className="font-mono font-semibold text-gray-800">{p.id}</span>
+                              <span className="flex-1 truncate text-gray-500">{p.product}</span>
+                              <span className="shrink-0 text-gray-400">{formatDate(p.expectedDelivery)}</span>
+                              <ChevronRight className="w-3 h-3 text-gray-300 group-hover:text-indigo-500 shrink-0" />
+                            </button>
+                          )
+                        })}
+                      </div>
                     </div>
 
-                    {/* Right panel: thread if started, draft if not */}
-                    {(() => {
-                      const threadKey = getThreadKey(selectedGroup)
-                      const thread = chaseThreads[threadKey]
-                      if (thread) {
-                        return (
-                          <div className="w-[300px] shrink-0 bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden flex flex-col">
-                            <ChaseThreadPanel
-                              thread={thread}
-                              group={selectedGroup}
-                              supplier={selectedSupplier ?? undefined}
-                              expandedIds={expandedMsgIds}
-                              onToggleExpand={toggleExpandMsg}
-                              onSimulateReply={() => handleSimulateReply(selectedGroup)}
-                              onSendFollowUp={msgId => handleSendFollowUp(selectedGroup, msgId)}
-                              onDismissFollowUp={msgId => handleDismissFollowUp(selectedGroup, msgId)}
-                            />
-                          </div>
-                        )
-                      }
-                      {/* ── InquiryDrawer-style chase panel ── */}
-                      {(() => {
-                        const draftKey      = threadKey
-                        const defaultDraft  = generateDraftEmail(selectedGroup)
-                        const currentDraft  = chaseDraftMap[draftKey] ?? defaultDraft
-                        const isDirty       = currentDraft !== defaultDraft
-                        const actionLabels  = { overdue: 'Handover / dispatch', at_risk: 'Date change chase', late_dc: 'Booking-in confirmation' }
-                        const maxOverdue    = selectedGroup.type === 'overdue' ? Math.max(...selectedGroup.pos.map(p => daysOverdue(p))) : 0
-                        const sup           = selectedSupplier
-                        const otrColor      = sup.onTimeRate >= 80 ? 'bg-green-50 text-green-700 border-green-100' : sup.onTimeRate >= 70 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'
-                        const delayColor    = sup.avgDelayDays > 7 ? 'bg-red-50 text-red-700 border-red-100' : sup.avgDelayDays > 3 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-gray-100 text-gray-600 border-gray-200'
-                        const pillCls       = selectedGroup.type === 'overdue' ? 'bg-red-100 text-red-700' : selectedGroup.type === 'at_risk' ? 'bg-orange-100 text-orange-700' : 'bg-amber-100 text-amber-700'
-                        const pillLabel     = selectedGroup.type === 'overdue' ? `${maxOverdue}d overdue` : selectedGroup.type === 'at_risk' ? 'Date change' : 'Late DC booking'
-                        const auditColor    = selectedGroup.type === 'overdue' ? 'text-red-600' : 'text-amber-700'
-                        const auditText     = selectedGroup.type === 'overdue'
-                          ? `Overdue by up to ${maxOverdue}d · OTR ${sup.onTimeRate}% ↓ · Urgent escalation recommended`
-                          : selectedGroup.type === 'at_risk'
-                          ? `${selectedGroup.pos.length} date change${selectedGroup.pos.length > 1 ? 's' : ''} pending · Approve or reject within 48h`
-                          : `DC booking overdue · ${selectedGroup.pos.length} line${selectedGroup.pos.length > 1 ? 's' : ''} at risk · Confirm freight forwarder`
-                        return (
-                          <div className="w-[340px] shrink-0 bg-white border border-gray-100 rounded-2xl shadow-sm flex flex-col overflow-hidden">
-                            {/* Header */}
-                            <div className="px-5 pt-4 pb-3 border-b border-gray-100 shrink-0">
-                              <div className="flex items-center gap-2 flex-wrap mb-1">
-                                <span className="text-sm font-bold text-gray-900 truncate">{sup.name}</span>
-                                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold shrink-0 ${pillCls}`}>{pillLabel}</span>
-                              </div>
-                              <div className="text-xs text-gray-400">{SUPPLIER_EMAILS[selectedGroup.supplierId]} · {selectedGroup.pos.length} PO{selectedGroup.pos.length > 1 ? 's' : ''}</div>
-                              {/* Context strip chips */}
-                              <div className="flex items-center gap-1.5 flex-wrap mt-2">
-                                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border ${otrColor}`}>
-                                  OTR {sup.onTimeRate}%
-                                </span>
-                                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border ${delayColor}`}>
-                                  Avg delay {sup.avgDelayDays}d
-                                </span>
-                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-gray-100 text-gray-600 border border-gray-200">
-                                  {sup.openPOs} open POs
-                                </span>
-                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-100">
-                                  Lead {sup.contractualLeadTimeDays}d
-                                </span>
-                              </div>
-                            </div>
-
-                            {/* Scrollable body */}
-                            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
-                              {/* Agent insight */}
-                              <div className="bg-indigo-50/70 rounded-xl p-3 border border-indigo-100">
-                                <div className="text-[10px] font-semibold text-indigo-600 uppercase tracking-wide mb-1">Agent suggestion</div>
-                                <p className="text-[11px] text-indigo-900 leading-relaxed">
-                                  {selectedGroup.type === 'overdue' && `Send urgent escalation to ${sup.name}. Request dispatch confirmation and revised ex-factory date for ${selectedGroup.pos.length} overdue PO${selectedGroup.pos.length > 1 ? 's' : ''}.`}
-                                  {selectedGroup.type === 'at_risk' && `Review date change proposals from ${sup.name}. Approve or reject within 48h to protect intake planning.`}
-                                  {selectedGroup.type === 'late_dc' && `Confirm dispatch readiness with ${sup.name} for ${selectedGroup.pos.length} PO${selectedGroup.pos.length > 1 ? 's' : ''} due within 7 days. Request freight booking reference.`}
-                                </p>
-                              </div>
-
-                              {/* Editable draft */}
-                              <div className="border border-violet-200 rounded-xl overflow-hidden">
-                                <div className="flex items-center justify-between px-3.5 py-2 bg-violet-50 border-b border-violet-100">
-                                  <div className="flex items-center gap-2">
-                                    <Mail className="w-3.5 h-3.5 text-violet-400" />
-                                    <span className="text-[11px] font-semibold text-violet-700">Draft — {actionLabels[selectedGroup.type]}</span>
-                                  </div>
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-[10px] text-violet-400">{currentDraft.length} chars</span>
-                                    {isDirty && (
-                                      <button
-                                        onClick={() => setChaseDraftMap(p => ({ ...p, [draftKey]: defaultDraft }))}
-                                        className="text-[10px] text-violet-600 hover:text-violet-800 font-medium"
-                                      >Revert</button>
-                                    )}
-                                  </div>
+                    {/* ── Trigger context block ─────────────────────────── */}
+                    {drawerTrigger && (
+                      <div className="border-b border-gray-100 px-6 py-4 shrink-0">
+                        {(drawerUiState === 'A' || drawerUiState === 'B') ? (
+                          <div className="bg-sky-50/70 border border-sky-100 rounded-xl px-4 py-3 space-y-2">
+                            {drawerTrigger.agentSummary ? (
+                              <>
+                                <div className="flex items-center gap-1.5 text-[10px] text-sky-700">
+                                  <Sparkles className="w-2.5 h-2.5 shrink-0 text-sky-500" />
+                                  <span className="font-semibold">{drawerTrigger.sender}</span>
+                                  <span className="text-sky-300">·</span>
+                                  <span className="text-sky-500">{new Date(drawerTrigger.timestamp).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
                                 </div>
-                                <textarea
-                                  className="w-full text-[11px] text-gray-700 font-mono leading-relaxed p-3.5 resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-violet-200"
-                                  rows={11}
-                                  value={currentDraft}
-                                  onChange={e => setChaseDraftMap(p => ({ ...p, [draftKey]: e.target.value }))}
-                                />
-                              </div>
-
-                              {/* Chase history accordion */}
-                              <div className="border border-gray-200 rounded-xl overflow-hidden">
+                                <p className="text-[11px] text-sky-900 leading-relaxed">{drawerTrigger.agentSummary}</p>
                                 <button
-                                  onClick={() => setChaseHistoryOpen(o => !o)}
-                                  className="w-full flex items-center justify-between px-4 py-2.5 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
-                                >
-                                  <span className="text-[11px] text-gray-400">Chase history</span>
-                                  <ChevronDown className={`w-3.5 h-3.5 text-gray-400 transition-transform ${chaseHistoryOpen ? 'rotate-180' : ''}`} />
-                                </button>
-                                {chaseHistoryOpen && (
-                                  <div className="px-4 py-3 bg-white">
-                                    {(poEventsMap.get(selectedGroup.pos[0]?.id) ?? []).filter(e => e.type === 'chase_sent').length === 0
-                                      ? <p className="text-[11px] text-gray-400 italic">No previous chases for this supplier.</p>
-                                      : (poEventsMap.get(selectedGroup.pos[0]?.id) ?? []).filter(e => e.type === 'chase_sent').map((ev, i) => (
-                                          <div key={i} className="flex items-start gap-2 py-1.5 border-b border-gray-50 last:border-0">
-                                            <div className="w-1.5 h-1.5 rounded-full bg-gray-300 mt-1.5 shrink-0" />
-                                            <div>
-                                              <div className="text-[10px] text-gray-500 font-medium">{new Date(ev.timestamp).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</div>
-                                              <div className="text-[10px] text-gray-400">{ev.body}</div>
-                                            </div>
-                                          </div>
-                                        ))
-                                    }
+                                  onClick={() => setTriggerExpanded(prev => ({ ...prev, [drawerCardKey!]: !prev[drawerCardKey!] }))}
+                                  className="text-[10px] text-sky-600 hover:text-sky-800 font-medium transition-colors"
+                                >{triggerIsExpanded ? '▾ Hide original' : '▸ View original message'}</button>
+                                {triggerIsExpanded && (
+                                  <div className="pt-2 border-t border-sky-100">
+                                    <pre className="text-[10px] text-sky-800 whitespace-pre-wrap font-sans leading-relaxed">{drawerTrigger.body}</pre>
                                   </div>
                                 )}
-                              </div>
-                            </div>
-
-                            {/* Sticky footer */}
-                            <div className="px-5 py-4 border-t border-gray-100 shrink-0 space-y-2.5">
-                              <div className={`text-[10px] font-medium leading-relaxed ${auditColor}`}>{auditText}</div>
+                              </>
+                            ) : (
+                              <>
+                                <div className="flex items-center gap-1.5 text-[10px] text-sky-700">
+                                  <span className="font-semibold">{drawerTrigger.sender}</span>
+                                  <span className="text-sky-300">·</span>
+                                  <span className="text-sky-500">{new Date(drawerTrigger.timestamp).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
+                                </div>
+                                <p className="text-[11px] text-sky-900 italic leading-relaxed border-l-2 border-sky-200 pl-2.5 line-clamp-3">
+                                  &ldquo;{drawerTrigger.body}&rdquo;
+                                </p>
+                                <button
+                                  onClick={() => setTriggerExpanded(prev => ({ ...prev, [drawerCardKey!]: !prev[drawerCardKey!] }))}
+                                  className="text-[10px] text-sky-600 hover:text-sky-800 font-medium transition-colors"
+                                >{triggerIsExpanded ? '▾ Hide' : (drawerTrigger.priorMessages?.length ? `▸ View full thread (${drawerTrigger.priorMessages.length + 1} messages)` : '▸ View full message')}</button>
+                                {triggerIsExpanded && (
+                                  <div className="pt-2 border-t border-sky-100">
+                                    <pre className="text-[10px] text-sky-800 whitespace-pre-wrap font-sans leading-relaxed">{drawerTrigger.body}</pre>
+                                  </div>
+                                )}
+                              </>
+                            )}
+                            <div className="pt-1.5 border-t border-sky-100">
                               <button
-                                onClick={() => handleStartThread(selectedGroup, currentDraft)}
-                                className="w-full h-8 rounded-lg bg-violet-600 text-white text-xs font-semibold hover:bg-violet-700 transition-colors flex items-center justify-center gap-1.5"
-                              >
-                                <Send className="w-3.5 h-3.5" /> Send via Outlook
-                              </button>
-                              <p className="text-center text-[10px] text-gray-400 -mt-1">You'll review before anything is sent.</p>
-                              <div className="flex gap-3 justify-center">
-                                <button className="text-[11px] text-gray-400 hover:text-gray-600 font-medium transition-colors">Snooze 3d</button>
-                                <span className="text-[11px] text-gray-300">·</span>
-                                <button className="text-[11px] text-gray-400 hover:text-gray-600 font-medium transition-colors">Dismiss</button>
-                              </div>
+                                onClick={() => setLogNoteOpen(prev => ({ ...prev, [drawerCardKey!]: true }))}
+                                className="text-[10px] text-sky-500 hover:text-sky-700 transition-colors"
+                              >+ Log call or note</button>
                             </div>
                           </div>
-                        )
-                      })()}
-                    })()}
-                  </div>
+                        ) : (
+                          <div className="text-[10px] text-gray-400">
+                            <div className="flex items-center gap-1.5">
+                              <Sparkles className="w-2.5 h-2.5 text-gray-300 shrink-0" />
+                              <span>Triggered by: <span className="font-medium text-gray-500">{drawerTrigger.sender}</span> · {new Date(drawerTrigger.timestamp).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}</span>
+                              <button
+                                onClick={() => setTriggerExpanded(prev => ({ ...prev, [drawerCardKey!]: !prev[drawerCardKey!] }))}
+                                className="ml-1 text-indigo-500 hover:text-indigo-700 font-medium transition-colors"
+                              >{triggerIsExpanded ? 'hide' : 'view'}</button>
+                            </div>
+                            {triggerIsExpanded && (
+                              <div className="mt-2 bg-sky-50/70 border border-sky-100 rounded-xl px-3 py-2.5">
+                                <p className="text-[10px] text-sky-900 leading-relaxed">{drawerTrigger.agentSummary ?? drawerTrigger.body}</p>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* ── Decision panel ──────────────────────────────────── */}
+                    {/* DP1: States A & B */}
+                    {(drawerUiState === 'A' || drawerUiState === 'B') && (
+                      <div className="border-b border-gray-100 px-6 py-4 shrink-0">
+                        {drawerUiState === 'A' ? (
+                          <>
+                            <p className="text-[11px] font-semibold text-gray-500 mb-3">What would you like to do?</p>
+                            <div className={`grid gap-2.5 mb-3 ${drawerGroup.type === 'at_risk' ? 'grid-cols-3' : 'grid-cols-2'}`}>
+                              {(drawerGroup.type === 'at_risk' ? [
+                                { key: 'approve_date', label: 'Approve',               sub: 'Accept new date',            cls: 'border-green-200 hover:border-green-400 hover:bg-green-50' },
+                                { key: 'counter',      label: 'Counter-propose',       sub: 'Suggest alternative date',   cls: 'border-amber-200 hover:border-amber-400 hover:bg-amber-50' },
+                                { key: 'reject',       label: 'Reject',                sub: 'Decline proposed date',      cls: 'border-red-200 hover:border-red-400 hover:bg-red-50' },
+                              ] : drawerGroup.type === 'late_dc' ? [
+                                { key: 'confirm_booking', label: 'Confirm booking',        sub: 'Lock in current slot',        cls: 'border-green-200 hover:border-green-400 hover:bg-green-50' },
+                                { key: 'alt_slot',        label: 'Request alternate slot', sub: 'Ask for different date/time', cls: 'border-amber-200 hover:border-amber-400 hover:bg-amber-50' },
+                              ] : [
+                                { key: 'chase',    label: 'Chase supplier',          sub: 'Send urgent chase email',     cls: 'border-purple-200 hover:border-purple-400 hover:bg-purple-50' },
+                                { key: 'decision', label: 'Make commercial decision', sub: 'Cancel, CPR, or accept late', cls: 'border-indigo-200 hover:border-indigo-400 hover:bg-indigo-50' },
+                              ]).map(opt => (
+                                <button
+                                  key={opt.key}
+                                  onClick={() => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: opt.key }))}
+                                  className={`border-2 rounded-xl p-3 text-left transition-all min-h-[56px] ${opt.cls}`}
+                                >
+                                  <div className="text-[12px] font-bold text-gray-800 leading-tight">{opt.label}</div>
+                                  <div className="text-[10px] text-gray-500 mt-0.5 leading-tight">{opt.sub}</div>
+                                </button>
+                              ))}
+                            </div>
+                            <div className="flex items-center gap-3">
+                              {isSnoozeConfirm ? (
+                                <span className="text-[11px] text-gray-600">Reappear in 3 days?
+                                  <button onClick={() => { setSnoozedCards(prev => { const n = new Set(prev); n.add(drawerCardKey!); return n }); setDrawerCardKey(null) }} className="ml-1.5 font-semibold text-indigo-600 hover:text-indigo-800">Confirm</button>
+                                  <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: false }))} className="ml-1.5 text-gray-400 hover:text-gray-600">Cancel</button>
+                                </span>
+                              ) : isDismissConfirm ? (
+                                <span className="text-[11px] text-gray-600">Dismiss without action?
+                                  <button onClick={() => { setSnoozedCards(prev => { const n = new Set(prev); n.add(drawerCardKey!); return n }); setDrawerCardKey(null) }} className="ml-1.5 font-semibold text-red-600 hover:text-red-800">Confirm</button>
+                                  <button onClick={() => setDismissConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: false }))} className="ml-1.5 text-gray-400 hover:text-gray-600">Cancel</button>
+                                </span>
+                              ) : (
+                                <>
+                                  <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors">Snooze 3 days</button>
+                                  {drawerGroup.type === 'overdue' && (
+                                    <button onClick={() => setDismissConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors">Dismiss</button>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full bg-purple-500 shrink-0" />
+                                <span className="text-[12px] font-semibold text-gray-800">Action: {selectedActionLabel}</span>
+                              </div>
+                              <button onClick={() => setSelectedActionPill(prev => { const n = { ...prev }; delete n[drawerCardKey!]; return n })} className="text-[11px] text-indigo-600 hover:text-indigo-800 font-medium transition-colors">Change action</button>
+                            </div>
+                            {drawerCurrentPill === 'decision' && (
+                              <div className="mt-3 space-y-2.5">
+                                <p className="text-[11px] text-gray-500 italic leading-relaxed">
+                                  Agent observation: {drawerMaxOverdue}d overdue · OTR {drawerSup.onTimeRate}% · {drawerSup.avgDelayDays}d avg delay — accepting late is lowest-risk if cover is sufficient.
+                                </p>
+                                <div className="flex gap-2">
+                                  {([
+                                    { key: 'cancel'      as const, label: 'Cancel',         sub: `-3 wks cover`,                    cls: 'border-red-200 bg-red-50 hover:bg-red-100 text-red-800' },
+                                    { key: 'cpr'         as const, label: `CPR ${cprPct}%`, sub: `+£${cprSaving.toLocaleString()}`, cls: 'border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800' },
+                                    { key: 'accept_late' as const, label: 'Accept late',    sub: `+${Math.ceil(drawerMaxOverdue/7)}w intake`, cls: 'border-green-200 bg-green-50 hover:bg-green-100 text-green-800' },
+                                  ] as const).map(opt => {
+                                    const chosen = drawerDecChoice === opt.key
+                                    return (
+                                      <button
+                                        key={opt.key}
+                                        onClick={() => setDrawerDecision(p => ({ ...p, [drawerCardKey!]: opt.key }))}
+                                        className={`flex-1 border-2 rounded-xl p-2.5 text-center transition-all ${chosen ? 'ring-2 ring-offset-1 ring-indigo-400 ' + opt.cls : 'border-gray-200 bg-white hover:bg-gray-50 text-gray-700'}`}
+                                      >
+                                        <div className="text-xs font-bold">{opt.label}</div>
+                                        <div className={`text-[11px] font-semibold mt-0.5 ${chosen ? '' : 'text-gray-500'}`}>{opt.sub}</div>
+                                      </button>
+                                    )
+                                  })}
+                                </div>
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    )}
+
+                    {/* DP1 agent observation */}
+                    {(drawerUiState === 'A' || drawerUiState === 'B') && (
+                      <div className="px-6 py-2.5 border-b border-gray-50 shrink-0">
+                        <p className="text-[11px] text-gray-400 italic leading-relaxed">{agentRec(drawerGroup, drawerState ?? 'agent-drafted')}</p>
+                      </div>
+                    )}
+
+                    {/* DP2: State D — reply received decision panel */}
+                    {drawerUiState === 'D' && (
+                      <div className="border-b border-gray-100 px-6 py-4 shrink-0 space-y-3">
+                        <p className="text-[11px] font-semibold text-gray-700">Supplier replied — what would you like to do?</p>
+                        <div className="grid grid-cols-2 gap-2">
+                          {([
+                            { key: 'apply_changes'   as const, label: 'Apply proposed changes', sub: 'Accept & confirm in writing',  cls: 'border-green-200 hover:border-green-400 hover:bg-green-50',   selCls: 'border-green-500 bg-green-50 ring-2 ring-green-200'   },
+                            { key: 'counter_propose' as const, label: 'Counter-propose',         sub: 'Push back with alternative',   cls: 'border-amber-200 hover:border-amber-400 hover:bg-amber-50',   selCls: 'border-amber-500 bg-amber-50 ring-2 ring-amber-200'   },
+                            { key: 'reject_escalate' as const, label: 'Reject and escalate',    sub: 'Refuse, escalate internally',  cls: 'border-red-200 hover:border-red-400 hover:bg-red-50',         selCls: 'border-red-500 bg-red-50 ring-2 ring-red-200'         },
+                            { key: 'reply_question'  as const, label: 'Reply with question',    sub: 'Need more info first',         cls: 'border-indigo-200 hover:border-indigo-400 hover:bg-indigo-50', selCls: 'border-indigo-500 bg-indigo-50 ring-2 ring-indigo-200' },
+                          ]).map(opt => (
+                            <button
+                              key={opt.key}
+                              onClick={() => {
+                                setDp2Action(prev => ({ ...prev, [drawerCardKey!]: opt.key }))
+                                setDp2Draft(prev => { const n = { ...prev }; delete n[drawerCardKey!]; return n })
+                              }}
+                              className={`border-2 rounded-xl p-3 text-left transition-all ${currentDp2Action === opt.key ? opt.selCls : opt.cls}`}
+                            >
+                              <div className="text-[12px] font-bold text-gray-800 leading-tight">{opt.label}</div>
+                              <div className="text-[10px] text-gray-500 mt-0.5 leading-tight">{opt.sub}</div>
+                            </button>
+                          ))}
+                        </div>
+                        {drawerMuts.length > 0 && (
+                          <div className="bg-blue-50/70 border border-blue-100 rounded-xl px-3 py-2.5 space-y-1.5">
+                            <div className="flex items-center gap-1.5">
+                              <Bot className="w-3 h-3 text-blue-500 shrink-0" />
+                              <span className="text-[10px] font-bold text-blue-700">Parsed from reply</span>
+                            </div>
+                            <div className="space-y-0.5 font-mono text-[11px]">
+                              {drawerMuts.map(m => (
+                                <div key={m.poId} className="flex items-center gap-2">
+                                  <span className="font-bold text-gray-700 shrink-0">{m.poId}</span>
+                                  <span className="text-gray-400 shrink-0 font-sans">{m.field}:</span>
+                                  <span className="text-red-500 line-through shrink-0">{m.oldVal}</span>
+                                  <span className="text-gray-300 shrink-0">→</span>
+                                  <span className="text-green-600 font-bold shrink-0">{m.newVal}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        <div className="flex items-center gap-3">
+                          <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors">Snooze 3 days</button>
+                          <button onClick={() => setLogNoteOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors">Log call or note</button>
+                        </div>
+                        {isSnoozeConfirm && (
+                          <span className="text-[11px] text-gray-600">Reappear in 3 days?
+                            <button onClick={() => { setSnoozedCards(prev => { const n = new Set(prev); n.add(drawerCardKey!); return n }); setDrawerCardKey(null) }} className="ml-1.5 font-semibold text-indigo-600 hover:text-indigo-800">Confirm</button>
+                            <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: false }))} className="ml-1.5 text-gray-400 hover:text-gray-600">Cancel</button>
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* DP3: State F — no reply overdue decision panel */}
+                    {drawerUiState === 'F' && (
+                      <div className="border-b border-amber-100 bg-amber-50/40 px-6 py-4 shrink-0 space-y-3">
+                        <p className="text-[11px] font-semibold text-amber-800">No reply from {drawerSup.name} after {Math.max(daysSinceChase, 3)} days — what would you like to do?</p>
+                        <div className="grid grid-cols-2 gap-2">
+                          {([
+                            { key: 'followup_chase'   as const, label: 'Send follow-up chase',    sub: 'Second, more urgent chase',    cls: 'border-amber-200 hover:border-amber-400 hover:bg-amber-50',   selCls: 'border-amber-500 bg-amber-50 ring-2 ring-amber-200'   },
+                            { key: 'escalate_manager' as const, label: 'Escalate to manager',     sub: 'Draft internal notification',  cls: 'border-red-200 hover:border-red-400 hover:bg-red-50',         selCls: 'border-red-500 bg-red-50 ring-2 ring-red-200'         },
+                            { key: 'switch_phone'     as const, label: 'Switch to phone',         sub: 'Log a call instead',           cls: 'border-indigo-200 hover:border-indigo-400 hover:bg-indigo-50', selCls: 'border-indigo-500 bg-indigo-50 ring-2 ring-indigo-200' },
+                            { key: 'accept_silence'   as const, label: 'Accept silence & close',  sub: 'Close with a note',            cls: 'border-gray-200 hover:border-gray-400 hover:bg-gray-50',       selCls: 'border-gray-500 bg-gray-50 ring-2 ring-gray-200'       },
+                          ]).map(opt => (
+                            <button
+                              key={opt.key}
+                              onClick={() => {
+                                setDp3Action(prev => ({ ...prev, [drawerCardKey!]: opt.key }))
+                                setDp3Draft(prev => { const n = { ...prev }; delete n[drawerCardKey!]; return n })
+                              }}
+                              className={`border-2 rounded-xl p-3 text-left transition-all ${currentDp3Action === opt.key ? opt.selCls : opt.cls}`}
+                            >
+                              <div className="text-[12px] font-bold text-gray-800 leading-tight">{opt.label}</div>
+                              <div className="text-[10px] text-gray-500 mt-0.5 leading-tight">{opt.sub}</div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* ── Comms thread ───────────────────────────────────────── */}
+                    <div className="flex-1 overflow-y-auto flex flex-col min-h-0">
+                      {/* Log call or note — shown when trigger block is absent or in C/D/E states */}
+                      {!(drawerTrigger && (drawerUiState === 'A' || drawerUiState === 'B')) && (
+                      <div className="px-6 pt-3 pb-0 shrink-0">
+                        {isLogNoteOpen ? (
+                          <div className="border border-gray-200 rounded-xl overflow-hidden mb-3">
+                            <div className="flex items-center gap-1 p-2 bg-gray-50 border-b border-gray-100">
+                              {(['call', 'note', 'internal'] as const).map(t => (
+                                <button
+                                  key={t}
+                                  onClick={() => setLogNoteType(prev => ({ ...prev, [drawerCardKey!]: t }))}
+                                  className={`px-2.5 py-1 rounded-md text-[10px] font-semibold transition-colors ${currentLogNoteType === t ? 'bg-white shadow-sm text-gray-800 border border-gray-200' : 'text-gray-400 hover:text-gray-600'}`}
+                                >
+                                  {t === 'call' ? 'Call' : t === 'note' ? 'Note' : 'Internal comment'}
+                                </button>
+                              ))}
+                              <button onClick={() => setLogNoteOpen(prev => ({ ...prev, [drawerCardKey!]: false }))} className="ml-auto p-0.5 text-gray-300 hover:text-gray-500"><X className="w-3 h-3" /></button>
+                            </div>
+                            <textarea
+                              placeholder={currentLogNoteType === 'call' ? 'Summarise the call…' : currentLogNoteType === 'internal' ? 'Internal comment (not shared with supplier)…' : 'Add a note…'}
+                              value={currentLogNoteText}
+                              onChange={e => setLogNoteText(prev => ({ ...prev, [drawerCardKey!]: e.target.value }))}
+                              className="w-full text-[11px] text-gray-700 p-3 resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-gray-200"
+                              rows={3}
+                            />
+                            <div className="flex items-center justify-between px-3 py-2 border-t border-gray-100">
+                              <button
+                                onClick={() => {
+                                  if (!currentLogNoteText.trim() || !drawerCardKey) return
+                                  const prefix = currentLogNoteType === 'call' ? '[Call] ' : currentLogNoteType === 'internal' ? '[Internal] ' : ''
+                                  drawerGroup.pos.forEach(p => addPOEvent(p.id, { id: `note-${Date.now()}-${p.id}`, type: 'manual_note', timestamp: new Date().toISOString(), author: 'buyer', body: prefix + currentLogNoteText.trim() }))
+                                  setLogNoteText(prev => ({ ...prev, [drawerCardKey!]: '' }))
+                                  setLogNoteOpen(prev => ({ ...prev, [drawerCardKey!]: false }))
+                                }}
+                                disabled={!currentLogNoteText.trim()}
+                                className="h-7 px-3 rounded-lg bg-gray-800 text-white text-[11px] font-semibold hover:bg-gray-900 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                              >Save to thread</button>
+                              <button onClick={() => setLogNoteOpen(prev => ({ ...prev, [drawerCardKey!]: false }))} className="text-[11px] text-gray-400 hover:text-gray-600">Cancel</button>
+                            </div>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setLogNoteOpen(prev => ({ ...prev, [drawerCardKey!]: true }))}
+                            className="flex items-center gap-1.5 text-[11px] text-gray-400 hover:text-gray-600 transition-colors mb-3"
+                          >
+                            <span className="text-gray-300 font-semibold">+</span> Log call or note
+                          </button>
+                        )}
+                      </div>
+                      )}
+
+                      {/* Log call or note open composer when trigger block owns the button */}
+                      {drawerTrigger && (drawerUiState === 'A' || drawerUiState === 'B') && isLogNoteOpen && (
+                      <div className="px-6 pt-3 pb-0 shrink-0">
+                        <div className="border border-gray-200 rounded-xl overflow-hidden mb-3">
+                          <div className="flex items-center gap-1 p-2 bg-gray-50 border-b border-gray-100">
+                            {(['call', 'note', 'internal'] as const).map(t => (
+                              <button key={t} onClick={() => setLogNoteType(prev => ({ ...prev, [drawerCardKey!]: t }))} className={`px-2.5 py-1 rounded-md text-[10px] font-semibold transition-colors ${currentLogNoteType === t ? 'bg-white shadow-sm text-gray-800 border border-gray-200' : 'text-gray-400 hover:text-gray-600'}`}>{t === 'call' ? 'Call' : t === 'note' ? 'Note' : 'Internal comment'}</button>
+                            ))}
+                            <button onClick={() => setLogNoteOpen(prev => ({ ...prev, [drawerCardKey!]: false }))} className="ml-auto p-0.5 text-gray-300 hover:text-gray-500"><X className="w-3 h-3" /></button>
+                          </div>
+                          <textarea placeholder={currentLogNoteType === 'call' ? 'Summarise the call…' : currentLogNoteType === 'internal' ? 'Internal comment (not shared with supplier)…' : 'Add a note…'} value={currentLogNoteText} onChange={e => setLogNoteText(prev => ({ ...prev, [drawerCardKey!]: e.target.value }))} className="w-full text-[11px] text-gray-700 p-3 resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-gray-200" rows={3} />
+                          <div className="flex items-center justify-between px-3 py-2 border-t border-gray-100">
+                            <button onClick={() => { if (!currentLogNoteText.trim() || !drawerCardKey) return; const prefix = currentLogNoteType === 'call' ? '[Call] ' : currentLogNoteType === 'internal' ? '[Internal] ' : ''; drawerGroup.pos.forEach(p => addPOEvent(p.id, { id: `note-${Date.now()}-${p.id}`, type: 'manual_note', timestamp: new Date().toISOString(), author: 'buyer', body: prefix + currentLogNoteText.trim() })); setLogNoteText(prev => ({ ...prev, [drawerCardKey!]: '' })); setLogNoteOpen(prev => ({ ...prev, [drawerCardKey!]: false })) }} disabled={!currentLogNoteText.trim()} className="h-7 px-3 rounded-lg bg-gray-800 text-white text-[11px] font-semibold hover:bg-gray-900 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">Save to thread</button>
+                            <button onClick={() => setLogNoteOpen(prev => ({ ...prev, [drawerCardKey!]: false }))} className="text-[11px] text-gray-400 hover:text-gray-600">Cancel</button>
+                          </div>
+                        </div>
+                      </div>
+                      )}
+
+                      {/* Messages */}
+                      <div className="flex-1 overflow-y-auto px-6 pb-4 space-y-3 min-h-0">
+                        {drawerThreadEntries.map(entry => {
+                          const ts = (t: string) => new Date(t).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+
+                          /* ── Type A: outbound email ─────────────────────── */
+                          if (entry.kind === 'outbound') return (
+                            <div key={entry.id} className="flex justify-end">
+                              <div className="max-w-[82%] space-y-1">
+                                <div className="flex items-center justify-end gap-1.5 text-[10px] text-gray-400">
+                                  <span className="font-semibold text-gray-600">{entry.sender}</span>
+                                  <span>·</span>
+                                  <span>{ts(entry.timestamp)}</span>
+                                </div>
+                                <div className="bg-indigo-50/60 border border-indigo-100 rounded-2xl rounded-tr-sm px-4 py-3">
+                                  <pre className="text-[11px] text-gray-700 whitespace-pre-wrap font-sans leading-relaxed">{entry.body}</pre>
+                                  {entry.poIds.length > 0 && (
+                                    <div className="flex gap-1.5 mt-2.5 flex-wrap">
+                                      {entry.poIds.map(id => (
+                                        <span key={id} className="px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded text-[9px] font-mono font-bold">{id}</span>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          )
+
+                          /* ── Type B: inbound email ──────────────────────── */
+                          if (entry.kind === 'inbound') return (
+                            <div key={entry.id} className="flex justify-start">
+                              <div className="max-w-[82%] space-y-1.5">
+                                <div className="flex items-center gap-1.5 text-[10px] text-gray-400">
+                                  <span className="font-semibold text-gray-700">{entry.sender}</span>
+                                  <span>·</span>
+                                  <span>{ts(entry.timestamp)}</span>
+                                </div>
+                                <div className="bg-white border border-gray-200 rounded-2xl rounded-tl-sm px-4 py-3 shadow-sm">
+                                  <pre className="text-[11px] text-gray-700 whitespace-pre-wrap font-sans leading-relaxed">{entry.body}</pre>
+                                </div>
+                              </div>
+                            </div>
+                          )
+
+                          /* ── Type C: agent summary ──────────────────────── */
+                          if (entry.kind === 'agent_summary') return (
+                            <div key={entry.id} className="border-l-2 border-blue-300 bg-blue-50/50 rounded-r-xl px-3.5 py-3 space-y-1.5">
+                              <div className="flex items-center gap-1.5 text-[10px] text-blue-600">
+                                <Bot className="w-3 h-3 shrink-0" />
+                                <span className="font-bold">✦ Agent summary</span>
+                                <span className="text-blue-300">·</span>
+                                <span className="text-blue-400">{ts(entry.timestamp)}</span>
+                              </div>
+                              <p className="text-[11px] text-blue-900 italic leading-relaxed">{drawerSup.name} replied. I've parsed the response and identified the following proposed changes:</p>
+                              <div className="space-y-0.5 font-mono text-[11px]">
+                                {entry.mutations.map(m => (
+                                  <div key={m.poId} className="flex items-center gap-2">
+                                    <span className="font-bold text-gray-700 shrink-0">{m.poId}</span>
+                                    <span className="text-gray-400 shrink-0 font-sans">{m.field}:</span>
+                                    <span className="text-red-500 line-through shrink-0">{m.oldVal}</span>
+                                    <span className="text-gray-300 shrink-0">→</span>
+                                    <span className="text-green-600 font-bold shrink-0">{m.newVal}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )
+
+                          /* ── Type D: internal note / logged call ────────── */
+                          if (entry.kind === 'note') {
+                            const isCall = entry.noteType === 'call' || entry.body.startsWith('[Call] ')
+                            const isInternal = entry.noteType === 'internal' || entry.body.startsWith('[Internal] ')
+                            const displayBody = entry.body.replace(/^\[(Call|Internal)\] /, '')
+                            return (
+                              <div key={entry.id} className="flex justify-center">
+                                <div className="bg-gray-50 border border-gray-200 rounded-xl px-4 py-2.5 max-w-[75%] space-y-0.5">
+                                  <div className="flex items-center justify-center gap-1.5 text-[10px] text-gray-400">
+                                    <span>{isCall ? '📞' : isInternal ? '🔒' : '📝'}</span>
+                                    <span className="font-medium">{isCall ? 'Call logged' : isInternal ? 'Internal note' : 'Note'}</span>
+                                    <span>·</span>
+                                    <span>{entry.author}</span>
+                                    <span>·</span>
+                                    <span>{ts(entry.timestamp)}</span>
+                                  </div>
+                                  <p className="text-[11px] text-gray-600 italic leading-relaxed text-center">{displayBody}</p>
+                                </div>
+                              </div>
+                            )
+                          }
+
+                          /* ── Type E: system event ───────────────────────── */
+                          if (entry.kind === 'system_event') return (
+                            <div key={entry.id} className="flex items-center gap-2 py-0.5">
+                              <div className="flex-1 h-px bg-gray-100" />
+                              <span className="text-[10px] text-gray-400 whitespace-nowrap shrink-0">ⓘ {entry.body} · {ts(entry.timestamp)}</span>
+                              <div className="flex-1 h-px bg-gray-100" />
+                            </div>
+                          )
+
+                          return null
+                        })}
+                      </div>
+                    </div>
+
+                    {/* ── Bottom section (state-gated) ─────────────────────────────── */}
+
+                    {/* State A: draft preview — select an action above to send */}
+                    {drawerUiState === 'A' && (
+                      <div className="shrink-0 border-t border-gray-100 px-6 py-4 bg-white space-y-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-gray-400 shrink-0 w-5">To:</span>
+                          <span className="text-[11px] text-gray-700 font-medium">{SUPPLIER_EMAILS[drawerGroup.supplierId]}</span>
+                          <div className="flex gap-1 ml-auto flex-wrap">
+                            {drawerGroup.pos.map(p => <span key={p.id} className="px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[9px] font-mono font-semibold">{p.id}</span>)}
+                          </div>
+                        </div>
+                        <div className="border border-violet-200 rounded-xl overflow-hidden">
+                          <div className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-50 border-b border-violet-100">
+                            <Bot className="w-3 h-3 text-violet-500 shrink-0" />
+                            <span className="text-[10px] font-semibold text-violet-700">Agent draft</span>
+                            <span className="text-[10px] text-violet-400 truncate ml-1">— select an action above to send</span>
+                          </div>
+                          <pre className="text-[11px] text-gray-600 whitespace-pre-wrap font-sans leading-relaxed p-3.5 bg-gray-50/40 select-text">{actionDraftBody}</pre>
+                        </div>
+                        <div className="flex items-center justify-end">
+                          <button onClick={() => handleSimulateReply(drawerGroup)} className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-gray-500 transition-colors"><MessageSquare className="w-3 h-3" />Simulate reply (demo)</button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* State B: action selected — editable draft + Approve & send */}
+                    {drawerUiState === 'B' && (
+                      <div className="shrink-0 border-t border-gray-200 px-6 py-4 bg-white space-y-2.5">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-gray-400 shrink-0 w-5">To:</span>
+                          <span className="text-[11px] text-gray-700 font-medium">{SUPPLIER_EMAILS[drawerGroup.supplierId]}</span>
+                          <div className="flex gap-1 ml-auto flex-wrap">
+                            {drawerGroup.pos.map(p => <span key={p.id} className="px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[9px] font-mono font-semibold">{p.id}</span>)}
+                          </div>
+                        </div>
+                        {drawerCurrentPill === 'counter' && (
+                          <div className="flex items-center gap-2 py-1.5 px-3 bg-amber-50 border border-amber-100 rounded-xl">
+                            <label className="text-[11px] text-amber-800 font-semibold shrink-0">Propose alternative date:</label>
+                            <input
+                              type="date"
+                              value={cpDate}
+                              onChange={e => setCounterProposeDate(prev => ({ ...prev, [drawerCardKey!]: e.target.value }))}
+                              className="text-[11px] text-amber-900 bg-transparent border-0 focus:outline-none focus:ring-0 cursor-pointer"
+                            />
+                          </div>
+                        )}
+                        {drawerCurrentPill === 'reject' && (
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-semibold text-red-700">Reason for rejection <span className="text-red-500">*</span></label>
+                            <textarea
+                              placeholder="e.g. Stock already sourced from alternative supplier…"
+                              value={rrText}
+                              onChange={e => setRejectReason(prev => ({ ...prev, [drawerCardKey!]: e.target.value }))}
+                              className="w-full text-[11px] text-gray-700 border border-red-200 rounded-lg p-2.5 resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-red-200"
+                              rows={2}
+                            />
+                          </div>
+                        )}
+                        {(() => {
+                          const isReadOnly = drawerCurrentPill !== 'chase'
+                          const subjectLine = drawerCurrentPill === 'approve_date' ? `Date Change Acceptance — ${drawerSup.name}`
+                            : drawerCurrentPill === 'counter' ? `Counter-Proposal — ${drawerSup.name}`
+                            : drawerCurrentPill === 'reject' ? `Date Change Rejection — ${drawerSup.name}`
+                            : drawerCurrentPill === 'confirm_booking' ? `DC Booking Confirmation — ${drawerSup.name}`
+                            : drawerCurrentPill === 'alt_slot' ? `Alternate Slot Request — ${drawerSup.name}`
+                            : drawerDecChoice === 'cancel' ? `Order Cancellation — ${drawerSup.name}`
+                            : drawerDecChoice === 'cpr' ? `CPR Negotiation — ${drawerSup.name}`
+                            : `Urgent: Outstanding POs — ${drawerSup.name}`
+                          return (
+                            <div className="border border-violet-200 rounded-xl overflow-hidden">
+                              <div className="flex items-center justify-between px-3 py-1.5 bg-violet-50 border-b border-violet-100">
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  <Bot className="w-3 h-3 text-violet-500 shrink-0" />
+                                  <span className="text-[10px] font-semibold text-violet-700 shrink-0">Agent draft</span>
+                                  <span className="text-[10px] text-violet-400 truncate">— {subjectLine}</span>
+                                </div>
+                                {!isReadOnly && drawerDirty && <button onClick={() => setChaseDraftMap(p => ({ ...p, [drawerDraftKey]: drawerDefault }))} className="text-[10px] text-violet-600 hover:text-violet-800 shrink-0 ml-2">↺ Revert</button>}
+                              </div>
+                              <textarea
+                                className="w-full text-[11px] text-gray-700 font-mono leading-relaxed p-3.5 resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-violet-200"
+                                rows={7}
+                                value={actionDraftBody}
+                                readOnly={isReadOnly}
+                                onChange={isReadOnly ? undefined : (e => setChaseDraftMap(p => ({ ...p, [drawerDraftKey]: e.target.value })))}
+                              />
+                            </div>
+                          )
+                        })()}
+                        <button
+                          disabled={(drawerCurrentPill === 'reject' && !rrText.trim()) || (drawerCurrentPill === 'counter' && !cpDate)}
+                          onClick={() => handleStartThread(drawerAllGrps, actionDraftBody)}
+                          className="w-full h-10 rounded-xl bg-purple-600 text-white text-sm font-bold hover:bg-purple-700 transition-colors flex items-center justify-center gap-2 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <Send className="w-4 h-4" /> Approve &amp; send
+                        </button>
+                        <div className="flex items-center justify-between text-[11px] text-gray-400">
+                          <button className="hover:text-gray-600 transition-colors">Save draft</button>
+                          <button onClick={() => handleSimulateReply(drawerGroup)} className="flex items-center gap-1 hover:text-gray-500 transition-colors"><MessageSquare className="w-3 h-3" />Simulate reply (demo)</button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* State C: awaiting reply — status banner + secondary actions */}
+                    {drawerUiState === 'C' && (
+                      <div className="shrink-0 border-t border-gray-100 px-6 py-4 bg-white space-y-3">
+                        <div className="flex items-center justify-center gap-2 text-[11px] text-gray-400 bg-gray-50 rounded-xl py-3">
+                          <Clock className="w-3.5 h-3.5 shrink-0 text-gray-300" />
+                          <span>Sent {drawerThread ? new Date(drawerThread.startedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'} · awaiting supplier reply</span>
+                        </div>
+                        <div className="flex items-center justify-center gap-4">
+                          <button onClick={() => handleNoReplyTrigger(drawerGroup)} className="text-[11px] text-amber-600 hover:text-amber-800 font-medium transition-colors">Mark: no reply (demo)</button>
+                          <span className="text-gray-200">·</span>
+                          <button onClick={() => setLogNoteOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-500 hover:text-gray-700 font-medium transition-colors">Log call or note</button>
+                          <span className="text-gray-200">·</span>
+                          <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-500 hover:text-gray-700 font-medium transition-colors">Snooze 3 days</button>
+                        </div>
+                        {isSnoozeConfirm && (
+                          <div className="text-center text-[11px] text-gray-600">Reappear in 3 days?
+                            <button onClick={() => { setSnoozedCards(prev => { const n = new Set(prev); n.add(drawerCardKey!); return n }); setDrawerCardKey(null) }} className="ml-1.5 font-semibold text-indigo-600 hover:text-indigo-800">Confirm</button>
+                            <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: false }))} className="ml-1.5 text-gray-400 hover:text-gray-600">Cancel</button>
+                          </div>
+                        )}
+                        <button onClick={() => handleSimulateReply(drawerGroup)} className="w-full h-7 rounded-lg border border-dashed border-gray-200 text-[10px] font-medium text-gray-400 hover:text-gray-500 hover:bg-gray-50 transition-colors flex items-center justify-center gap-1.5">
+                          <MessageSquare className="w-3 h-3" />Simulate reply (demo)
+                        </button>
+                      </div>
+                    )}
+
+                    {/* State D: DP2 — reply received composer + CTA */}
+                    {drawerUiState === 'D' && (
+                      <div className="shrink-0 border-t border-gray-100 px-6 py-4 bg-white space-y-2.5">
+                        <>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] text-gray-400 shrink-0 w-5">To:</span>
+                            <span className="text-[11px] text-gray-700 font-medium">{SUPPLIER_EMAILS[drawerGroup.supplierId]}</span>
+                            <div className="flex gap-1 ml-auto flex-wrap">
+                              {drawerGroup.pos.map(p => <span key={p.id} className="px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[9px] font-mono font-semibold">{p.id}</span>)}
+                            </div>
+                            </div>
+                            <div className="border border-violet-200 rounded-xl overflow-hidden">
+                              <div className="flex items-center justify-between px-3 py-1.5 bg-violet-50 border-b border-violet-100">
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  <Bot className="w-3 h-3 text-violet-500 shrink-0" />
+                                  <span className="text-[10px] font-semibold text-violet-700 shrink-0">Agent draft</span>
+                                  <span className="text-[10px] text-violet-400 truncate ml-1">— reply to {drawerSup.name}</span>
+                                </div>
+                                {currentDp2Draft !== dp2DefaultDraft && (
+                                  <button onClick={() => setDp2Draft(prev => { const n = { ...prev }; delete n[drawerCardKey!]; return n })} className="text-[10px] text-violet-600 hover:text-violet-800 shrink-0 ml-2">↺ Revert</button>
+                                )}
+                              </div>
+                              <textarea
+                                className="w-full text-[11px] text-gray-700 font-mono leading-relaxed p-3.5 resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-violet-200"
+                                rows={6}
+                                value={currentDp2Draft}
+                                onChange={e => setDp2Draft(prev => ({ ...prev, [drawerCardKey!]: e.target.value }))}
+                              />
+                            </div>
+                            {currentDp2Action === 'apply_changes' ? (
+                              <>
+                                <button
+                                  onClick={() => handleApplyChanges(drawerGroup, currentDp2Action, currentDp2Draft, true, drawerCardKey!)}
+                                  className="w-full h-10 rounded-xl bg-green-600 text-white text-sm font-bold hover:bg-green-700 transition-colors flex items-center justify-center gap-2 shadow-sm"
+                                >
+                                  <Send className="w-4 h-4" /> Approve changes &amp; send reply
+                                </button>
+                                <div className="text-center">
+                                  <button
+                                    onClick={() => handleApplyChanges(drawerGroup, currentDp2Action, currentDp2Draft, false, drawerCardKey!)}
+                                    className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors"
+                                  >Apply changes only (no reply)</button>
+                                </div>
+                              </>
+                            ) : (
+                              <button
+                                onClick={() => handleApplyChanges(drawerGroup, currentDp2Action, currentDp2Draft, true, drawerCardKey!)}
+                                className="w-full h-10 rounded-xl bg-purple-600 text-white text-sm font-bold hover:bg-purple-700 transition-colors flex items-center justify-center gap-2 shadow-sm"
+                              >
+                                <Send className="w-4 h-4" /> Send reply
+                              </button>
+                            )}
+                          </>
+                      </div>
+                    )}
+
+                    {/* State F: DP3 — no reply composer + CTA */}
+                    {drawerUiState === 'F' && (
+                      <div className="shrink-0 border-t border-amber-100 px-6 py-4 bg-amber-50/30 space-y-2.5">
+                        {(currentDp3Action === 'followup_chase' || currentDp3Action === 'escalate_manager') && (
+                          <>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] text-gray-400 shrink-0 w-5">To:</span>
+                              <span className="text-[11px] text-gray-700 font-medium">
+                                {currentDp3Action === 'escalate_manager' ? 'Manager / Head of Buying' : SUPPLIER_EMAILS[drawerGroup.supplierId]}
+                              </span>
+                            </div>
+                            <div className="border border-amber-200 rounded-xl overflow-hidden">
+                              <div className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 border-b border-amber-100">
+                                <Bot className="w-3 h-3 text-amber-500 shrink-0" />
+                                <span className="text-[10px] font-semibold text-amber-700">Agent draft</span>
+                                {currentDp3Draft !== dp3DefaultDraft && (
+                                  <button onClick={() => setDp3Draft(prev => { const n = { ...prev }; delete n[drawerCardKey!]; return n })} className="text-[10px] text-amber-600 hover:text-amber-800 ml-auto">↺ Revert</button>
+                                )}
+                              </div>
+                              <textarea
+                                className="w-full text-[11px] text-gray-700 font-mono leading-relaxed p-3.5 resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-amber-200"
+                                rows={6}
+                                value={currentDp3Draft}
+                                onChange={e => setDp3Draft(prev => ({ ...prev, [drawerCardKey!]: e.target.value }))}
+                              />
+                            </div>
+                            <button
+                              onClick={() => handleDP3Action(drawerGroup, currentDp3Action, currentDp3Draft, drawerCardKey!)}
+                              className="w-full h-10 rounded-xl bg-amber-600 text-white text-sm font-bold hover:bg-amber-700 transition-colors flex items-center justify-center gap-2 shadow-sm"
+                            >
+                              <Send className="w-4 h-4" /> {currentDp3Action === 'escalate_manager' ? 'Send to manager' : 'Send follow-up chase'}
+                            </button>
+                          </>
+                        )}
+                        {currentDp3Action === 'switch_phone' && (
+                          <div className="space-y-2">
+                            <p className="text-[11px] text-gray-500 italic">Log a call with {drawerSup.name} below — this will appear in the thread.</p>
+                            <button
+                              onClick={() => { handleDP3Action(drawerGroup, currentDp3Action, '', drawerCardKey!); }}
+                              className="w-full h-9 rounded-xl border border-indigo-200 text-indigo-700 text-[12px] font-semibold hover:bg-indigo-50 transition-colors flex items-center justify-center gap-2"
+                            >
+                              📞 Open call log composer
+                            </button>
+                          </div>
+                        )}
+                        {currentDp3Action === 'accept_silence' && (
+                          <div className="space-y-2">
+                            <p className="text-[11px] text-gray-500">This will close the action and add a note to the thread that supplier silence was accepted.</p>
+                            <button
+                              onClick={() => handleDP3Action(drawerGroup, currentDp3Action, '', drawerCardKey!)}
+                              className="w-full h-9 rounded-xl bg-gray-700 text-white text-[12px] font-semibold hover:bg-gray-800 transition-colors"
+                            >
+                              Close action
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* State E: DP4 — resolved (confirmation or read-only banner) */}
+                    {drawerUiState === 'E' && (
+                      dp4Done.has(drawerCardKey!) ? (
+                        <div className="shrink-0 border-t border-gray-100 px-6 py-5 bg-green-50 text-center space-y-1.5">
+                          <div className="flex items-center justify-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full bg-green-500 shrink-0" />
+                            <span className="text-[12px] font-semibold text-green-800">This action is resolved</span>
+                          </div>
+                          <button className="text-[11px] text-green-600 hover:text-green-800 underline transition-colors">View in Agent Log →</button>
+                        </div>
+                      ) : (
+                        <div className="shrink-0 border-t border-gray-100 px-6 py-4 bg-white space-y-3">
+                          <p className="text-[11px] font-semibold text-gray-700 text-center">This action is being closed. Send a final confirmation to {drawerSup.name}?</p>
+                          <div className="grid grid-cols-2 gap-2">
+                            {([
+                              { key: 'send_confirmation' as const, label: 'Send confirmation', sub: 'Draft closing summary', cls: 'border-green-200 hover:border-green-400 hover:bg-green-50' },
+                              { key: 'close_without'     as const, label: 'Close without confirmation', sub: 'Silent close', cls: 'border-gray-200 hover:border-gray-400 hover:bg-gray-50' },
+                            ]).map(opt => (
+                              <button
+                                key={opt.key}
+                                onClick={() => {
+                                  if (opt.key === 'send_confirmation') {
+                                    const nl = '\n'
+                                    const closing = nl + nl + 'Kind regards,' + nl + 'Debenhams Buying Team'
+                                    const confirmDraft = `Dear ${drawerSup.name} Team,${nl}${nl}We are writing to confirm that all matters relating to the recent order delay have now been resolved. Our records have been updated accordingly.${nl}${nl}Thank you for your cooperation.${closing}`
+                                    setChaseThreads(prev => {
+                                      const cur = prev[drawerGroup.supplierId]
+                                      if (!cur) return prev
+                                      const ts = new Date().toISOString()
+                                      const sentMsg: ChaseThreadMsg = { id: `msg-${Date.now()}`, sender: 'you', timestamp: ts, body: confirmDraft, status: 'sent' }
+                                      return { ...prev, [drawerGroup.supplierId]: { ...cur, messages: [...cur.messages, sentMsg] } }
+                                    })
+                                  }
+                                  setDp4Done(prev => { const n = new Set(prev); n.add(drawerCardKey!); return n })
+                                }}
+                                className={`border-2 rounded-xl p-3 text-left transition-all ${opt.cls}`}
+                              >
+                                <div className="text-[12px] font-bold text-gray-800 leading-tight">{opt.label}</div>
+                                <div className="text-[10px] text-gray-500 mt-0.5 leading-tight">{opt.sub}</div>
+                              </button>
+                            ))}
+                          </div>
+                          <button
+                            onClick={() => {
+                              setResolvedCards(prev => { const n = new Set(prev); n.delete(drawerCardKey!); return n })
+                            }}
+                            className="w-full text-center text-[11px] text-gray-400 hover:text-gray-600 transition-colors"
+                          >↩ Reopen this action</button>
+                        </div>
+                      )
+                    )}
+
+                    </> /* end View 1 */
+                    )}
+
+                    {/* ── View 2: PO Detail ───────────────────────────────── */}
+                    {drawerView === 'po-detail' && drawerViewPO && (
+                      <div className="flex flex-col flex-1 overflow-hidden bg-slate-50">
+                        <PODetailPane
+                          po={drawerViewPO}
+                          onAddEvent={addPOEvent}
+                          showHeader fromActionDrawer
+                        />
+                      </div>
+                    )}
+
+                  </div>{/* end drawer body flex-1 */}
                 </div>
               )}
+              {/* Backdrop click to close drawer */}
+              {drawerCardKey && <div className="fixed inset-0 z-30 bg-black/10" onClick={() => setDrawerCardKey(null)} />}
             </div>
           </>
-        )}
+          )
+        })()}
 
         {/* ── ALL POs ── */}
         {subTab === 'allpos' && (() => {

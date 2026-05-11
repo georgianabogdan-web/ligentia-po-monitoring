@@ -53,6 +53,26 @@ export interface InventoryProduct {
   seasonCode?:      'Core' | 'SS26' | 'AW26' | 'Clearance'
 }
 
+export interface FreightAssumptions {
+  forecastUnits:          number
+  sellingPrice:           number
+  costPerUnitWithFreight: number
+  stockoutDays:           number
+  lostUnits:              number
+  lostSaleRecoveryPct:    number
+}
+
+export interface FreightScenarioData {
+  predicted6moGrossMargin: number
+  assumptions:             FreightAssumptions
+}
+
+export interface FreightScenarios {
+  sea:   FreightScenarioData
+  air:   FreightScenarioData
+  split: FreightScenarioData
+}
+
 export interface ReorderRecommendation {
   id:                    string
   name:                  string
@@ -91,6 +111,7 @@ export interface ReorderRecommendation {
   exFactoryDate:         string
   receiptDate:           string
   totalCost:             number
+  freightScenarios?:     FreightScenarios
 }
 
 export const INVENTORY_PRODUCTS: InventoryProduct[] = [
@@ -1181,7 +1202,12 @@ export const REORDER_RECOMMENDATIONS: ReorderRecommendation[] = [
     "packSize": 1,
     "exFactoryDate": "2026-05-12",
     "receiptDate": "2026-06-02",
-    "totalCost": 36108
+    "totalCost": 36108,
+    "freightScenarios": {
+      "sea":   { "predicted6moGrossMargin": 124200, "assumptions": { "forecastUnits": 6800, "sellingPrice": 42.14, "costPerUnitWithFreight": 11.80, "stockoutDays": 14, "lostUnits": 480, "lostSaleRecoveryPct": 30 } },
+      "air":   { "predicted6moGrossMargin": 141800, "assumptions": { "forecastUnits": 6800, "sellingPrice": 42.14, "costPerUnitWithFreight": 12.39, "stockoutDays": 0,  "lostUnits": 0,   "lostSaleRecoveryPct": 0  } },
+      "split": { "predicted6moGrossMargin": 132400, "assumptions": { "forecastUnits": 6800, "sellingPrice": 42.14, "costPerUnitWithFreight": 12.09, "stockoutDays": 7,  "lostUnits": 190, "lostSaleRecoveryPct": 30 } }
+    }
   },
   {
     "id": "REC-002",
@@ -1333,6 +1359,11 @@ export const REORDER_RECOMMENDATIONS: ReorderRecommendation[] = [
     "exFactoryDate": "2026-05-21",
     "receiptDate": "2026-06-11",
     "totalCost": 67200,
+    "freightScenarios": {
+      "sea":   { "predicted6moGrossMargin": 58200, "assumptions": { "forecastUnits": 3200, "sellingPrice": 77.78, "costPerUnitWithFreight": 21.00, "stockoutDays": 8, "lostUnits": 120, "lostSaleRecoveryPct": 60 } },
+      "air":   { "predicted6moGrossMargin": 56400, "assumptions": { "forecastUnits": 3200, "sellingPrice": 77.78, "costPerUnitWithFreight": 22.05, "stockoutDays": 0,  "lostUnits": 0,   "lostSaleRecoveryPct": 0  } },
+      "split": { "predicted6moGrossMargin": 57800, "assumptions": { "forecastUnits": 3200, "sellingPrice": 77.78, "costPerUnitWithFreight": 21.52, "stockoutDays": 4,  "lostUnits": 60,  "lostSaleRecoveryPct": 60 } }
+    },
     "sizeCurve": [
       {
         "size": "XS",
