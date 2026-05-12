@@ -180,7 +180,7 @@ const SEEDED_INV_AUDIT: Record<string, InvAuditEntry[]> = {
 }
 
 // ── Inquiry & Negotiation Types ───────────────────────────────────────────────
-type NegotiationStatus = 'idle' | 'draft' | 'sending' | 'sent' | 'awaiting_reply' | 'replied' | 'follow_up' | 'agreed' | 'escalated'
+type NegotiationStatus = 'idle' | 'draft' | 'sending' | 'sent' | 'awaiting_reply' | 'replied' | 'follow_up' | 'agreed' | 'escalated' | 'closed_no_deal'
 
 interface SupplierNegReply {
   receivedAt:     string
@@ -211,6 +211,8 @@ interface InquiryThread {
   flaggedReason:  string | null
   internalNotes:  string
   scenario:       'accepted' | 'counter' | 'escalate' | 'uncertain'
+  closeReason?:   string
+  escalatedTo?:   string
 }
 
 // ── Data ───────────────────────────────────────────────────────────────────────
@@ -2360,32 +2362,33 @@ Best regards,
 [Buyer Name]`
 }
 
-function buildAcceptSplitDraft(
+function buildAlternativeTermsDraft(
   rec: typeof REORDER_RECOMMENDATIONS[0],
   reply: SupplierNegReply,
-  round1RequestedCP: number,
+  targetCP: number,
+  exFactoryDateStr: string,
 ): string {
-  const midpoint = Math.round((round1RequestedCP + reply.offeredCP) / 2 * 100) / 100
   const today = new Date()
-  const dl = new Date(today); dl.setDate(today.getDate() + 3)
+  const dl = new Date(today); dl.setDate(today.getDate() + 5)
   const dlStr = dl.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
-  return `Subject: RE: CP Inquiry – ${rec.name} – Split Delivery Proposal
+  const flexedMOQ = Math.max(Math.round(rec.minOrderQty * 0.75), Math.round(rec.minOrderQty - 250))
+  const currentFreight: 'Sea' | 'Air' = rec.freightChoice ?? rec.recommendedFreight ?? 'Sea'
+  const altFreight: 'Sea' | 'Air'     = currentFreight === 'Sea' ? 'Air' : 'Sea'
+  return `Subject: RE: CP Inquiry – ${rec.name} – Alternative Terms Proposal
 
 Dear ${rec.supplier} team,
 
-Thank you for your response and for offering a partial fulfilment option.
+Thank you for your offer of £${reply.offeredCP.toFixed(2)} per unit. We appreciate the response, but we're some distance from a deal on price alone.
 
-We are prepared to accept a split delivery on the following conditions:
+To find common ground, we'd be open to flexing other levers in exchange for holding closer to our target CP of £${targetCP.toFixed(2)}:
 
-• Shipment 1: 1,800 units delivered by 28 May 2026 (firm — no later)
-• Shipment 2: 1,330 units delivered by 2 Jun 2026 (firm — no later)
-• Agreed CP: £${midpoint.toFixed(2)} per unit across both shipments
+• Volume: we can commit to ${flexedMOQ.toLocaleString()} units (vs the ${rec.minOrderQty.toLocaleString()} MOQ you've quoted)
+• Freight: we can switch from ${currentFreight} to ${altFreight} on our side to absorb transit pressure
+• Ex-factory: we can hold the agreed ex-factory date of ${exFactoryDateStr || 'the slot we discussed'}, even if production is tight
 
-The first shipment date of 28 May is critical for our range launch and cannot slip. If you are unable to meet this, please advise immediately so we can explore alternatives.
+If you can hold CP at £${targetCP.toFixed(2)} on the above, we'll firm the PO this week. Otherwise, please indicate which levers work for you and we'll iterate.
 
-Total order quantity confirmed: ${rec.recommendedReorderQty.toLocaleString()} units
-
-Please confirm both shipment dates and the CP of £${midpoint.toFixed(2)} by ${dlStr}.
+Please respond by ${dlStr}.
 
 Best regards,
 [Buyer Name]`
@@ -2437,13 +2440,49 @@ const NEG_STATUS_CFG: Record<NegotiationStatus, { label: string; bg: string; tex
   follow_up:     { label: 'Follow-up ready', bg: 'bg-violet-50',  text: 'text-violet-700',  border: 'border-violet-200',dot: 'bg-violet-400'},
   agreed:        { label: 'Agreed ✓',        bg: 'bg-green-50',   text: 'text-green-700',   border: 'border-green-200', dot: 'bg-green-500' },
   escalated:     { label: 'Escalated ⚑',    bg: 'bg-red-50',     text: 'text-red-700',     border: 'border-red-200',   dot: 'bg-red-500'   },
+  closed_no_deal:{ label: 'Closed — No deal',bg: 'bg-red-50',     text: 'text-red-700',     border: 'border-red-200',   dot: 'bg-red-500'   },
 }
 
-function evalCpDecision(cpDeltaPct: number, lastReply: { offeredCP: number } | null, sellingPrice: number, effectiveCpRules: CpRulesState, currentMarginPct: string, leadTimeBreach?: boolean) {
-  const withinRule        = cpDeltaPct < effectiveCpRules.escalateIfPct
-  const exceedsEscalation = cpDeltaPct >= effectiveCpRules.escalateIfPct
-  const newGP = lastReply ? ((sellingPrice - lastReply.offeredCP) / sellingPrice * 100).toFixed(1) : currentMarginPct
-  return { withinRule, exceedsEscalation, newGP, leadTimeBreach: leadTimeBreach ?? false }
+type NextStepRecommendation =
+  | { type: 'accept';     reason: string; midpoint?: undefined }
+  | { type: 'counter';    reason: string; midpoint: number }
+  | { type: 'escalate';   reason: string; midpoint?: undefined }
+  | { type: 'walk_away';  reason: string; midpoint?: undefined }
+
+function recommendNextStep(
+  thread: InquiryThread,
+  reply: SupplierNegReply,
+  rules: CpRulesState,
+  target: number,
+  walkAway: number,
+  maxRoundsOverride: number,
+): NextStepRecommendation {
+  const offered = reply.offeredCP
+  const round   = thread.rounds.length
+
+  if (offered > walkAway) {
+    return { type: 'escalate', reason: 'offered_cp_above_walkaway', midpoint: undefined }
+  }
+  const escalateCeiling = target * (1 + rules.escalateIfPct / 100)
+  if (offered > escalateCeiling) {
+    return { type: 'escalate', reason: 'offered_cp_above_escalate_threshold', midpoint: undefined }
+  }
+
+  const pctAboveTarget = ((offered - target) / target) * 100
+
+  if (pctAboveTarget <= 1) {
+    return { type: 'accept', reason: 'at_or_near_target', midpoint: undefined }
+  }
+
+  if (round >= maxRoundsOverride) {
+    return { type: 'accept', reason: 'max_rounds_reached', midpoint: undefined }
+  }
+
+  if (pctAboveTarget <= 3) {
+    return { type: 'accept', reason: 'within_acceptable_split', midpoint: undefined }
+  }
+
+  return { type: 'counter', reason: 'room_to_negotiate', midpoint: Math.round((target + offered) / 2 * 100) / 100 }
 }
 
 // ── Inquiry Drawer ────────────────────────────────────────────────────────────
@@ -2476,7 +2515,6 @@ function InquiryDrawer({
   const [alertSent,         setAlertSent]         = useState(false)
   const [appliedToBuySheet, setAppliedToBuySheet] = useState(false)
   const [mgrComment,        setMgrComment]        = useState('')
-  const [_suggestStrategy,  setSuggestStrategy]   = useState<'counter' | 'split' | 'escalate'>('counter')
   const [draftCpOverride,   setDraftCpOverride]   = useState<number | null>(null)
   const [draftWalkAway,     setDraftWalkAway]     = useState<number | null>(null)
   const [draftMaxRounds,    setDraftMaxRounds]    = useState<number | null>(null)
@@ -2487,6 +2525,15 @@ function InquiryDrawer({
   const [dialogOpeningAsk,  setDialogOpeningAsk]  = useState(globalCpRules.openingAskPct)
   const [dialogEscalateIf,  setDialogEscalateIf]  = useState(globalCpRules.escalateIfPct)
   const [dialogMaxRoundsVal,setDialogMaxRoundsVal]= useState(globalCpRules.maxRounds)
+
+  // Next-step branch the user has picked (Counter / Alt-terms unlock the follow-up draft block)
+  const [followUpMode,      setFollowUpMode]      = useState<'counter' | 'alt_terms' | null>(null)
+
+  // Walk-away / escalate dialogs
+  const [walkAwayDialogOpen,setWalkAwayDialogOpen]= useState(false)
+  const [walkAwayReason,    setWalkAwayReason]    = useState('')
+  const [escalateDialogOpen,setEscalateDialogOpen]= useState(false)
+  const [escalateContext,   setEscalateContext]   = useState('')
 
   // Auto-generate draft on open
   useEffect(() => {
@@ -2560,16 +2607,14 @@ function InquiryDrawer({
     setEditedBody(newBody)
   }, [draftCpOverride]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // replied + counter → auto-generate follow-up draft
+  // Reset the follow-up mode whenever a new reply lands or status flips away from 'replied'.
   useEffect(() => {
-    if (status !== 'replied' || !thread) return
-    const lastReply = thread.rounds[thread.rounds.length - 1]?.supplierReply
-    if (!lastReply || lastReply.scenario !== 'counter' || followUpBody) return
-    const round1CP = thread.rounds[0]?.requestedCP ?? 0
-    const body = buildCounterMidpointDraft(rec, lastReply, round1CP)
-    setFollowUpBody(body)
-    setFollowUpOriginal(body)
-  }, [status, thread?.rounds.length]) // eslint-disable-line react-hooks/exhaustive-deps
+    if (status !== 'replied') {
+      setFollowUpMode(null)
+      setFollowUpBody('')
+      setFollowUpOriginal('')
+    }
+  }, [status, thread?.rounds.length])
 
   const handleSend = () => {
     if (!latestThread.current) return
@@ -2597,11 +2642,12 @@ function InquiryDrawer({
       const requestedCP = Math.round((round1CP + replyCP) / 2 * 100) / 100
       setSentAt(ts)
       setIsSending(false)
+      setFollowUpMode(null)
+      setFollowUpBody('')
+      setFollowUpOriginal('')
       onUpdate({
         ...cur,
-        status:    'agreed',
-        agreedCP:  requestedCP,
-        agreedMOQ: rec.minOrderQty,
+        status: 'sent',
         rounds: [...cur.rounds, { roundNumber: nextRound, sentAt: ts.slice(0, 10), emailBody: followUpBody, requestedCP, supplierReply: null }],
       })
     }, 1500)
@@ -2665,32 +2711,65 @@ function InquiryDrawer({
   const leadTimeBreach   = weeksToExFactory !== null && !!lastReply && (lastReply as SupplierNegReply).leadTimeWeeks > weeksToExFactory
   const exFactoryDateStr = exFactoryRecDt ? exFactoryRecDt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : ''
 
-  const handleStrategyChange = (s: 'counter' | 'split' | 'escalate') => {
-    setSuggestStrategy(s)
+  // Next-step action handlers
+  const startCounterDraft = (midpoint: number) => {
     if (!lastReply || !thread) return
     const round1CP = thread.rounds[0]?.requestedCP ?? 0
-    if (s === 'counter') {
-      const body = buildCounterMidpointDraft(rec, lastReply as SupplierNegReply, round1CP)
-      setFollowUpBody(body); setFollowUpOriginal(body)
-    } else if (s === 'split') {
-      const body = buildAcceptSplitDraft(rec, lastReply as SupplierNegReply, round1CP)
-      setFollowUpBody(body); setFollowUpOriginal(body)
-    }
+    const body     = buildCounterMidpointDraft(rec, lastReply as SupplierNegReply, round1CP).replace(
+      /£\d+(?:\.\d+)?/,
+      `£${midpoint.toFixed(2)}`,
+    )
+    setFollowUpBody(body)
+    setFollowUpOriginal(body)
+    setFollowUpMode('counter')
+  }
+
+  const startAltTermsDraft = () => {
+    if (!lastReply || !thread) return
+    const body = buildAlternativeTermsDraft(rec, lastReply as SupplierNegReply, effectiveDraftCP, exFactoryDateStr)
+    setFollowUpBody(body)
+    setFollowUpOriginal(body)
+    setFollowUpMode('alt_terms')
+  }
+
+  const confirmWalkAway = () => {
+    if (!thread) return
+    onUpdate({
+      ...thread,
+      status:      'closed_no_deal',
+      closeReason: walkAwayReason.trim() || 'No reason recorded',
+    })
+    setWalkAwayDialogOpen(false)
+    setWalkAwayReason('')
+  }
+
+  const confirmEscalate = () => {
+    if (!thread) return
+    onUpdate({
+      ...thread,
+      status:        'escalated',
+      escalatedTo:   'your manager',
+      flaggedReason: escalateContext.trim() || (thread.flaggedReason ?? 'Escalated by buyer for review'),
+    })
+    setEscalateDialogOpen(false)
+    setEscalateContext('')
   }
 
   const pipelineStage = getPipelineStage(thread?.status === 'agreed' ? 'Approved' : 'Draft')
 
   const negStatusLabel =
     status === 'agreed'          ? 'Closed — Agreed' :
-    status === 'escalated'       ? 'Escalated' :
+    status === 'closed_no_deal'  ? 'Closed — No deal' :
+    status === 'escalated'       ? `Escalated — Awaiting ${thread?.escalatedTo ?? 'your manager'}` :
     (status === 'replied' && scenario === 'uncertain') ? '⚠ Agent uncertain — flagged for review' :
     status === 'replied'         ? `Round ${lastRound?.roundNumber ?? 1} — Reply received` :
     status === 'sent'            ? `Round ${lastRound?.roundNumber ?? 1} — Sent` :
     status === 'awaiting_reply'  ? `Round ${lastRound?.roundNumber ?? 1} — Awaiting` :
     'Draft'
   const negStatusPillCls =
-    status === 'agreed'    ? 'bg-green-100 text-green-700' :
-    status === 'escalated' ? 'bg-red-100 text-red-700' :
+    status === 'agreed'         ? 'bg-green-100 text-green-700' :
+    status === 'closed_no_deal' ? 'bg-red-100 text-red-700 border border-red-200' :
+    status === 'escalated'      ? 'bg-red-100 text-red-700' :
     (status === 'replied' && scenario === 'uncertain') ? 'bg-amber-100 text-amber-800 border border-amber-300' :
     status === 'replied'   ? 'bg-amber-100 text-amber-700' :
     status === 'draft'     ? 'bg-gray-100 text-gray-500' :
@@ -2756,7 +2835,354 @@ function InquiryDrawer({
             </div>
           ))}
 
-          {/* Context — single panel, always visible */}
+          {/* Editable email draft */}
+          {status === 'draft' && (
+            <div className="border border-gray-200 rounded-xl overflow-hidden">
+              <div className="flex items-center justify-between px-3.5 py-2 bg-gray-50 border-b border-gray-100">
+                <div className="flex items-center gap-2">
+                  <Mail className="w-3.5 h-3.5 text-gray-400" />
+                  <span className="text-[11px] font-semibold text-gray-700">Draft — Round {lastRound?.roundNumber ?? 1}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-gray-400">{editedBody.length} chars</span>
+                  {editedBody !== originalBody && (
+                    <button onClick={() => setEditedBody(originalBody)} className="text-[10px] text-indigo-600 hover:text-indigo-800 font-medium">
+                      Revert
+                    </button>
+                  )}
+                </div>
+              </div>
+              <textarea
+                className="w-full text-[11px] text-gray-700 font-mono leading-relaxed p-3.5 resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-200"
+                rows={12}
+                value={editedBody}
+                onChange={e => setEditedBody(e.target.value)}
+              />
+            </div>
+          )}
+
+          {/* Sending spinner */}
+          {isSending && (
+            <div className="flex items-center gap-3 bg-blue-50 rounded-xl p-4 border border-blue-100">
+              <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
+              <span className="text-xs text-blue-700 font-medium">Sending via Outlook…</span>
+            </div>
+          )}
+
+          {/* Sent / awaiting reply state */}
+          {(status === 'sent' || status === 'awaiting_reply') && (
+            <div className="bg-blue-50 rounded-xl p-3.5 border border-blue-100 space-y-2">
+              <div className="flex items-center gap-2">
+                <div className="w-5 h-5 rounded-full bg-blue-500 flex items-center justify-center shrink-0">
+                  <Check className="w-3 h-3 text-white" />
+                </div>
+                <span className="text-xs font-semibold text-blue-700">Sent via Outlook</span>
+                {sentAt && (
+                  <span className="text-[10px] text-blue-500 ml-auto">{new Date(sentAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span>
+                )}
+              </div>
+              {status === 'awaiting_reply' && (
+                <div className="flex items-center gap-2 pl-7">
+                  <div className="w-3 h-3 border-2 border-blue-300 border-t-blue-500 rounded-full animate-spin shrink-0" />
+                  <span className="text-[11px] text-blue-600">Awaiting supplier reply…</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Next step — replaces margin-impact card, strategy-recommendation card, and the old auto-rendered counter draft */}
+          {status === 'replied' && lastReply && scenario !== 'uncertain' && !followUpMode && !appliedToBuySheet && (() => {
+            const recNext      = recommendNextStep(thread!, lastReply, globalCpRules, effectiveDraftCP, effectiveWalkAway, effectiveMaxRounds)
+            const round        = thread!.rounds.length
+            const newGP        = ((rec.sellingPrice - lastReply.offeredCP) / rec.sellingPrice * 100).toFixed(1)
+            const saving       = (rec.costPrice - lastReply.offeredCP) * rec.recommendedReorderQty
+            const savingStr    = saving > 0
+              ? `Save £${Math.round(saving).toLocaleString('en-GB')} this order`
+              : `Cost £${Math.round(Math.abs(saving)).toLocaleString('en-GB')} more this order`
+            const fallbackMid  = Math.round((effectiveDraftCP + lastReply.offeredCP) / 2 * 100) / 100
+            const midpoint     = recNext.type === 'counter' ? recNext.midpoint : fallbackMid
+            const overWalkAway = lastReply.offeredCP - effectiveWalkAway
+
+            const headingByType: Record<NextStepRecommendation['type'], string> = {
+              accept:    'Recommended: Accept the reply',
+              counter:   'Recommended: Counter again',
+              escalate:  'Recommended: Escalate to your manager',
+              walk_away: 'Recommended: Walk away',
+            }
+
+            const acceptOutcome = `£${lastReply.offeredCP.toFixed(2)} CP · MOQ ${lastReply.moqOffered.toLocaleString()} · Delivery ${lastReply.deliveryWindow} · Margin ${currentMarginPct}% → ${newGP}%`
+            const counterOutcome = `Splits the difference · Round ${round + 1} of ${effectiveMaxRounds}`
+            const escalateOutcome = overWalkAway > 0
+              ? `Offered CP exceeds your walk-away by £${overWalkAway.toFixed(2)}`
+              : `Offered CP is +${cpDeltaPct.toFixed(1)}% above current — above your escalation rule`
+
+            return (
+              <div className="border border-gray-200 rounded-xl bg-white overflow-hidden">
+                <div className="px-4 py-3 border-b border-gray-100">
+                  <div className="text-[11px] font-semibold text-gray-700">Next step</div>
+                  <div className="text-[10px] text-gray-500 mt-0.5">{headingByType[recNext.type]}</div>
+                </div>
+                <div className="px-4 py-4 space-y-3">
+                  {/* Primary action */}
+                  {recNext.type === 'accept' && (
+                    <div className="space-y-1">
+                      <button
+                        onClick={() => { setAppliedToBuySheet(true); handleAccept() }}
+                        className="w-full px-4 py-2.5 rounded-lg bg-green-600 text-white text-xs font-semibold hover:bg-green-700 transition-colors flex items-center justify-center gap-1.5"
+                      >
+                        <Check className="w-3.5 h-3.5" /> Apply to draft Purchase Order
+                      </button>
+                      <p className="text-[10px] text-gray-500 leading-snug">{acceptOutcome}</p>
+                    </div>
+                  )}
+                  {recNext.type === 'counter' && (
+                    <div className="space-y-1">
+                      <button
+                        onClick={() => startCounterDraft(midpoint)}
+                        className="w-full px-4 py-2.5 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 transition-colors flex items-center justify-center gap-1.5"
+                      >
+                        <Mail className="w-3.5 h-3.5" /> Counter again at £{midpoint.toFixed(2)}
+                      </button>
+                      <p className="text-[10px] text-gray-500 leading-snug">{counterOutcome}</p>
+                    </div>
+                  )}
+                  {recNext.type === 'escalate' && (
+                    <div className="space-y-1">
+                      <button
+                        onClick={() => setEscalateDialogOpen(true)}
+                        className="w-full px-4 py-2.5 rounded-lg bg-red-600 text-white text-xs font-semibold hover:bg-red-700 transition-colors flex items-center justify-center gap-1.5"
+                      >
+                        <AlertTriangle className="w-3.5 h-3.5" /> Escalate to your manager
+                      </button>
+                      <p className="text-[10px] text-gray-500 leading-snug">{escalateOutcome}</p>
+                    </div>
+                  )}
+
+                  {/* Alternatives — outline */}
+                  <div className="grid grid-cols-2 gap-2 pt-1">
+                    {recNext.type !== 'accept' && (
+                      <button
+                        onClick={() => { setAppliedToBuySheet(true); handleAccept() }}
+                        className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-left hover:bg-gray-50 transition-colors"
+                      >
+                        <div className="text-[11px] font-semibold text-gray-800">Apply to draft Purchase Order</div>
+                        <div className="text-[10px] text-gray-500 mt-0.5 leading-snug">Margin {currentMarginPct}% → {newGP}% · {savingStr}</div>
+                      </button>
+                    )}
+                    {recNext.type !== 'counter' && (
+                      <button
+                        onClick={() => startCounterDraft(midpoint)}
+                        className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-left hover:bg-gray-50 transition-colors"
+                      >
+                        <div className="text-[11px] font-semibold text-gray-800">Counter again</div>
+                        <div className="text-[10px] text-gray-500 mt-0.5 leading-snug">Reuse your playbook for round {round + 1}</div>
+                      </button>
+                    )}
+                    <button
+                      onClick={startAltTermsDraft}
+                      className={`px-3 py-2 rounded-lg border border-gray-200 bg-white text-left hover:bg-gray-50 transition-colors ${recNext.type === 'escalate' ? 'col-span-2' : ''}`}
+                    >
+                      <div className="text-[11px] font-semibold text-gray-800">Propose alternative terms</div>
+                      <div className="text-[10px] text-gray-500 mt-0.5 leading-snug">Different MOQ, freight, or dates</div>
+                    </button>
+                  </div>
+
+                  {/* Tertiary — ghost */}
+                  <div className={`grid gap-2 pt-1 ${recNext.type === 'escalate' ? 'grid-cols-1' : 'grid-cols-2'}`}>
+                    {recNext.type !== 'escalate' && (
+                      <button
+                        onClick={() => setEscalateDialogOpen(true)}
+                        className="px-3 py-1.5 rounded-lg text-left hover:bg-gray-50 transition-colors"
+                      >
+                        <div className="text-[11px] font-medium text-gray-600">Escalate to manager</div>
+                        <div className="text-[10px] text-gray-400 mt-0.5 leading-snug">{thread?.escalatedTo ?? 'Your manager'} review</div>
+                      </button>
+                    )}
+                    <button
+                      onClick={() => setWalkAwayDialogOpen(true)}
+                      className="px-3 py-1.5 rounded-lg text-left hover:bg-gray-50 transition-colors"
+                    >
+                      <div className="text-[11px] font-medium text-gray-600">Walk away</div>
+                      <div className="text-[10px] text-gray-400 mt-0.5 leading-snug">Close negotiation</div>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )
+          })()}
+
+          {/* Scenario: uncertain → agent flags for human review (kept) */}
+          {status === 'replied' && scenario === 'uncertain' && (
+            <div className="bg-amber-50 rounded-xl p-4 border border-amber-300 space-y-3">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                <span className="text-xs font-bold text-amber-800">Agent uncertain — supplier response is non-committal</span>
+              </div>
+              <p className="text-xs text-amber-700 leading-relaxed">
+                The supplier hasn't proposed a specific CP. The agent isn't confident enough to recommend a margin impact or next action. Review the full reply above and decide how to respond.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => { onUpdate({ ...thread!, status: 'follow_up' }) }}
+                  className="flex-1 h-8 rounded-lg border border-amber-300 bg-white text-amber-800 text-xs font-semibold hover:bg-amber-100 transition-colors flex items-center justify-center gap-1.5"
+                >
+                  <Mail className="w-3 h-3" /> Draft follow-up
+                </button>
+                <button
+                  onClick={() => setEscalateDialogOpen(true)}
+                  className="flex-1 h-8 rounded-lg border border-amber-300 bg-white text-amber-800 text-xs font-semibold hover:bg-amber-100 transition-colors flex items-center justify-center gap-1.5"
+                >
+                  <AlertTriangle className="w-3 h-3" /> Escalate to manager
+                </button>
+              </div>
+              <p className="text-[10px] text-amber-600 text-center">Agent is passing control to you — no action will be taken without your decision.</p>
+            </div>
+          )}
+
+          {/* Follow-up draft (Counter or Alternative terms) */}
+          {status === 'replied' && followUpMode && followUpBody && (
+            <div className="border border-violet-200 rounded-xl overflow-hidden">
+              <div className="flex items-center justify-between px-3.5 py-2 bg-violet-50 border-b border-violet-100">
+                <div className="flex items-center gap-2">
+                  <Mail className="w-3.5 h-3.5 text-violet-400" />
+                  <span className="text-[11px] font-semibold text-violet-700">
+                    {followUpMode === 'alt_terms' ? 'AI-drafted alternative terms' : 'AI-drafted counter'} — Round {(lastRound?.roundNumber ?? 1) + 1}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-violet-400">{followUpBody.length} chars</span>
+                  {followUpBody !== followUpOriginal && (
+                    <button onClick={() => setFollowUpBody(followUpOriginal)} className="text-[10px] text-violet-600 hover:text-violet-800 font-medium">
+                      Revert
+                    </button>
+                  )}
+                  <button
+                    onClick={() => { setFollowUpMode(null); setFollowUpBody(''); setFollowUpOriginal('') }}
+                    className="text-[10px] text-gray-400 hover:text-gray-600 font-medium"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+              <textarea
+                className="w-full text-[11px] text-gray-700 font-mono leading-relaxed p-3.5 resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-violet-200"
+                rows={10}
+                value={followUpBody}
+                onChange={e => setFollowUpBody(e.target.value)}
+              />
+              <div className="px-3.5 py-2.5 bg-violet-50 border-t border-violet-100">
+                <button
+                  onClick={handleSendFollowUp}
+                  disabled={isSending}
+                  className="w-full h-8 rounded-lg bg-violet-600 text-white text-xs font-semibold hover:bg-violet-700 transition-colors flex items-center justify-center gap-1.5 disabled:opacity-60"
+                >
+                  {isSending
+                    ? <><div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" /><span>Sending…</span></>
+                    : <><Mail className="w-3.5 h-3.5" /><span>Send via Outlook</span></>
+                  }
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Applied-to-PO confirmation (after Accept) */}
+          {appliedToBuySheet && lastReply && (
+            <div className="bg-green-50 border border-green-200 rounded-xl p-3.5 space-y-2">
+              <div className="flex items-center justify-center gap-1.5 text-xs font-semibold text-green-700">
+                <Check className="w-3.5 h-3.5" /> Applied to draft Purchase Order. Review and send when ready.
+              </div>
+              {NEG_PO_MAP[rec.id] && (() => {
+                const linkedPO = ALL_POS.find(p => p.id === NEG_PO_MAP[rec.id])
+                return linkedPO ? (
+                  <div className="bg-white border border-green-200 rounded-lg px-3 py-2 flex items-center justify-between">
+                    <div className="text-[11px] text-gray-600">
+                      Resulted in <span className="font-semibold text-gray-900">{linkedPO.id}</span>
+                      <span className="mx-1.5 text-gray-300">·</span>
+                      <span className="text-green-600 font-medium">Currently: {linkedPO.status}</span>
+                    </div>
+                    <button
+                      onClick={() => onNavigateToPO?.(linkedPO.id)}
+                      className="text-indigo-500 hover:text-indigo-700 text-[11px] font-medium whitespace-nowrap ml-2 transition-colors"
+                    >
+                      View PO →
+                    </button>
+                  </div>
+                ) : null
+              })()}
+            </div>
+          )}
+
+          {/* Closed — No deal banner */}
+          {status === 'closed_no_deal' && (
+            <div className="bg-red-50 border border-red-200 rounded-xl p-3.5 space-y-2">
+              <div className="flex items-center gap-2">
+                <X className="w-4 h-4 text-red-600 shrink-0" />
+                <span className="text-xs font-bold text-red-700">Negotiation closed — no deal</span>
+              </div>
+              {thread?.closeReason && (
+                <div className="text-[11px] text-red-700 leading-relaxed">
+                  <span className="font-semibold text-red-800">Reason: </span>{thread.closeReason}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Escalated banner */}
+          {status === 'escalated' && (
+            <div className="bg-red-50 border border-red-200 rounded-xl p-3.5 space-y-2">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+                <span className="text-xs font-bold text-red-700">Escalated — awaiting {thread?.escalatedTo ?? 'manager'} review</span>
+              </div>
+              {thread?.flaggedReason && (
+                <div className="text-[11px] text-red-700 leading-relaxed">
+                  <span className="font-semibold text-red-800">Reason: </span>{thread.flaggedReason}
+                </div>
+              )}
+              {!alertSent && (
+                <button
+                  onClick={() => setAlertSent(true)}
+                  className="w-full h-8 rounded-lg bg-red-600 text-white text-xs font-semibold hover:bg-red-700 transition-colors"
+                >
+                  Alert senior buyer
+                </button>
+              )}
+              {alertSent && (
+                <div className="flex items-center justify-center gap-1.5 text-xs font-semibold text-red-700 py-1">
+                  <Check className="w-3.5 h-3.5" /> Senior buyer alerted
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Agreement summary */}
+          {status === 'agreed' && thread?.agreedCP != null && (
+            <div className="bg-green-50 border border-green-200 rounded-xl p-4 space-y-1.5">
+              <div className="text-xs font-bold text-green-700">Agreement reached ✓</div>
+              <div className="flex justify-between text-xs">
+                <span className="text-green-600">Agreed CP</span>
+                <span className="font-bold text-green-800">£{thread!.agreedCP!.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between text-xs">
+                <span className="text-green-600">Saving vs current</span>
+                <span className="font-bold text-green-800">£{(rec.costPrice - thread!.agreedCP!).toFixed(2)}/unit</span>
+              </div>
+              {agreedMarginPct && (
+                <div className="flex justify-between text-xs">
+                  <span className="text-green-600">New GP%</span>
+                  <span className="font-bold text-green-800">{agreedMarginPct}%</span>
+                </div>
+              )}
+              {thread!.agreedMOQ && (
+                <div className="flex justify-between text-xs">
+                  <span className="text-green-600">Agreed MOQ</span>
+                  <span className="font-bold text-green-800">{thread!.agreedMOQ.toLocaleString()}</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Context — single panel, always visible (reference: target, deal facts, playbook rules) */}
           <div className="border border-gray-200 rounded-xl bg-white">
             <div className="px-4 py-4 space-y-4">
 
@@ -2946,337 +3372,6 @@ function InquiryDrawer({
             </div>
           </div>
 
-          {/* Editable email draft */}
-          {status === 'draft' && (
-            <div className="border border-gray-200 rounded-xl overflow-hidden">
-              <div className="flex items-center justify-between px-3.5 py-2 bg-gray-50 border-b border-gray-100">
-                <div className="flex items-center gap-2">
-                  <Mail className="w-3.5 h-3.5 text-gray-400" />
-                  <span className="text-[11px] font-semibold text-gray-700">Draft — Round {lastRound?.roundNumber ?? 1}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] text-gray-400">{editedBody.length} chars</span>
-                  {editedBody !== originalBody && (
-                    <button onClick={() => setEditedBody(originalBody)} className="text-[10px] text-indigo-600 hover:text-indigo-800 font-medium">
-                      Revert
-                    </button>
-                  )}
-                </div>
-              </div>
-              <textarea
-                className="w-full text-[11px] text-gray-700 font-mono leading-relaxed p-3.5 resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-200"
-                rows={12}
-                value={editedBody}
-                onChange={e => setEditedBody(e.target.value)}
-              />
-            </div>
-          )}
-
-          {/* Sending spinner */}
-          {isSending && (
-            <div className="flex items-center gap-3 bg-blue-50 rounded-xl p-4 border border-blue-100">
-              <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
-              <span className="text-xs text-blue-700 font-medium">Sending via Outlook…</span>
-            </div>
-          )}
-
-          {/* Sent / awaiting reply state */}
-          {(status === 'sent' || status === 'awaiting_reply') && (
-            <div className="bg-blue-50 rounded-xl p-3.5 border border-blue-100 space-y-2">
-              <div className="flex items-center gap-2">
-                <div className="w-5 h-5 rounded-full bg-blue-500 flex items-center justify-center shrink-0">
-                  <Check className="w-3 h-3 text-white" />
-                </div>
-                <span className="text-xs font-semibold text-blue-700">Sent via Outlook</span>
-                {sentAt && (
-                  <span className="text-[10px] text-blue-500 ml-auto">{new Date(sentAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span>
-                )}
-              </div>
-              {status === 'awaiting_reply' && (
-                <div className="flex items-center gap-2 pl-7">
-                  <div className="w-3 h-3 border-2 border-blue-300 border-t-blue-500 rounded-full animate-spin shrink-0" />
-                  <span className="text-[11px] text-blue-600">Awaiting supplier reply…</span>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Scenario A: accepted → margin impact */}
-          {status === 'replied' && scenario === 'accepted' && lastReply && (
-            <div className="bg-green-50 rounded-xl p-3.5 border border-green-200 space-y-1.5">
-              <div className="text-[10px] font-semibold text-green-600 uppercase tracking-wide">Margin impact if accepted</div>
-              <div className="flex justify-between text-xs">
-                <span className="text-gray-500">Current <Tt tip="Gross Profit %: selling price minus cost price, as a percentage of selling price.">GP%</Tt></span>
-                <span className="font-semibold text-gray-700">{currentMarginPct}%</span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-green-600">New <Tt tip="Gross Profit %: selling price minus cost price, as a percentage of selling price.">GP%</Tt> at £{lastReply.offeredCP.toFixed(2)}</span>
-                <span className="font-bold text-green-700">{((rec.sellingPrice - lastReply.offeredCP) / rec.sellingPrice * 100).toFixed(1)}%</span>
-              </div>
-              <div className="flex justify-between text-xs pb-1">
-                <span className="text-green-600">Saving this order</span>
-                <span className="font-bold text-green-700">
-                  £{((rec.costPrice - lastReply.offeredCP) * rec.recommendedReorderQty).toLocaleString('en-GB', { maximumFractionDigits: 0 })}
-                </span>
-              </div>
-              {!appliedToBuySheet && !NEG_PO_MAP[rec.id] ? (
-                <div className="space-y-1">
-                  <button
-                    onClick={() => { setAppliedToBuySheet(true); handleAccept() }}
-                    className="w-full h-8 rounded-lg bg-green-600 text-white text-xs font-semibold hover:bg-green-700 transition-colors flex items-center justify-center gap-1.5"
-                  >
-                    <Check className="w-3.5 h-3.5" /> Apply to Purchase Order
-                  </button>
-                  <p className="text-center text-[10px] text-gray-400">You'll review before anything is sent.</p>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-center gap-1.5 text-xs font-semibold text-green-700 py-1">
-                    <Check className="w-3.5 h-3.5" /> Applied to Purchase Order
-                  </div>
-                  {NEG_PO_MAP[rec.id] && (() => {
-                    const linkedPO = ALL_POS.find(p => p.id === NEG_PO_MAP[rec.id])
-                    return linkedPO ? (
-                      <div className="bg-white border border-green-200 rounded-lg px-3 py-2 flex items-center justify-between">
-                        <div className="text-[11px] text-gray-600">
-                          Resulted in <span className="font-semibold text-gray-900">{linkedPO.id}</span>
-                          <span className="mx-1.5 text-gray-300">·</span>
-                          <span className="text-green-600 font-medium">Currently: {linkedPO.status}</span>
-                        </div>
-                        <button
-                          onClick={() => onNavigateToPO?.(linkedPO.id)}
-                          className="text-indigo-500 hover:text-indigo-700 text-[11px] font-medium whitespace-nowrap ml-2 transition-colors"
-                        >
-                          View PO →
-                        </button>
-                      </div>
-                    ) : null
-                  })()}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Strategy recommendation — counter scenario */}
-          {status === 'replied' && scenario === 'counter' && (() => {
-            const offeredCP = lastReply ? (lastReply as SupplierNegReply).offeredCP : null
-            const round1CP  = thread?.rounds[0]?.requestedCP ?? 0
-            const midpointCP = offeredCP !== null ? ((offeredCP + round1CP) / 2) : null
-            const recStrategy: 'counter' | 'split' | 'escalate' =
-              cpDeltaPct >= effectiveCpRules.escalateIfPct ? 'escalate' :
-              cpDeltaPct <= effectiveCpRules.escalateIfPct / 2 ? 'split' :
-              'counter'
-            const recRationale =
-              recStrategy === 'split'    ? 'Margin impact is within tolerance — supplier moved closer to your ask.' :
-              recStrategy === 'escalate' ? 'Offered CP exceeds your target ceiling by ' + cpDeltaPct.toFixed(1) + '%. This needs manager review before further rounds.' :
-              midpointCP !== null ? 'Supplier offered £' + offeredCP!.toFixed(2) + ' vs your £' + round1CP.toFixed(2) + ' ask; midpoint at £' + midpointCP.toFixed(2) + ' is within your concession budget.' :
-              'Meet at midpoint between our ask and their offer — within CP rules.'
-            return (
-              <div className="rounded-xl border border-indigo-100 overflow-hidden">
-                <div className="bg-indigo-50 px-4 py-3 border-b border-indigo-100">
-                  <p className="text-[11px] font-bold text-indigo-800 mb-0.5">
-                    Recommendation: {recStrategy === 'counter' ? 'Counter at midpoint' : recStrategy === 'split' ? 'Accept the split' : 'Escalate to manager'}.
-                  </p>
-                  <p className="text-[11px] text-indigo-700">{recRationale}</p>
-                </div>
-                <div className="bg-white px-4 py-3 flex items-center gap-2 flex-wrap">
-                  {(['counter', 'split', 'escalate'] as const).map(s => (
-                    <button
-                      key={s}
-                      onClick={() => s !== 'escalate' && handleStrategyChange(s)}
-                      disabled={s === 'escalate'}
-                      className={`h-7 px-3 rounded-full text-[10px] font-semibold transition-colors border ${
-                        s === recStrategy
-                          ? 'bg-indigo-600 text-white border-indigo-600'
-                          : s === 'escalate'
-                          ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
-                          : 'bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-100'
-                      }`}
-                    >
-                      {s === 'counter' ? 'Counter at midpoint' : s === 'split' ? 'Accept split delivery' : 'Escalate to manager'}
-                      {s === 'escalate' && <span className="ml-1 text-[9px] opacity-70">soon</span>}
-                    </button>
-                  ))}
-                </div>
-                <details className="border-t border-indigo-100">
-                  <summary className="px-4 py-2 text-[10px] text-indigo-500 cursor-pointer hover:text-indigo-700 select-none">
-                    ▸ Why this recommendation?
-                  </summary>
-                  <div className="px-4 pb-3 space-y-1 text-[11px] text-gray-500">
-                    <div>Round: <span className="font-semibold text-gray-700">{lastRound?.roundNumber ?? 1}</span></div>
-                    <div>Your ask: <span className="font-semibold text-gray-700">£{round1CP.toFixed(2)}</span></div>
-                    {offeredCP !== null && <div>Supplier offered: <span className="font-semibold text-gray-700">£{offeredCP.toFixed(2)}</span></div>}
-                    {midpointCP !== null && <div>Midpoint: <span className="font-semibold text-gray-700">£{midpointCP.toFixed(2)}</span></div>}
-                    <div>Escalate threshold: <span className="font-semibold text-gray-700">+{effectiveCpRules.escalateIfPct}%</span></div>
-                    <div>CP delta: <span className={`font-semibold ${cpDeltaColor}`}>{cpDeltaLabel}</span></div>
-                  </div>
-                </details>
-              </div>
-            )
-          })()}
-
-          {/* Scenario C: uncertain → agent flags for human review */}
-          {status === 'replied' && scenario === 'uncertain' && (
-            <div className="bg-amber-50 rounded-xl p-4 border border-amber-300 space-y-3">
-              <div className="flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                <span className="text-xs font-bold text-amber-800">Agent uncertain — supplier response is non-committal</span>
-              </div>
-              <p className="text-xs text-amber-700 leading-relaxed">
-                The supplier hasn't proposed a specific CP. The agent isn't confident enough to recommend a margin impact or next action. Review the full reply above and decide how to respond.
-              </p>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => { onUpdate({ ...thread!, status: 'follow_up' }) }}
-                  className="flex-1 h-8 rounded-lg border border-amber-300 bg-white text-amber-800 text-xs font-semibold hover:bg-amber-100 transition-colors flex items-center justify-center gap-1.5"
-                >
-                  <Mail className="w-3 h-3" /> Draft follow-up
-                </button>
-                <button
-                  onClick={() => { onUpdate({ ...thread!, status: 'escalated', flaggedReason: 'Supplier reply non-committal — no CP proposed.' }) }}
-                  className="flex-1 h-8 rounded-lg border border-amber-300 bg-white text-amber-800 text-xs font-semibold hover:bg-amber-100 transition-colors flex items-center justify-center gap-1.5"
-                >
-                  <AlertTriangle className="w-3 h-3" /> Escalate to manager
-                </button>
-              </div>
-              <p className="text-[10px] text-amber-600 text-center">Agent is passing control to you — no action will be taken without your decision.</p>
-            </div>
-          )}
-
-          {/* Scenario B: counter → editable follow-up draft */}
-          {status === 'replied' && scenario === 'counter' && followUpBody && (
-            <div className="border border-violet-200 rounded-xl overflow-hidden">
-              <div className="flex items-center justify-between px-3.5 py-2 bg-violet-50 border-b border-violet-100">
-                <div className="flex items-center gap-2">
-                  <Mail className="w-3.5 h-3.5 text-violet-400" />
-                  <span className="text-[11px] font-semibold text-violet-700">AI-drafted follow-up — Round 2</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] text-violet-400">{followUpBody.length} chars</span>
-                  {followUpBody !== followUpOriginal && (
-                    <button onClick={() => setFollowUpBody(followUpOriginal)} className="text-[10px] text-violet-600 hover:text-violet-800 font-medium">
-                      Revert
-                    </button>
-                  )}
-                </div>
-              </div>
-              <textarea
-                className="w-full text-[11px] text-gray-700 font-mono leading-relaxed p-3.5 resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-violet-200"
-                rows={10}
-                value={followUpBody}
-                onChange={e => setFollowUpBody(e.target.value)}
-              />
-              {lastReply && (() => {
-                const ev = evalCpDecision(cpDeltaPct, lastReply, rec.sellingPrice, effectiveCpRules, currentMarginPct, leadTimeBreach)
-                const supplyDelivEnd = lastReply.deliveryWindow.split('–').pop()?.trim() ?? lastReply.deliveryWindow
-                return (
-                  <div className="px-3.5 py-2.5 bg-gray-50 border-t border-gray-100 space-y-1">
-                    <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1">Decision signals</div>
-                    <div className={`flex items-start gap-1.5 text-[11px] ${ev.exceedsEscalation ? 'text-red-600' : 'text-green-600'}`}>
-                      <span>{ev.exceedsEscalation ? '⚠' : '✓'}</span>
-                      <span className="font-medium">
-                        {ev.exceedsEscalation
-                          ? `Exceeds escalation threshold (+${cpDeltaPct.toFixed(1)}% vs limit +${effectiveCpRules.escalateIfPct}%)`
-                          : `Within CP rules (+${cpDeltaPct.toFixed(1)}% vs limit +${effectiveCpRules.escalateIfPct}%)`}
-                      </span>
-                    </div>
-                    {ev.leadTimeBreach && (
-                      <div className="flex items-start gap-1.5 text-[11px] text-amber-700">
-                        <span>⚠</span>
-                        <span className="font-medium">Delivery slips past ex-factory ({supplyDelivEnd} vs {exFactoryDateStr})</span>
-                      </div>
-                    )}
-                    <div className="flex items-start gap-1.5 text-[11px] text-gray-600">
-                      <span>→</span>
-                      <span>GP impact <span className="font-semibold">{currentMarginPct}% → {ev.newGP}%</span></span>
-                    </div>
-                  </div>
-                )
-              })()}
-              <div className="px-3.5 py-2.5 bg-violet-50 border-t border-violet-100">
-                {lastReply && (() => {
-                  const ev = evalCpDecision(cpDeltaPct, lastReply, rec.sellingPrice, effectiveCpRules, currentMarginPct, leadTimeBreach)
-                  const hasAnyBreach = ev.exceedsEscalation || ev.leadTimeBreach
-                  return (
-                    <div className={`text-[10px] font-medium mb-2 leading-relaxed ${hasAnyBreach ? 'text-red-600' : 'text-amber-700'}`}>
-                      {hasAnyBreach
-                        ? `GP ${currentMarginPct}% → ${ev.newGP}% ✗ · ${ev.exceedsEscalation ? `Exceeds CP rule (+${cpDeltaPct.toFixed(1)}%)` : ''}${ev.exceedsEscalation && ev.leadTimeBreach ? ' · ' : ''}${ev.leadTimeBreach ? 'Delivery slips ex-factory' : ''} ⚠ · Escalation recommended`
-                        : `CP +${cpDeltaPct.toFixed(1)}% — within your +${effectiveCpRules.escalateIfPct}% threshold, safe to send`
-                      }
-                    </div>
-                  )
-                })()}
-                <button
-                  onClick={handleSendFollowUp}
-                  disabled={isSending}
-                  className="w-full h-8 rounded-lg bg-violet-600 text-white text-xs font-semibold hover:bg-violet-700 transition-colors flex items-center justify-center gap-1.5 disabled:opacity-60"
-                >
-                  {isSending
-                    ? <><div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" /><span>Sending…</span></>
-                    : <><Mail className="w-3.5 h-3.5" /><span>Send follow-up via Outlook</span></>
-                  }
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Scenario C: escalated */}
-          {status === 'escalated' && (
-            <div className="bg-red-50 rounded-xl p-3.5 border border-red-200 space-y-2">
-              <div className="text-[10px] font-semibold text-red-600 uppercase tracking-wide">Escalation thresholds breached</div>
-              {thread?.flaggedReason && <div className="text-xs text-red-700 font-medium">{thread.flaggedReason}</div>}
-              <div className="grid grid-cols-2 gap-2 pt-0.5">
-                <div className="bg-red-100 rounded-lg p-2 text-center">
-                  <div className="text-[10px] text-red-500">MOQ limit</div>
-                  <div className="text-xs font-bold text-red-700">{Math.round(rec.minOrderQty * ESCALATION_RULES.moqMaxMultiplier).toLocaleString()}</div>
-                </div>
-                <div className="bg-red-100 rounded-lg p-2 text-center">
-                  <div className="text-[10px] text-red-500">CP max delta</div>
-                  <div className="text-xs font-bold text-red-700">+{effectiveCpRules.escalateIfPct}%</div>
-                </div>
-              </div>
-              {!alertSent ? (
-                <button
-                  onClick={() => setAlertSent(true)}
-                  className="w-full h-8 rounded-lg bg-red-600 text-white text-xs font-semibold hover:bg-red-700 transition-colors"
-                >
-                  Alert senior buyer
-                </button>
-              ) : (
-                <div className="flex items-center justify-center gap-1.5 text-xs font-semibold text-red-700 py-1">
-                  <Check className="w-3.5 h-3.5" /> Senior buyer alerted
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Agreement summary */}
-          {status === 'agreed' && thread?.agreedCP != null && (
-            <div className="bg-green-50 border border-green-200 rounded-xl p-4 space-y-1.5">
-              <div className="text-xs font-bold text-green-700">Agreement reached ✓</div>
-              <div className="flex justify-between text-xs">
-                <span className="text-green-600">Agreed CP</span>
-                <span className="font-bold text-green-800">£{thread!.agreedCP!.toFixed(2)}</span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-green-600">Saving vs current</span>
-                <span className="font-bold text-green-800">£{(rec.costPrice - thread!.agreedCP!).toFixed(2)}/unit</span>
-              </div>
-              {agreedMarginPct && (
-                <div className="flex justify-between text-xs">
-                  <span className="text-green-600">New GP%</span>
-                  <span className="font-bold text-green-800">{agreedMarginPct}%</span>
-                </div>
-              )}
-              {thread!.agreedMOQ && (
-                <div className="flex justify-between text-xs">
-                  <span className="text-green-600">Agreed MOQ</span>
-                  <span className="font-bold text-green-800">{thread!.agreedMOQ.toLocaleString()}</span>
-                </div>
-              )}
-            </div>
-          )}
-
           {/* Internal notes */}
           {thread && (
             <div>
@@ -3351,11 +3446,11 @@ function InquiryDrawer({
           {status === 'replied' && scenario === 'uncertain' && (
             <p className="text-center text-xs text-amber-600 font-medium">Agent has flagged this for your review. Choose an action above.</p>
           )}
-          {status === 'agreed' && !isManager && (
-            <p className="text-center text-xs text-gray-400">Update agreed CP in Order App.</p>
-          )}
           {status === 'escalated' && (
             <p className="text-center text-xs text-gray-400">Escalated — awaiting senior buyer action.</p>
+          )}
+          {status === 'closed_no_deal' && (
+            <p className="text-center text-xs text-gray-400">Negotiation closed — no deal.</p>
           )}
         </div>
       </div>
@@ -3417,6 +3512,77 @@ function InquiryDrawer({
               className="h-8 px-3 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors"
             >
               Save
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {/* Walk-away Dialog */}
+    {walkAwayDialogOpen && (
+      <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
+        <div className="bg-white rounded-2xl shadow-2xl p-6 w-[440px]">
+          <div className="text-sm font-bold text-gray-900 mb-1">Close negotiation — walk away</div>
+          <div className="text-xs text-gray-500 mb-4">
+            This closes the thread as "no deal." Record a reason so the team understands why.
+          </div>
+          <label className="text-[11px] text-gray-500 block mb-1">Reason for closing</label>
+          <textarea
+            rows={4}
+            value={walkAwayReason}
+            onChange={e => setWalkAwayReason(e.target.value)}
+            placeholder="e.g. CP gap > walk-away · supplier won't move on MOQ · cheaper alternative available"
+            className="w-full rounded-lg border border-gray-200 px-3 py-2 text-xs text-gray-700 resize-none focus:outline-none focus:ring-1 focus:ring-indigo-400 placeholder:text-gray-400 mb-5"
+          />
+          <div className="flex justify-end gap-2">
+            <button
+              onClick={() => { setWalkAwayDialogOpen(false); setWalkAwayReason('') }}
+              className="h-8 px-3 text-xs font-medium rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={confirmWalkAway}
+              disabled={walkAwayReason.trim().length === 0}
+              className="h-8 px-3 text-xs font-semibold rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors disabled:opacity-50"
+            >
+              Close negotiation
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {/* Escalate Dialog */}
+    {escalateDialogOpen && (
+      <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
+        <div className="bg-white rounded-2xl shadow-2xl p-6 w-[440px]">
+          <div className="text-sm font-bold text-gray-900 mb-1">Escalate to your manager</div>
+          <div className="text-xs text-gray-500 mb-4">
+            We'll flag this thread for manager review and surface it in Governance &gt; Approvals.
+          </div>
+          <label className="text-[11px] text-gray-500 block mb-1">Context for the manager (optional)</label>
+          <textarea
+            rows={4}
+            value={escalateContext}
+            onChange={e => setEscalateContext(e.target.value)}
+            placeholder={lastReply
+              ? `Supplier offered £${lastReply.offeredCP.toFixed(2)} vs target £${effectiveDraftCP.toFixed(2)}. Above walk-away by £${Math.max(0, lastReply.offeredCP - effectiveWalkAway).toFixed(2)}.`
+              : 'Add anything the manager should know before reviewing.'}
+            className="w-full rounded-lg border border-gray-200 px-3 py-2 text-xs text-gray-700 resize-none focus:outline-none focus:ring-1 focus:ring-indigo-400 placeholder:text-gray-400 mb-5"
+          />
+          <div className="flex justify-end gap-2">
+            <button
+              onClick={() => { setEscalateDialogOpen(false); setEscalateContext('') }}
+              className="h-8 px-3 text-xs font-medium rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={confirmEscalate}
+              className="h-8 px-3 text-xs font-semibold rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors"
+            >
+              Escalate
             </button>
           </div>
         </div>
@@ -3705,7 +3871,7 @@ const PIPELINE_STAGE_LABELS: Record<PipelineStage, string> = {
   draft:            'Draft',
   pending_approval: 'Pending approval',
   approved:         'Approved',
-  pushed:           'Sent to Order App',
+  pushed:           'Sent to PO draft',
   rejected:         'Rejected',
 }
 
@@ -4250,9 +4416,9 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                     {curStatus === 'Approved' && (
                       <button onClick={() => {
                         setStatusOverrides(o => ({ ...o, [p.id]: 'Sent' }))
-                        showToast(`${p.name} pushed to Order App.`)
+                        showToast(`${p.name} pushed to draft Purchase Order.`)
                       }} className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors">
-                        Push to Order App
+                        Push to PO draft
                       </button>
                     )}
                     <button onClick={() => setOpenInquiryId(p.id)}
@@ -5011,7 +5177,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                   onClick={handlePushToOrderApp}
                   className="h-8 px-4 rounded-lg text-xs font-semibold bg-emerald-600 text-white disabled:opacity-40 disabled:cursor-not-allowed hover:bg-emerald-700 transition-colors"
                 >
-                  Push to Order App{approvedEligible > 0 ? ` (${approvedEligible})` : ''}
+                  Push to PO draft{approvedEligible > 0 ? ` (${approvedEligible})` : ''}
                 </button>
               </div>
             )}
@@ -5147,11 +5313,11 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                             {stage === 'approved' && (
                               <button onClick={() => setPushModalIds([p.id])}
                                 className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors">
-                                Push to Order App
+                                Push to PO draft
                               </button>
                             )}
                             {stage === 'pushed' && (
-                              <span className="text-[10px] text-gray-400 font-medium py-0.5">Sent to Order App</span>
+                              <span className="text-[10px] text-gray-400 font-medium py-0.5">Sent to PO draft</span>
                             )}
                             {stage === 'rejected' && (() => {
                               const meta = REJECTION_META[p.id]
@@ -5273,8 +5439,8 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
             <div className="bg-white rounded-2xl shadow-2xl p-6 w-[480px]">
-              <div className="text-sm font-bold text-gray-900 mb-1">Push {pushModalIds.length} line{pushModalIds.length !== 1 ? 's' : ''} to Order App</div>
-              <div className="text-xs text-gray-400 mb-4">Pre-flight check before pushing to Order App.</div>
+              <div className="text-sm font-bold text-gray-900 mb-1">Push {pushModalIds.length} line{pushModalIds.length !== 1 ? 's' : ''} to draft Purchase Order</div>
+              <div className="text-xs text-gray-400 mb-4">Pre-flight check before pushing to draft Purchase Order.</div>
               <div className="mb-3">
                 <label className="text-xs font-semibold text-gray-600 block mb-1">Collection name</label>
                 <input type="text" defaultValue={defaultCollection}
@@ -5324,7 +5490,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                   })
                   setPushModalIds([])
                   setSelectedIds(new Set())
-                  showToast(`${pushModalIds.length} line${pushModalIds.length !== 1 ? 's' : ''} pushed to Order App.`)
+                  showToast(`${pushModalIds.length} line${pushModalIds.length !== 1 ? 's' : ''} pushed to draft Purchase Order.`)
                 }}
                   className="flex-1 h-9 rounded-lg bg-green-600 text-white text-xs font-semibold hover:bg-green-700 transition-colors">
                   Push {pushModalIds.length} line{pushModalIds.length !== 1 ? 's' : ''}
@@ -6615,7 +6781,7 @@ export function KanbanPanel({
     onAddEvent(item.poId, {
       id: `applied-${Date.now()}`, type: 'date_change_applied',
       timestamp: new Date().toISOString(),
-      body: `Date change accepted via Kanban board: delivery ${formatDate(item.proposalOldDate)} → ${formatDate(item.proposalNewDate)}. Update sent to Order App.`,
+      body: `Date change accepted via Kanban board: delivery ${formatDate(item.proposalOldDate)} → ${formatDate(item.proposalNewDate)}. Update sent to draft Purchase Order.`,
       author: 'buyer',
     })
     setDismissedIds(prev => new Set([...prev, item.id]))
