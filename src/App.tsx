@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import {
   AlertTriangle, TrendingDown, TrendingUp,
   Minus, Package, Sparkles, Home, BookOpen, HelpCircle, Ghost,
@@ -704,6 +704,126 @@ function Sidebar() {
         <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center mt-1">
           <span className="text-xs font-bold text-white">G</span>
         </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Supplier Workspace (shared two-pane layout for negotiations + PO Monitoring actions) ──
+type WorkspaceListItem = {
+  id:         string
+  selected:   boolean
+  onSelect:   () => void
+  title:      string
+  subtitle?:  React.ReactNode
+  meta?:      React.ReactNode
+  badge?:     React.ReactNode
+  sectionId?: string
+}
+
+function SupplierWorkspaceLayout({
+  title,
+  count,
+  filter,
+  onFilterChange,
+  filterPlaceholder,
+  items,
+  sectionLabels,
+  emptyListText,
+  emptyRightTitle,
+  emptyRightSubtitle,
+  rightPane,
+}: {
+  title:               string
+  count:               number
+  filter:              string
+  onFilterChange:      (v: string) => void
+  filterPlaceholder?:  string
+  items:               WorkspaceListItem[]
+  sectionLabels?:      Record<string, string>
+  emptyListText?:      string
+  emptyRightTitle?:    string
+  emptyRightSubtitle?: string
+  rightPane:           React.ReactNode
+}) {
+  return (
+    <div className="flex flex-col lg:flex-row gap-0 lg:gap-0 h-[calc(100vh-220px)] min-h-[640px] border border-gray-200 rounded-2xl overflow-hidden bg-white">
+      {/* LEFT RAIL */}
+      <div className="w-full lg:w-[280px] lg:shrink-0 lg:border-r border-gray-100 flex flex-col bg-gray-50/40">
+        <div className="px-4 py-3 border-b border-gray-100 shrink-0">
+          <div className="flex items-baseline justify-between mb-2">
+            <span className="text-xs font-bold text-gray-900">{title}</span>
+            <span className="text-[10px] text-gray-400 font-medium">{count}</span>
+          </div>
+          <div className="relative">
+            <Search className="w-3 h-3 text-gray-400 absolute top-1/2 -translate-y-1/2 left-2" />
+            <input
+              type="text"
+              value={filter}
+              onChange={e => onFilterChange(e.target.value)}
+              placeholder={filterPlaceholder ?? 'Filter…'}
+              className="w-full h-7 pl-6 pr-2 rounded-md border border-gray-200 bg-white text-[11px] text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-300 placeholder:text-gray-400"
+            />
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto py-2 px-2 space-y-1">
+          {items.length === 0 ? (
+            <div className="px-3 py-6 text-center text-[11px] text-gray-400">
+              {emptyListText ?? 'All clear. Nothing to action.'}
+            </div>
+          ) : (
+            (() => {
+              const withSection: React.ReactNode[] = []
+              let lastSection: string | undefined = undefined
+              items.forEach(it => {
+                if (sectionLabels && it.sectionId && it.sectionId !== lastSection) {
+                  withSection.push(
+                    <div key={`sec-${it.sectionId}`} className="text-[9px] font-bold text-gray-400 uppercase tracking-wider px-2 pt-2 pb-1">
+                      {sectionLabels[it.sectionId] ?? it.sectionId}
+                    </div>
+                  )
+                  lastSection = it.sectionId
+                }
+                withSection.push(
+                  <button
+                    key={it.id}
+                    onClick={it.onSelect}
+                    className={`w-full text-left rounded-lg border-l-2 transition-colors px-3 py-2 ${
+                      it.selected
+                        ? 'bg-white border-l-indigo-500 shadow-[0_1px_2px_rgba(0,0,0,0.04)] border-r border-r-gray-200 border-t border-t-gray-200 border-b border-b-gray-200'
+                        : 'bg-white/0 border-l-transparent hover:bg-white'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2 mb-0.5">
+                      <span className="text-[11px] font-semibold text-gray-800 truncate flex-1">{it.title}</span>
+                      {it.badge}
+                    </div>
+                    {it.subtitle && (
+                      <div className="text-[10px] text-gray-600 leading-snug line-clamp-2 mb-1">{it.subtitle}</div>
+                    )}
+                    {it.meta && (
+                      <div className="text-[10px] text-gray-400">{it.meta}</div>
+                    )}
+                  </button>
+                )
+              })
+              return withSection
+            })()
+          )}
+        </div>
+      </div>
+
+      {/* RIGHT PANE */}
+      <div className="flex-1 flex flex-col overflow-hidden bg-white">
+        {rightPane ?? (
+          <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">
+            <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center mb-3">
+              <MessageSquare className="w-5 h-5 text-gray-400" />
+            </div>
+            <div className="text-sm font-semibold text-gray-700 mb-1">{emptyRightTitle ?? 'Select an item'}</div>
+            <div className="text-xs text-gray-400 max-w-xs">{emptyRightSubtitle ?? 'Pick an item from the left to get started.'}</div>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -2487,7 +2607,7 @@ function recommendNextStep(
 
 // ── Inquiry Drawer ────────────────────────────────────────────────────────────
 function InquiryDrawer({
-  rec, thread, onClose, onUpdate, isManager, onApprove, onReject, globalCpRules, onUpdateGlobalCpRules, onNavigateToPO,
+  rec, thread, onClose, onUpdate, isManager, onApprove, onReject, globalCpRules, onUpdateGlobalCpRules, onNavigateToPO, embed = false,
 }: {
   rec:                   typeof REORDER_RECOMMENDATIONS[0]
   thread:                InquiryThread | undefined
@@ -2499,6 +2619,7 @@ function InquiryDrawer({
   globalCpRules:         CpRulesState
   onUpdateGlobalCpRules?: (r: CpRulesState) => void
   onNavigateToPO?:       (poId: string) => void
+  embed?:                boolean
 }) {
   const status: NegotiationStatus = thread?.status ?? 'idle'
 
@@ -2775,11 +2896,14 @@ function InquiryDrawer({
     status === 'draft'     ? 'bg-gray-100 text-gray-500' :
     'bg-blue-100 text-blue-700'
 
+  const outerOpenCls   = embed ? 'flex flex-col h-full overflow-hidden bg-white' : 'fixed inset-0 z-50 flex'
+  const panelOpenCls   = embed ? 'flex-1 bg-white flex flex-col overflow-hidden' : 'w-[560px] bg-white h-full flex flex-col shadow-2xl overflow-hidden'
+
   return (
     <>
-    <div className="fixed inset-0 z-50 flex">
-      <div className="flex-1 bg-black/30" onClick={onClose} />
-      <div className="w-[560px] bg-white h-full flex flex-col shadow-2xl overflow-hidden">
+    <div className={outerOpenCls}>
+      {!embed && <div className="flex-1 bg-black/30" onClick={onClose} />}
+      <div className={panelOpenCls}>
 
         {/* Header */}
         <div className="flex items-start justify-between px-5 pt-4 pb-3 border-b border-gray-100 shrink-0">
@@ -3699,167 +3823,126 @@ function ReplyBlock({ reply, rec, cpDeltaColor, cpDeltaLabel, currentMarginPct, 
   )
 }
 
-// ── Active Negotiations View ──────────────────────────────────────────────────
+// ── Active Negotiations View (renders as Supplier Workspace two-pane layout) ──
 function ActiveNegotiationsView({
-  negNeedsResponse, negAwaiting, negReady, inquiries, onOpenInquiry, cpRules, onUpdateCpRules,
+  negNeedsResponse, negAwaiting, negReady, inquiries, onOpenInquiry, cpRules,
+  openInquiryId, onCloseInquiry, onUpdateInquiry, onUpdateGlobalCpRules,
+  onNavigateToPO, isManager, onApprove, onReject,
 }: {
-  negNeedsResponse: typeof REORDER_RECOMMENDATIONS
-  negAwaiting:      typeof REORDER_RECOMMENDATIONS
-  negReady:         typeof REORDER_RECOMMENDATIONS
-  inquiries:        Record<string, InquiryThread>
-  onOpenInquiry:    (id: string) => void
-  cpRules:          CpRulesState
-  onUpdateCpRules:  (r: CpRulesState) => void
+  negNeedsResponse:      typeof REORDER_RECOMMENDATIONS
+  negAwaiting:           typeof REORDER_RECOMMENDATIONS
+  negReady:              typeof REORDER_RECOMMENDATIONS
+  inquiries:             Record<string, InquiryThread>
+  onOpenInquiry:         (id: string) => void
+  cpRules:               CpRulesState
+  onUpdateCpRules:       (r: CpRulesState) => void
+  openInquiryId:         string | null
+  onCloseInquiry:        () => void
+  onUpdateInquiry:       (t: InquiryThread) => void
+  onUpdateGlobalCpRules: (r: CpRulesState) => void
+  onNavigateToPO?:       (poId: string) => void
+  isManager?:            boolean
+  onApprove?:            () => void
+  onReject?:             () => void
 }) {
-  const [cpSettingsOpen, setCpSettingsOpen] = useState(false)
-  const sections = [
-    {
-      key: 'needs',
-      title: 'Needs your response',
-      items: negNeedsResponse,
-      borderCls: 'border-amber-200',
-      bgCls: 'bg-amber-50',
-      headerCls: 'text-amber-700',
-      emptyText: 'No items needing response',
-      btnCls: 'bg-amber-500 text-white hover:bg-amber-600',
-      btnLabel: 'Review reply',
-    },
-    {
-      key: 'awaiting',
-      title: 'Awaiting supplier',
-      items: negAwaiting,
-      borderCls: 'border-blue-200',
-      bgCls: 'bg-blue-50/30',
-      headerCls: 'text-blue-700',
-      emptyText: 'No items awaiting reply',
-      btnCls: 'border border-gray-200 text-gray-600 hover:bg-gray-50',
-      btnLabel: 'View thread',
-    },
-    {
-      key: 'ready',
-      title: 'Ready to progress',
-      items: negReady,
-      borderCls: 'border-green-200',
-      bgCls: 'bg-green-50/30',
-      headerCls: 'text-green-700',
-      emptyText: 'No items ready to progress',
-      btnCls: 'bg-green-600 text-white hover:bg-green-700',
-      btnLabel: 'Proceed',
-    },
-  ]
+  const [filterText, setFilterText] = useState('')
+
+  // Combine the three buckets into a single flat list with section ids preserved.
+  const allItems = useMemo(() => {
+    const buckets: Array<{ sectionId: 'needs' | 'awaiting' | 'ready'; items: typeof REORDER_RECOMMENDATIONS }> = [
+      { sectionId: 'needs',    items: negNeedsResponse },
+      { sectionId: 'awaiting', items: negAwaiting      },
+      { sectionId: 'ready',    items: negReady         },
+    ]
+    return buckets.flatMap(b => b.items.map(p => ({ sectionId: b.sectionId, p })))
+  }, [negNeedsResponse, negAwaiting, negReady])
+
+  const filtered = useMemo(() => {
+    const q = filterText.trim().toLowerCase()
+    if (!q) return allItems
+    return allItems.filter(({ p }) =>
+      p.name.toLowerCase().includes(q) ||
+      p.supplier.toLowerCase().includes(q) ||
+      p.sku.toLowerCase().includes(q)
+    )
+  }, [allItems, filterText])
+
+  const workspaceItems: WorkspaceListItem[] = filtered.map(({ sectionId, p }) => {
+    const thread    = inquiries[p.id]
+    const lastRound = thread?.rounds[thread.rounds.length - 1]
+    const lastReply = lastRound?.supplierReply
+    const sentDays  = lastRound?.sentAt
+      ? Math.floor((Date.now() - new Date(lastRound.sentAt).getTime()) / 86400000)
+      : null
+    const nsCfg = thread ? NEG_STATUS_CFG[thread.status] : null
+    return {
+      id:        p.id,
+      sectionId,
+      selected:  openInquiryId === p.id,
+      onSelect:  () => onOpenInquiry(p.id),
+      title:     p.name,
+      subtitle:  <>
+        <div className="text-gray-500 truncate">{p.supplier}</div>
+        {lastReply && (
+          <div className="text-gray-400 italic truncate">{lastReply.rawText.split('\n').filter(l => l.trim())[0] ?? ''}</div>
+        )}
+      </>,
+      meta: <>
+        <span>Round {lastRound?.roundNumber ?? 1} of {cpRules.maxRounds}</span>
+        <span className="mx-1 text-gray-300">·</span>
+        <span>£{p.costPrice.toFixed(2)} → £{calcRequestedCP(p.costPrice, 1).toFixed(2)}</span>
+        {sentDays !== null && sectionId === 'awaiting' && (
+          <span className="ml-auto inline-flex px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded-full text-[9px] font-semibold">
+            {sentDays}d waiting
+          </span>
+        )}
+      </>,
+      badge: nsCfg ? (
+        <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-semibold border ${nsCfg.bg} ${nsCfg.text} ${nsCfg.border} shrink-0`}>
+          <span className={`w-1 h-1 rounded-full ${nsCfg.dot}`} />{nsCfg.label}
+        </span>
+      ) : null,
+    }
+  })
+
+  const sectionLabels: Record<string, string> = {
+    needs:    'Needs your response',
+    awaiting: 'Awaiting supplier',
+    ready:    'Ready to progress',
+  }
+
+  const selectedRec = openInquiryId ? REORDER_RECOMMENDATIONS.find(r => r.id === openInquiryId) : null
+
+  const rightPane = selectedRec ? (
+    <InquiryDrawer
+      embed
+      rec={selectedRec}
+      thread={inquiries[selectedRec.id]}
+      onClose={onCloseInquiry}
+      onUpdate={onUpdateInquiry}
+      isManager={isManager}
+      onApprove={onApprove}
+      onReject={onReject}
+      globalCpRules={cpRules}
+      onUpdateGlobalCpRules={onUpdateGlobalCpRules}
+      onNavigateToPO={onNavigateToPO}
+    />
+  ) : null
 
   return (
-    <div className="space-y-6">
-
-      {/* CP Rule Defaults settings */}
-      <div className="border border-indigo-100 rounded-xl overflow-hidden">
-        <button
-          onClick={() => setCpSettingsOpen(o => !o)}
-          className="w-full flex items-center justify-between px-4 py-2.5 bg-indigo-50 hover:bg-indigo-100 transition-colors text-left"
-        >
-          <span className="text-xs font-semibold text-indigo-600">CP Rule Defaults</span>
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] text-indigo-400">–{cpRules.openingAskPct}% ask · +{cpRules.escalateIfPct}% escalate · {cpRules.maxRounds} rounds</span>
-            <ChevronDown className={`w-3.5 h-3.5 text-indigo-400 transition-transform ${cpSettingsOpen ? 'rotate-180' : ''}`} />
-          </div>
-        </button>
-        {cpSettingsOpen && (
-          <div className="px-4 py-3 bg-white grid grid-cols-3 gap-3">
-            <div>
-              <label className="text-[10px] text-indigo-400 block mb-1">Opening ask (–%)</label>
-              <input
-                type="number" min={0} max={30}
-                value={cpRules.openingAskPct}
-                onChange={e => onUpdateCpRules({ ...cpRules, openingAskPct: Number(e.target.value) })}
-                className="w-full h-7 rounded-lg border border-indigo-200 px-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-400"
-              />
-            </div>
-            <div>
-              <label className="text-[10px] text-indigo-400 block mb-1">Escalate if &gt; (%)</label>
-              <input
-                type="number" min={0} max={50}
-                value={cpRules.escalateIfPct}
-                onChange={e => onUpdateCpRules({ ...cpRules, escalateIfPct: Number(e.target.value) })}
-                className="w-full h-7 rounded-lg border border-indigo-200 px-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-400"
-              />
-            </div>
-            <div>
-              <label className="text-[10px] text-indigo-400 block mb-1">Max rounds</label>
-              <input
-                type="number" min={1} max={10}
-                value={cpRules.maxRounds}
-                onChange={e => onUpdateCpRules({ ...cpRules, maxRounds: Number(e.target.value) })}
-                className="w-full h-7 rounded-lg border border-indigo-200 px-2 text-xs font-bold text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-400"
-              />
-            </div>
-          </div>
-        )}
-      </div>
-
-      {sections.map(sec => (
-        <div key={sec.key}>
-          <div className={`flex items-center gap-2 mb-3 px-1`}>
-            <span className={`text-xs font-bold ${sec.headerCls}`}>{sec.title}</span>
-            <span className="text-[10px] text-gray-400 font-medium">({sec.items.length})</span>
-          </div>
-          {sec.items.length === 0 ? (
-            <div className="text-xs text-gray-400 italic px-1">{sec.emptyText}</div>
-          ) : (
-            <div className="space-y-2">
-              {sec.items.map(p => {
-                const thread = inquiries[p.id]
-                if (!thread) return null
-                const lastRound = thread.rounds[thread.rounds.length - 1]
-                const lastReply = lastRound?.supplierReply
-                const sentDays  = lastRound?.sentAt
-                  ? Math.floor((Date.now() - new Date(lastRound.sentAt).getTime()) / 86400000)
-                  : null
-                const nsCfg = NEG_STATUS_CFG[thread.status]
-                return (
-                  <div key={p.id} className={`rounded-xl border p-4 ${sec.borderCls} ${sec.bgCls}`}>
-                    {/* Row 1 */}
-                    <div className="flex items-center gap-2 mb-2">
-                      <img src={p.imageUrl} className="w-9 h-9 rounded object-cover shrink-0" alt="" />
-                      <div className="min-w-0 flex-1">
-                        <div className="text-xs font-bold text-gray-900 truncate">{p.name}</div>
-                        <div className="text-[10px] text-gray-400">{p.sku}</div>
-                      </div>
-                      <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-semibold border ${nsCfg.bg} ${nsCfg.text} ${nsCfg.border} shrink-0`}>
-                        <span className={`w-1 h-1 rounded-full ${nsCfg.dot}`} />{nsCfg.label}
-                      </span>
-                    </div>
-                    {/* Row 2 */}
-                    <div className="flex items-center gap-3 mb-1 text-[10px] text-gray-500">
-                      <span>Round {lastRound?.roundNumber ?? 1} of {cpRules.maxRounds} max</span>
-                      <span>·</span>
-                      <span>CP: £{p.costPrice.toFixed(2)} → target £{calcRequestedCP(p.costPrice, 1).toFixed(2)}</span>
-                      {sentDays !== null && sec.key === 'awaiting' && (
-                        <span className="ml-auto px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-[9px] font-semibold">
-                          {sentDays}d waiting
-                        </span>
-                      )}
-                    </div>
-                    {/* Row 3 */}
-                    {lastReply && (
-                      <div className="text-[10px] text-gray-400 italic mb-2 line-clamp-1">
-                        {lastReply.rawText.split('\n').filter(l => l.trim())[0] ?? ''}
-                      </div>
-                    )}
-                    {/* Row 4 */}
-                    <button
-                      onClick={() => onOpenInquiry(p.id)}
-                      className={`w-full h-7 text-[10px] font-semibold rounded-lg transition-colors ${sec.btnCls}`}
-                    >
-                      {sec.btnLabel}
-                    </button>
-                  </div>
-                )
-              })}
-            </div>
-          )}
-        </div>
-      ))}
-    </div>
+    <SupplierWorkspaceLayout
+      title="Active Negotiations"
+      count={allItems.length}
+      filter={filterText}
+      onFilterChange={setFilterText}
+      filterPlaceholder="Filter by product, supplier, SKU…"
+      items={workspaceItems}
+      sectionLabels={sectionLabels}
+      emptyListText="No active negotiations."
+      emptyRightTitle="Select a negotiation"
+      emptyRightSubtitle="Pick an item from the left to review the supplier reply and decide the next step."
+      rightPane={rightPane}
+    />
   )
 }
 
@@ -5373,12 +5456,17 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
             onOpenInquiry={id => setOpenInquiryId(id)}
             cpRules={globalCpRules}
             onUpdateCpRules={setGlobalCpRules}
+            openInquiryId={openInquiryId}
+            onCloseInquiry={() => setOpenInquiryId(null)}
+            onUpdateInquiry={t => setInquiries(prev => ({ ...prev, [t.recId]: t }))}
+            onUpdateGlobalCpRules={setGlobalCpRules}
+            onNavigateToPO={onNavigateToPO}
           />
         )}
       </div>
 
-      {/* Inquiry drawer */}
-      {openInquiryId && (() => {
+      {/* Floating Inquiry drawer — used only when opened from Recommendations sub-view (row-level Supplier Inquiry button) */}
+      {recoSubView === 'recommendations' && openInquiryId && (() => {
         const rec = REORDER_RECOMMENDATIONS.find(r => r.id === openInquiryId)
         if (!rec) return null
         return (
@@ -6274,19 +6362,36 @@ function ManagerReorderView() {
         </div>
         </>)}
 
-        {mgrSubView === 'negotiations' && (
-          <ActiveNegotiationsView
-            negNeedsResponse={mgrNegNeedsResponse}
-            negAwaiting={mgrNegAwaiting}
-            negReady={mgrNegReady}
-            inquiries={inquiries}
-            onOpenInquiry={id => setOpenInquiryId(id)}
-            cpRules={mgrCpRules}
-            onUpdateCpRules={setMgrCpRules}
-          />
-        )}
+        {mgrSubView === 'negotiations' && (() => {
+          const rec = openInquiryId ? REORDER_RECOMMENDATIONS.find(r => r.id === openInquiryId) : null
+          return (
+            <ActiveNegotiationsView
+              negNeedsResponse={mgrNegNeedsResponse}
+              negAwaiting={mgrNegAwaiting}
+              negReady={mgrNegReady}
+              inquiries={inquiries}
+              onOpenInquiry={id => setOpenInquiryId(id)}
+              cpRules={mgrCpRules}
+              onUpdateCpRules={setMgrCpRules}
+              openInquiryId={openInquiryId}
+              onCloseInquiry={() => setOpenInquiryId(null)}
+              onUpdateInquiry={t => setInquiries(prev => ({ ...prev, [t.recId]: t }))}
+              onUpdateGlobalCpRules={setMgrCpRules}
+              isManager={true}
+              onApprove={rec ? () => {
+                approve(rec.id)
+                setOpenInquiryId(null)
+                showMgrToast(`${rec.name} approved.`)
+              } : undefined}
+              onReject={rec ? () => {
+                setRejectOpen(o => ({ ...o, [rec.id]: true }))
+                setOpenInquiryId(null)
+              } : undefined}
+            />
+          )
+        })()}
       </div>
-      {openInquiryId && (() => {
+      {mgrSubView === 'recommendations' && openInquiryId && (() => {
         const rec = REORDER_RECOMMENDATIONS.find(r => r.id === openInquiryId)
         if (!rec) return null
         return (
@@ -7696,10 +7801,8 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg: _onNavigateToNeg }: 
           const triggerIsExpanded  = !!(drawerCardKey && triggerExpanded[drawerCardKey])
 
           // ── State → visual mapping ───────────────────────────────────────
-          const stateBar   = { 'agent-drafted': 'bg-purple-500', 'decision-needed': 'bg-red-500', 'awaiting-reply': 'bg-gray-300', 'reply-received': 'bg-blue-500', 'no-reply-overdue': 'bg-amber-500', 'snoozed': 'bg-gray-200' }
           const statePillCls = { 'agent-drafted': 'bg-purple-100 text-purple-700', 'decision-needed': 'bg-red-100 text-red-700', 'awaiting-reply': 'bg-gray-100 text-gray-500', 'reply-received': 'bg-blue-100 text-blue-700', 'no-reply-overdue': 'bg-amber-100 text-amber-700', 'snoozed': 'bg-gray-100 text-gray-400' }
           const statePillLbl = { 'agent-drafted': 'Agent drafted', 'decision-needed': 'Decision needed', 'awaiting-reply': 'Awaiting reply', 'reply-received': 'Reply received', 'no-reply-overdue': 'No reply — overdue', 'snoozed': 'Snoozed' }
-          const stateCTA     = { 'agent-drafted': 'Review draft', 'decision-needed': 'Make decision', 'awaiting-reply': 'View thread', 'reply-received': 'Review reply', 'no-reply-overdue': 'No reply — act', 'snoozed': 'Unsnoozed' }
           const actionTypeLbl = (g: ActionGroup) => g.type === 'overdue' ? 'Chase' : g.type === 'at_risk' ? 'Approve date change' : 'Confirm DC booking'
           const actionTypeCls = (g: ActionGroup) => g.type === 'overdue' ? 'bg-red-50 text-red-600' : g.type === 'at_risk' ? 'bg-orange-50 text-orange-600' : 'bg-amber-50 text-amber-600'
 
@@ -7785,15 +7888,20 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg: _onNavigateToNeg }: 
               </div>
             </div>
 
-            {/* ── Queue + Drawer ─────────────────────────────────────────── */}
-            <div className="relative flex gap-0 min-h-[500px]">
-              {/* Queue */}
-              <div className={`flex-1 space-y-1 transition-opacity duration-200 ${drawerCardKey ? 'opacity-40 pointer-events-none select-none' : ''}`}>
+            {/* ── Supplier Workspace: left rail (compact action list) + right pane (existing drawer body) ── */}
+            <div className="flex flex-col lg:flex-row gap-0 h-[calc(100vh-340px)] min-h-[640px] border border-gray-200 rounded-2xl overflow-hidden bg-white">
+              {/* LEFT RAIL — Actions queue */}
+              <div className="w-full lg:w-[300px] lg:shrink-0 lg:border-r border-gray-100 flex flex-col bg-gray-50/40">
+                <div className="px-4 py-3 border-b border-gray-100 shrink-0 flex items-baseline justify-between">
+                  <span className="text-xs font-bold text-gray-900">Actions</span>
+                  <span className="text-[10px] text-gray-400 font-medium">{withHeaders.length}</span>
+                </div>
+                <div className="flex-1 overflow-y-auto py-2 px-2 space-y-1">
                 {withHeaders.length === 0 && (
-                  <div className="flex flex-col items-center justify-center py-20 text-gray-400">
-                    <Check className="w-10 h-10 mb-3 text-green-300" />
-                    <p className="text-sm font-semibold">No actions match the current filters</p>
-                    <p className="text-xs mt-1">Adjust filters above or check back later</p>
+                  <div className="flex flex-col items-center justify-center py-20 text-gray-400 px-4">
+                    <Check className="w-8 h-8 mb-2 text-green-300" />
+                    <p className="text-xs font-semibold text-center">No actions match the current filters</p>
+                    <p className="text-[10px] mt-1 text-center">Adjust filters above or check back later</p>
                   </div>
                 )}
                 {withHeaders.map(({ g, showHeader }) => {
@@ -7805,72 +7913,55 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg: _onNavigateToNeg }: 
                     <div key={ck}>
                       {/* Supplier divider header */}
                       {showHeader && (
-                        <div className="flex items-center gap-3 pt-3 pb-1 px-1">
-                          <div className="w-5 h-5 rounded-md bg-indigo-100 flex items-center justify-center shrink-0">
-                            <Building2 className="w-3 h-3 text-indigo-600" />
-                          </div>
-                          <span className="text-xs font-bold text-gray-700">{sup?.name ?? g.supplierId}</span>
+                        <div className="flex items-center gap-1.5 pt-2 pb-1 px-2 flex-wrap">
+                          <Building2 className="w-3 h-3 text-indigo-500 shrink-0" />
+                          <span className="text-[10px] font-bold text-gray-700 truncate">{sup?.name ?? g.supplierId}</span>
                           {sup && (() => {
                             const pat = getRelationshipPattern(sup)
-                            if (pat === 'structural') return <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-700">Structural underperformer</span>
-                            if (pat === 'concentration') return <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">High concentration &middot; {sup.openPOs} open POs</span>
+                            if (pat === 'structural') return <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-red-100 text-red-700">Structural underperformer</span>
+                            if (pat === 'concentration') return <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">High concentration</span>
                             return null
                           })()}
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            {sup && (
-                              <>
-                                <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${sup.onTimeRate >= 80 ? 'bg-green-50 text-green-700 border-green-100' : sup.onTimeRate >= 70 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'}`}>OTR {sup.onTimeRate}%</span>
-                                <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${sup.avgDelayDays > 7 ? 'bg-red-50 text-red-700 border-red-100' : sup.avgDelayDays > 3 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-gray-100 text-gray-600 border-gray-200'}`}>Avg delay {sup.avgDelayDays}d</span>
-                                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full border bg-gray-100 text-gray-600 border-gray-200">{sup.openPOs} open POs</span>
-                              </>
-                            )}
-                          </div>
                         </div>
                       )}
-                      {/* Action card */}
-                      <div
+                      {/* Action card — compact rail variant */}
+                      <button
                         onClick={() => setDrawerCardKey(isOpen ? null : ck)}
-                        className={`relative flex items-stretch bg-white border rounded-xl shadow-sm cursor-pointer transition-all hover:shadow-md ${isOpen ? 'border-indigo-300 ring-2 ring-indigo-200' : 'border-gray-100'} ${state === 'snoozed' ? 'opacity-50' : ''}`}
+                        className={`w-full text-left rounded-lg border-l-2 transition-colors px-3 py-2 ${
+                          isOpen
+                            ? 'bg-white border-l-indigo-500 shadow-[0_1px_2px_rgba(0,0,0,0.04)] border-r border-r-gray-200 border-t border-t-gray-200 border-b border-b-gray-200'
+                            : 'bg-white/0 border-l-transparent hover:bg-white'
+                        } ${state === 'snoozed' ? 'opacity-50' : ''}`}
                       >
-                        {/* Left colour bar */}
-                        <div className={`w-1 rounded-l-xl shrink-0 ${stateBar[state]}`} />
-                        <div className="flex-1 p-4 min-w-0">
-                          <div className="flex items-center gap-2 mb-2 flex-wrap">
-                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${statePillCls[state]}`}>{statePillLbl[state]}</span>
-                            <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-md ${actionTypeCls(g)}`}>{actionTypeLbl(g)}</span>
-                          </div>
-                          <div className="text-sm font-bold text-gray-900 mb-0.5">{headline(g)}</div>
-                          <div className="text-xs text-gray-500 mb-1.5">
-                            {g.pos.length <= 2
-                              ? g.pos.map(p => p.id).join(', ')
-                              : `${g.pos[0].id}, ${g.pos[1].id} +${g.pos.length - 2} more`
-                            }
-                          </div>
-                          <div className="text-xs text-gray-400 italic">{agentRec(g, state)}</div>
+                        <div className="flex items-center gap-1.5 mb-1 flex-wrap">
+                          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${statePillCls[state]}`}>{statePillLbl[state]}</span>
+                          <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded ${actionTypeCls(g)}`}>{actionTypeLbl(g)}</span>
                         </div>
-                        <div className="flex flex-col items-end justify-between p-4 shrink-0 gap-3">
-                          <button
-                            onClick={e => { e.stopPropagation(); setDrawerCardKey(isOpen ? null : ck) }}
-                            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors whitespace-nowrap ${state === 'agent-drafted' ? 'bg-purple-600 hover:bg-purple-700 text-white' : state === 'decision-needed' ? 'bg-red-600 hover:bg-red-700 text-white' : state === 'reply-received' ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}
-                          >{stateCTA[state]}</button>
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={e => { e.stopPropagation(); setSnoozedCards(prev => { const n = new Set(prev); n.has(ck) ? n.delete(ck) : n.add(ck); return n }) }}
-                              className="text-[10px] text-gray-400 hover:text-gray-600 font-medium transition-colors"
-                            >{snoozedCards.has(ck) ? 'Unsnooze' : 'Snooze 3d'}</button>
-                          </div>
+                        <div className="text-[11px] font-semibold text-gray-900 mb-0.5 leading-snug line-clamp-2">{headline(g)}</div>
+                        <div className="text-[10px] text-gray-500 mb-1 truncate">
+                          {g.pos.length <= 2
+                            ? g.pos.map(p => p.id).join(', ')
+                            : `${g.pos[0].id}, ${g.pos[1].id} +${g.pos.length - 2} more`
+                          }
                         </div>
-                      </div>
+                        <div className="text-[10px] text-gray-400 italic line-clamp-2">{agentRec(g, state)}</div>
+                        <div className="flex items-center justify-end mt-1.5">
+                          <span
+                            onClick={e => { e.stopPropagation(); setSnoozedCards(prev => { const n = new Set(prev); n.has(ck) ? n.delete(ck) : n.add(ck); return n }) }}
+                            className="text-[9px] text-gray-400 hover:text-gray-600 font-medium transition-colors cursor-pointer"
+                          >{snoozedCards.has(ck) ? 'Unsnooze' : 'Snooze 3d'}</span>
+                        </div>
+                      </button>
                     </div>
                   )
                 })}
+                </div>
               </div>
 
-              {/* ── Drawer ────────────────────────────────────────────────── */}
-              {drawerCardKey && drawerGroup && drawerSup && (
+              {/* ── RIGHT PANE: Drawer content (verbatim) or empty state ────── */}
+              {drawerCardKey && drawerGroup && drawerSup ? (
                 <div
-                  className="fixed top-0 right-0 bottom-0 bg-white border-l border-gray-100 shadow-2xl flex flex-col z-40 overflow-hidden transition-[width] duration-200 ease-out"
-                  style={{ width: drawerView === 'action' ? 520 : 640 }}
+                  className="flex-1 bg-white flex flex-col overflow-hidden"
                   onKeyDown={e => { if (e.key === 'Escape') { if (drawerView === 'po-detail') { setDrawerView('action'); setDrawerViewPOId(null) } else setDrawerCardKey(null) } }}
                 >
                   {/* Drawer header */}
@@ -8911,9 +9002,15 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg: _onNavigateToNeg }: 
 
                   </div>{/* end drawer body flex-1 */}
                 </div>
+              ) : (
+                <div className="flex-1 flex flex-col items-center justify-center px-6 text-center bg-white">
+                  <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center mb-3">
+                    <MessageSquare className="w-5 h-5 text-gray-400" />
+                  </div>
+                  <div className="text-sm font-semibold text-gray-700 mb-1">Select an action</div>
+                  <div className="text-xs text-gray-400 max-w-xs">Pick an action from the left to review the recommendation and respond to the supplier.</div>
+                </div>
               )}
-              {/* Backdrop click to close drawer */}
-              {drawerCardKey && <div className="fixed inset-0 z-30 bg-black/10" onClick={() => setDrawerCardKey(null)} />}
             </div>
           </>
           )
