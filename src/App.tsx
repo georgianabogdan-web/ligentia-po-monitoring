@@ -120,6 +120,64 @@ interface TriggerMessage {
 }
 interface ActionGroup { supplierId: string; type: 'overdue' | 'at_risk' | 'late_dc'; pos: PO[]; triggerMessage?: TriggerMessage }
 
+// ── Shared action-card primitives (used by PO Monitoring rail + Home overview) ──
+type ActionCardState = 'agent-drafted' | 'decision-needed' | 'awaiting-reply' | 'reply-received' | 'no-reply-overdue' | 'snoozed'
+
+const ACTION_STATE_PILL_CLS: Record<ActionCardState, string> = {
+  'agent-drafted':    'bg-purple-100 text-purple-700',
+  'decision-needed':  'bg-red-100 text-red-700',
+  'awaiting-reply':   'bg-gray-100 text-gray-500',
+  'reply-received':   'bg-blue-100 text-blue-700',
+  'no-reply-overdue': 'bg-amber-100 text-amber-700',
+  'snoozed':          'bg-gray-100 text-gray-400',
+}
+const ACTION_STATE_PILL_LBL: Record<ActionCardState, string> = {
+  'agent-drafted':    'Agent drafted',
+  'decision-needed':  'Decision needed',
+  'awaiting-reply':   'Awaiting reply',
+  'reply-received':   'Reply received',
+  'no-reply-overdue': 'No reply — overdue',
+  'snoozed':          'Snoozed',
+}
+
+const actionCardKey   = (g: ActionGroup) => `${g.supplierId}-${g.type}`
+const actionTypeLbl   = (g: ActionGroup) => g.type === 'overdue' ? 'Chase' : g.type === 'at_risk' ? 'Approve date change' : 'Confirm DC booking'
+const actionTypeCls   = (g: ActionGroup) => g.type === 'overdue' ? 'bg-red-50 text-red-600' : g.type === 'at_risk' ? 'bg-orange-50 text-orange-600' : 'bg-amber-50 text-amber-600'
+const parseOrderValAt = (v: string) => parseInt(v.replace(/[^0-9]/g, '')) || 0
+const daysOverdueAt   = (po: PO, today: Date) => Math.ceil((today.getTime() - new Date(po.expectedDelivery).getTime()) / 86400000)
+const actionUrgWt     = (g: ActionGroup) => g.type === 'overdue' ? 3 : g.type === 'at_risk' ? 2 : 1
+const actionScore     = (g: ActionGroup) => actionUrgWt(g) * g.pos.reduce((s, p) => s + parseOrderValAt(p.orderValue), 0)
+
+function actionHeadline(g: ActionGroup, today: Date): string {
+  const totalVal = g.pos.reduce((s, p) => s + parseOrderValAt(p.orderValue), 0)
+  const valStr = totalVal > 0 ? ` · £${totalVal.toLocaleString()} at risk` : ''
+  if (g.type === 'overdue') return `${g.pos.length} PO${g.pos.length > 1 ? 's' : ''} overdue by up to ${Math.max(...g.pos.map(p => daysOverdueAt(p, today)))} days${valStr}`
+  if (g.type === 'at_risk') return `${g.pos.length} date change${g.pos.length > 1 ? 's' : ''} requested${valStr}`
+  return `${g.pos.length} PO${g.pos.length > 1 ? 's' : ''} with unconfirmed DC booking${valStr}`
+}
+function actionAgentRec(g: ActionGroup, state: ActionCardState, today: Date): string {
+  if (state === 'awaiting-reply') return 'Waiting for supplier response — no action needed'
+  if (state === 'reply-received') return 'Agent summary: supplier replied — review proposed date changes'
+  if (state === 'decision-needed') return `Agent observation: ${Math.max(...g.pos.map(p => daysOverdueAt(p, today)))}d late — cancellation or CPR may recover margin`
+  if (g.type === 'overdue') return `Agent recommends: urgent chase covering ${g.pos.length > 1 ? 'all ' + g.pos.length + ' orders' : 'this order'}`
+  if (g.type === 'at_risk') return 'Agent recommends: request root cause and revised schedule'
+  return 'Agent recommends: confirm freight forwarder booking reference'
+}
+function relativeTimeFrom(iso: string | undefined, now: Date): string {
+  if (!iso) return ''
+  const then = new Date(iso).getTime()
+  const diffMs = now.getTime() - then
+  const mins  = Math.round(diffMs / 60000)
+  if (mins < 1)       return 'just now'
+  if (mins < 60)      return `${mins}m ago`
+  const hrs   = Math.round(mins / 60)
+  if (hrs < 24)       return `${hrs}h ago`
+  const days  = Math.round(hrs / 24)
+  if (days < 14)      return `${days}d ago`
+  const wks   = Math.round(days / 7)
+  return `${wks}w ago`
+}
+
 interface POEvent {
   id:        string
   type:      POEventType
@@ -829,6 +887,199 @@ function SupplierWorkspaceLayout({
   )
 }
 
+// ── ActionQueueCard — Home-page list of top PO Monitoring actions ─────────────
+function ActionQueueCard({
+  onOpenAction,
+  onViewAll,
+}: {
+  onOpenAction: (cardKey: string) => void
+  onViewAll:    () => void
+}) {
+  const today = new Date()
+
+  // Same classification rule as POMonitoringView — single source of truth on ALL_POS.
+  const classifyForOverview = (po: PO): 'overdue' | 'at_risk' | 'late_dc' | 'on_track' => {
+    if (po.status === 'Ex-factory delay')     return 'overdue'
+    if (po.status === 'Date change required') return 'at_risk'
+    if (po.status === 'Late DC booking')      return 'late_dc'
+    return 'on_track'
+  }
+  const overduePOs     = ALL_POS.filter(p => classifyForOverview(p) === 'overdue')
+  const atRiskPOs      = ALL_POS.filter(p => classifyForOverview(p) === 'at_risk')
+  const preDispatchPOs = ALL_POS.filter(p => classifyForOverview(p) === 'late_dc')
+
+  const makeGroups = (pos: PO[], type: ActionGroup['type']): ActionGroup[] => {
+    const bySupplier = pos.reduce((acc, po) => { acc[po.supplierId] = [...(acc[po.supplierId] ?? []), po]; return acc }, {} as Record<string, PO[]>)
+    return Object.entries(bySupplier).map(([supplierId, ps]) => ({ supplierId, type, pos: ps }))
+  }
+  const actionGroups: ActionGroup[] = [
+    ...makeGroups(overduePOs,     'overdue'),
+    ...makeGroups(atRiskPOs,      'at_risk'),
+    ...makeGroups(preDispatchPOs, 'late_dc'),
+  ]
+
+  // Without access to chaseThreads (those live in PO Monitoring), state defaults
+  // to 'decision-needed' for severely overdue overdue groups and 'agent-drafted' otherwise.
+  const stateOf = (g: ActionGroup): ActionCardState => {
+    if (g.type === 'overdue' && Math.max(...g.pos.map(p => daysOverdueAt(p, today))) >= 14) return 'decision-needed'
+    return 'agent-drafted'
+  }
+
+  // Sort: decision-needed first, then overdue, at_risk, late_dc — within each tier, by value at risk.
+  const tierRank = (g: ActionGroup, s: ActionCardState): number => {
+    if (s === 'decision-needed') return 0
+    if (g.type === 'overdue')    return 1
+    if (g.type === 'at_risk')    return 2
+    return 3
+  }
+  const sorted = [...actionGroups].sort((a, b) => {
+    const sa = stateOf(a), sb = stateOf(b)
+    const ta = tierRank(a, sa), tb = tierRank(b, sb)
+    if (ta !== tb) return ta - tb
+    return actionScore(b) - actionScore(a)
+  })
+
+  const decisionsCount = actionGroups.filter(g => stateOf(g) === 'decision-needed').length
+  const top5    = sorted.slice(0, 5)
+  const overflow = Math.max(0, sorted.length - 5)
+
+  if (actionGroups.length === 0) {
+    return (
+      <div id="action-queue" className="bg-white border border-gray-100 rounded-xl shadow-sm">
+        <div className="px-5 py-4 border-b border-gray-100">
+          <div className="text-sm font-bold text-gray-900">Needs your attention</div>
+          <div className="text-[11px] text-gray-500 mt-0.5">No actions in PO Monitoring</div>
+        </div>
+        <div className="flex flex-col items-center justify-center py-10 text-gray-400">
+          <div className="w-10 h-10 rounded-full bg-green-50 border border-green-100 flex items-center justify-center mb-2">
+            <Check className="w-4 h-4 text-green-500" />
+          </div>
+          <p className="text-xs font-semibold text-gray-700">All clear.</p>
+          <p className="text-[11px] mt-0.5">No actions need your attention right now.</p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div id="action-queue" className="bg-white border border-gray-100 rounded-xl shadow-sm">
+      <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+        <div>
+          <div className="text-sm font-bold text-gray-900">Needs your attention</div>
+          <div className="text-[11px] text-gray-500 mt-0.5">
+            {actionGroups.length} action{actionGroups.length === 1 ? '' : 's'} in PO Monitoring
+            {decisionsCount > 0 && <> · {decisionsCount} require{decisionsCount === 1 ? 's' : ''} a decision</>}
+          </div>
+        </div>
+        <button
+          onClick={onViewAll}
+          className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 transition-colors"
+        >
+          View all in PO Monitoring →
+        </button>
+      </div>
+      <div className="px-2 py-2 space-y-1">
+        {top5.map(g => {
+          const sup = getSupplier(g.supplierId)
+          const state = stateOf(g)
+          const rel = relativeTimeFrom(g.triggerMessage?.timestamp, today)
+          return (
+            <ActionItemCard
+              key={actionCardKey(g)}
+              group={g}
+              state={state}
+              selected={false}
+              onSelect={() => onOpenAction(actionCardKey(g))}
+              supplier={sup ?? null}
+              showSupplierHeader
+              showAgentRec={false}
+              showSnooze={false}
+              relativeTime={rel || undefined}
+              today={today}
+            />
+          )
+        })}
+        {overflow > 0 && (
+          <button
+            onClick={onViewAll}
+            className="w-full text-center py-2 text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 transition-colors"
+          >
+            +{overflow} more in PO Monitoring →
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Shared ActionItemCard (used by PO Monitoring rail + Home overview) ────────
+function ActionItemCard({
+  group, state, selected, onSelect,
+  supplier, showSupplierHeader = false,
+  showAgentRec = true, showSnooze = false, snoozed = false, onSnoozeToggle,
+  relativeTime, today,
+}: {
+  group:                ActionGroup
+  state:                ActionCardState
+  selected:             boolean
+  onSelect:             () => void
+  supplier?:            Supplier | null
+  showSupplierHeader?:  boolean
+  showAgentRec?:        boolean
+  showSnooze?:          boolean
+  snoozed?:             boolean
+  onSnoozeToggle?:      () => void
+  relativeTime?:        string
+  today:                Date
+}) {
+  const sup = supplier
+  const pat = sup ? getRelationshipPattern(sup) : null
+  return (
+    <button
+      onClick={onSelect}
+      className={`w-full text-left rounded-lg border-l-2 transition-colors px-3 py-2 ${
+        selected
+          ? 'bg-white border-l-indigo-500 shadow-[0_1px_2px_rgba(0,0,0,0.04)] border-r border-r-gray-200 border-t border-t-gray-200 border-b border-b-gray-200'
+          : 'bg-white/0 border-l-transparent hover:bg-white'
+      } ${snoozed ? 'opacity-50' : ''}`}
+    >
+      {showSupplierHeader && sup && (
+        <div className="flex items-center gap-1.5 mb-1 flex-wrap">
+          <Building2 className="w-3 h-3 text-indigo-500 shrink-0" />
+          <span className="text-[10px] font-bold text-gray-700 truncate">{sup.name}</span>
+          {pat === 'structural'    && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-red-100 text-red-700">Structural underperformer</span>}
+          {pat === 'concentration' && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">High concentration</span>}
+        </div>
+      )}
+      <div className="flex items-center gap-1.5 mb-1 flex-wrap">
+        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${ACTION_STATE_PILL_CLS[state]}`}>{ACTION_STATE_PILL_LBL[state]}</span>
+        <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded ${actionTypeCls(group)}`}>{actionTypeLbl(group)}</span>
+      </div>
+      <div className="text-[11px] font-semibold text-gray-900 mb-0.5 leading-snug line-clamp-2">{actionHeadline(group, today)}</div>
+      <div className="text-[10px] text-gray-500 mb-1 truncate">
+        {group.pos.length <= 2
+          ? group.pos.map(p => p.id).join(', ')
+          : `${group.pos[0].id}, ${group.pos[1].id} +${group.pos.length - 2} more`
+        }
+      </div>
+      {showAgentRec && (
+        <div className="text-[10px] text-gray-400 italic line-clamp-2">{actionAgentRec(group, state, today)}</div>
+      )}
+      {(showSnooze || relativeTime) && (
+        <div className="flex items-center justify-between mt-1.5">
+          {relativeTime ? <span className="text-[10px] text-gray-400">{relativeTime}</span> : <span />}
+          {showSnooze && (
+            <span
+              onClick={e => { e.stopPropagation(); onSnoozeToggle?.() }}
+              className="text-[9px] text-gray-400 hover:text-gray-600 font-medium transition-colors cursor-pointer"
+            >{snoozed ? 'Unsnooze' : 'Snooze 3d'}</span>
+          )}
+        </div>
+      )}
+    </button>
+  )
+}
+
 // ── Action Card ────────────────────────────────────────────────────────────────
 function ActionCard({
   item,
@@ -1034,7 +1285,10 @@ function getSubcategory(p: InventoryProduct): string {
 }
 
 // ── Chase Thread Panel ────────────────────────────────────────────────────────
-function AlertDigest() {
+function AlertDigest({ onOpenAction, onViewAllActions }: {
+  onOpenAction?:     (cardKey: string) => void
+  onViewAllActions?: () => void
+}) {
   const [filterCat, setFilterCat]         = useState<Category | ''>('')
   const [filterSubcat, setFilterSubcat]   = useState('')
   const [stockChartUnit, setStockChartUnit] = useState<'value' | 'units' | 'cover'>('value')
@@ -1203,6 +1457,14 @@ function AlertDigest() {
               <span className="flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-red-400 inline-block" />Low Stock: {displayLowStock.toLocaleString()}</span>
             </div>
           </div>
+        </div>
+
+        {/* ── ActionQueueCard — Mark's "managing by exception" surface ─────── */}
+        <div className="pb-2">
+          <ActionQueueCard
+            onOpenAction={cardKey => onOpenAction?.(cardKey)}
+            onViewAll={() => onViewAllActions?.()}
+          />
         </div>
 
         {/* ── Charts row ──────────────────────────────────────────────────── */}
@@ -7148,7 +7410,7 @@ function getDCBookingRecommendation(g: ActionGroup, sup: Supplier): DCBookingRec
 }
 
 // ── PO Monitoring View ────────────────────────────────────────────────────────
-function POMonitoringView({ initialOpenPO, onNavigateToNeg: _onNavigateToNeg }: { initialOpenPO?: string | null; onNavigateToNeg?: (recId: string) => void }) {
+function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _onNavigateToNeg }: { initialOpenPO?: string | null; initialOpenAction?: string | null; onNavigateToNeg?: (recId: string) => void }) {
   const [subTab,           setSubTab]           = useState<'actions' | 'allpos' | 'suppliers' | 'agentlog'>('actions')
   const [poEventsMap,      setPoEventsMap]      = useState<Map<string, POEvent[]>>(new Map(Object.entries(SEED_PO_EVENTS)))
   const [lastChasedMap] = useState<Map<string, string>>(new Map()); void lastChasedMap
@@ -7167,7 +7429,13 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg: _onNavigateToNeg }: 
   const [poSupFilter,      setPoSupFilter]      = useState('all')
   const [settingsAccordion, setSettingsAccordion] = useState<string | null>(null)
   // Actions queue state
-  const [drawerCardKey,    setDrawerCardKey]    = useState<string | null>(null)
+  const [drawerCardKey,    setDrawerCardKey]    = useState<string | null>(initialOpenAction ?? null)
+  useEffect(() => {
+    if (initialOpenAction) {
+      setSubTab('actions')
+      setDrawerCardKey(initialOpenAction)
+    }
+  }, [initialOpenAction])
   const [snoozedCards,     setSnoozedCards]     = useState<Set<string>>(new Set())
   const [actTypeFilter,    setActTypeFilter]    = useState('all')
   const [urgencyFilter,    setUrgencyFilter]    = useState('all')
@@ -7800,27 +8068,10 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg: _onNavigateToNeg }: 
           const drawerTrigger      = drawerGroup?.triggerMessage ?? null
           const triggerIsExpanded  = !!(drawerCardKey && triggerExpanded[drawerCardKey])
 
-          // ── State → visual mapping ───────────────────────────────────────
-          const statePillCls = { 'agent-drafted': 'bg-purple-100 text-purple-700', 'decision-needed': 'bg-red-100 text-red-700', 'awaiting-reply': 'bg-gray-100 text-gray-500', 'reply-received': 'bg-blue-100 text-blue-700', 'no-reply-overdue': 'bg-amber-100 text-amber-700', 'snoozed': 'bg-gray-100 text-gray-400' }
-          const statePillLbl = { 'agent-drafted': 'Agent drafted', 'decision-needed': 'Decision needed', 'awaiting-reply': 'Awaiting reply', 'reply-received': 'Reply received', 'no-reply-overdue': 'No reply — overdue', 'snoozed': 'Snoozed' }
-          const actionTypeLbl = (g: ActionGroup) => g.type === 'overdue' ? 'Chase' : g.type === 'at_risk' ? 'Approve date change' : 'Confirm DC booking'
-          const actionTypeCls = (g: ActionGroup) => g.type === 'overdue' ? 'bg-red-50 text-red-600' : g.type === 'at_risk' ? 'bg-orange-50 text-orange-600' : 'bg-amber-50 text-amber-600'
-
-          const headline = (g: ActionGroup) => {
-            const totalVal = g.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0)
-            const valStr = totalVal > 0 ? ` · £${totalVal.toLocaleString()} at risk` : ''
-            if (g.type === 'overdue') return `${g.pos.length} PO${g.pos.length > 1 ? 's' : ''} overdue by up to ${Math.max(...g.pos.map(p => daysOverdue(p)))} days${valStr}`
-            if (g.type === 'at_risk') return `${g.pos.length} date change${g.pos.length > 1 ? 's' : ''} requested${valStr}`
-            return `${g.pos.length} PO${g.pos.length > 1 ? 's' : ''} with unconfirmed DC booking${valStr}`
-          }
-          const agentRec = (g: ActionGroup, state: string) => {
-            if (state === 'awaiting-reply') return 'Waiting for supplier response — no action needed'
-            if (state === 'reply-received') return 'Agent summary: supplier replied — review proposed date changes'
-            if (state === 'decision-needed') return `Agent observation: ${Math.max(...g.pos.map(p => daysOverdue(p)))}d late — cancellation or CPR may recover margin`
-            if (g.type === 'overdue') return `Agent recommends: urgent chase covering ${g.pos.length > 1 ? 'all ' + g.pos.length + ' orders' : 'this order'}`
-            if (g.type === 'at_risk') return 'Agent recommends: request root cause and revised schedule'
-            return 'Agent recommends: confirm freight forwarder booking reference'
-          }
+          // State → visual mapping pulled from module-level ACTION_STATE_PILL_CLS / _LBL.
+          // The drawer header still uses these via lookups below.
+          const statePillCls  = ACTION_STATE_PILL_CLS
+          const statePillLbl  = ACTION_STATE_PILL_LBL
 
           return (
           <>
@@ -7924,34 +8175,20 @@ function POMonitoringView({ initialOpenPO, onNavigateToNeg: _onNavigateToNeg }: 
                           })()}
                         </div>
                       )}
-                      {/* Action card — compact rail variant */}
-                      <button
-                        onClick={() => setDrawerCardKey(isOpen ? null : ck)}
-                        className={`w-full text-left rounded-lg border-l-2 transition-colors px-3 py-2 ${
-                          isOpen
-                            ? 'bg-white border-l-indigo-500 shadow-[0_1px_2px_rgba(0,0,0,0.04)] border-r border-r-gray-200 border-t border-t-gray-200 border-b border-b-gray-200'
-                            : 'bg-white/0 border-l-transparent hover:bg-white'
-                        } ${state === 'snoozed' ? 'opacity-50' : ''}`}
-                      >
-                        <div className="flex items-center gap-1.5 mb-1 flex-wrap">
-                          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${statePillCls[state]}`}>{statePillLbl[state]}</span>
-                          <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded ${actionTypeCls(g)}`}>{actionTypeLbl(g)}</span>
-                        </div>
-                        <div className="text-[11px] font-semibold text-gray-900 mb-0.5 leading-snug line-clamp-2">{headline(g)}</div>
-                        <div className="text-[10px] text-gray-500 mb-1 truncate">
-                          {g.pos.length <= 2
-                            ? g.pos.map(p => p.id).join(', ')
-                            : `${g.pos[0].id}, ${g.pos[1].id} +${g.pos.length - 2} more`
-                          }
-                        </div>
-                        <div className="text-[10px] text-gray-400 italic line-clamp-2">{agentRec(g, state)}</div>
-                        <div className="flex items-center justify-end mt-1.5">
-                          <span
-                            onClick={e => { e.stopPropagation(); setSnoozedCards(prev => { const n = new Set(prev); n.has(ck) ? n.delete(ck) : n.add(ck); return n }) }}
-                            className="text-[9px] text-gray-400 hover:text-gray-600 font-medium transition-colors cursor-pointer"
-                          >{snoozedCards.has(ck) ? 'Unsnooze' : 'Snooze 3d'}</span>
-                        </div>
-                      </button>
+                      {/* Action card — shared component */}
+                      <ActionItemCard
+                        group={g}
+                        state={state}
+                        selected={isOpen}
+                        onSelect={() => setDrawerCardKey(isOpen ? null : ck)}
+                        supplier={sup}
+                        showSupplierHeader={false}
+                        showAgentRec
+                        showSnooze
+                        snoozed={snoozedCards.has(ck)}
+                        onSnoozeToggle={() => setSnoozedCards(prev => { const n = new Set(prev); n.has(ck) ? n.delete(ck) : n.add(ck); return n })}
+                        today={today}
+                      />
                     </div>
                   )
                 })}
@@ -10206,6 +10443,7 @@ export default function App() {
   const [configMode, setConfigMode] = useState(false)
   const [pendingOpenInquiry, setPendingOpenInquiry] = useState<string | null>(null)
   const [pendingOpenPO, setPendingOpenPO] = useState<string | null>(null)
+  const [pendingOpenAction, setPendingOpenAction] = useState<string | null>(null)
 
   // reset config mode when leaving inventory tab
   const handleTabChange = (t: Tab) => { setTab(t); if (t !== 'inventory') setConfigMode(false) }
@@ -10216,6 +10454,10 @@ export default function App() {
   }
   const handleNavigateToPO = (poId: string) => {
     setPendingOpenPO(poId)
+    handleTabChange('po-monitoring')
+  }
+  const handleNavigateToAction = (cardKey: string | null) => {
+    setPendingOpenAction(cardKey)
     handleTabChange('po-monitoring')
   }
 
@@ -10278,11 +10520,11 @@ export default function App() {
           ))}
         </div>
 
-        {tab === 'alerts'          && <AlertDigest />}
+        {tab === 'alerts'          && <AlertDigest onOpenAction={handleNavigateToAction} onViewAllActions={() => handleNavigateToAction(null)} />}
         {tab === 'inventory'       && <InventoryView configMode={configMode} setConfigMode={setConfigMode} />}
         {tab === 'reorder'         && <ReorderView initialOpenInquiry={pendingOpenInquiry} onNavigateToPO={handleNavigateToPO} />}
         {tab === 'reorder-manager' && <ManagerReorderView />}
-        {tab === 'po-monitoring'   && <POMonitoringView initialOpenPO={pendingOpenPO} onNavigateToNeg={handleNavigateToNeg} />}
+        {tab === 'po-monitoring'   && <POMonitoringView initialOpenPO={pendingOpenPO} initialOpenAction={pendingOpenAction} onNavigateToNeg={handleNavigateToNeg} />}
         {tab === 'replenishment'   && <ReplenishmentView />}
       </div>
     </div>
