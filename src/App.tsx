@@ -1076,6 +1076,71 @@ function ActionCardPills({ group, supplier, size = 'sm' }: {
   )
 }
 
+// ── Shared ActionRecommendationRow — horizontal row of action cards (recommended on left + alternatives) ──
+type ActionOption = {
+  key:         string
+  label:       string
+  consequence: string
+  why?:        string
+  onClick:     () => void
+}
+function ActionRecommendationRow({
+  options,
+  recommendedKey,
+  selectedKey,
+  observation,
+}: {
+  options:        ActionOption[]
+  recommendedKey: string | null  // null = "agent uncertain" case → no recommended emphasis
+  selectedKey?:   string | null
+  observation?:   string         // shown above the row when the agent has no confident recommendation
+}) {
+  if (options.length === 0) return null
+  return (
+    <div className="mb-3">
+      {observation && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 mb-2.5">
+          <p className="text-[11px] text-amber-800 leading-relaxed">
+            <span className="font-bold">Agent observation: </span>{observation}
+          </p>
+        </div>
+      )}
+      <div
+        className="grid gap-2"
+        style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}
+      >
+        {options.map(opt => {
+          const isRecommended = opt.key === recommendedKey
+          const isSelected    = selectedKey === opt.key
+          const cardCls = isSelected
+            ? 'bg-indigo-600 border-indigo-600 text-white'
+            : isRecommended
+              ? 'bg-amber-50 border-amber-300 text-gray-900'
+              : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50 hover:border-gray-300'
+          return (
+            <button
+              key={opt.key}
+              onClick={opt.onClick}
+              className={`rounded-xl border-2 px-3 py-2.5 text-left transition-colors flex flex-col h-full ${cardCls}`}
+            >
+              {isRecommended && (
+                <div className={`text-[9px] font-bold uppercase tracking-wider mb-1 ${isSelected ? 'text-indigo-100' : 'text-amber-700'}`}>
+                  Recommended
+                </div>
+              )}
+              <div className={`text-[12px] font-bold leading-tight ${isSelected ? 'text-white' : 'text-gray-900'}`}>{opt.label}</div>
+              <div className={`text-[10px] mt-1 leading-snug ${isSelected ? 'text-indigo-100' : 'text-gray-500'}`}>{opt.consequence}</div>
+              {isRecommended && opt.why && (
+                <div className={`text-[10px] italic mt-2 leading-snug ${isSelected ? 'text-indigo-100' : 'text-gray-500'}`}>{opt.why}</div>
+              )}
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 // ── Shared LogActivityButton (header button + self-contained popover, used by both supplier workspaces) ──
 function LogActivityButton({
   onSave,
@@ -8710,46 +8775,33 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                   <p className="text-[11px] text-gray-400 mb-3">
                                     {drawerGroup.pos.length} PO{drawerGroup.pos.length > 1 ? 's' : ''} &middot; £{drawerOrderVal.toLocaleString()} at risk &middot; {drawerMaxOverdue}d overdue
                                   </p>
-                                  <div className={`border rounded-xl px-4 py-3 mb-3 ${recBg}`}>
-                                    <p className={`text-[11px] font-bold mb-1 ${recHd}`}>Recommendation: {poRec.primaryLabel.split('(')[0].trim().replace(/\+$/, '').trim()}.</p>
-                                    <p className={`text-[11px] leading-relaxed ${recBody}`}>{poRec.rationale}</p>
-                                  </div>
-                                  <button
-                                    onClick={() => {
-                                      if (poRec.action === 'chase') {
-                                        setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: 'chase' }))
+                                  {(() => {
+                                    void recBg; void recHd; void recBody
+                                    const allOpts = [
+                                      { key: poRec.action, label: poRec.primaryLabel, consequence: poRec.primaryForecast, why: poRec.rationale },
+                                      ...poRec.altOptions.map(o => ({ key: o.key, label: o.label, consequence: o.forecast, why: undefined as string | undefined })),
+                                    ]
+                                    const pickOverdue = (k: string) => {
+                                      if (!drawerCardKey) return
+                                      if (k === 'chase') {
+                                        setSelectedActionPill(prev => ({ ...prev, [drawerCardKey]: 'chase' }))
                                       } else {
-                                        setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: 'decision' }))
-                                        setDrawerDecision(prev => ({ ...prev, [drawerCardKey!]: poRec.action as 'accept_late' | 'cpr' | 'cancel' }))
+                                        setSelectedActionPill(prev => ({ ...prev, [drawerCardKey]: 'decision' }))
+                                        setDrawerDecision(prev => ({ ...prev, [drawerCardKey]: k as 'accept_late' | 'cpr' | 'cancel' }))
                                       }
-                                    }}
-                                    className="w-full rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-3 text-left mb-3 transition-colors"
-                                  >
-                                    <div className="text-[12px] font-bold">{poRec.primaryLabel}</div>
-                                    <div className="text-[10px] text-indigo-200 mt-0.5">{poRec.primaryForecast}</div>
-                                  </button>
-                                  <div className="grid grid-cols-3 gap-2 mb-3">
-                                    {poRec.altOptions.map(opt => (
-                                      <button
-                                        key={opt.key}
-                                        onClick={() => {
-                                          if (opt.key === 'chase') {
-                                            setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: 'chase' }))
-                                          } else {
-                                            setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: 'decision' }))
-                                            setDrawerDecision(prev => ({ ...prev, [drawerCardKey!]: opt.key as 'accept_late' | 'cpr' | 'cancel' }))
-                                          }
-                                        }}
-                                        className="border border-gray-200 rounded-xl px-2 py-2 text-left hover:bg-gray-50 hover:border-gray-300 transition-colors"
-                                      >
-                                        <div className="text-[11px] font-semibold text-gray-700 leading-tight">{opt.label}</div>
-                                        <div className="text-[10px] text-gray-400 mt-0.5 leading-tight">{opt.forecast}</div>
-                                      </button>
-                                    ))}
-                                  </div>
+                                    }
+                                    const selectedKey = drawerCurrentPill === 'chase' ? 'chase' : drawerDecChoice
+                                    return (
+                                      <ActionRecommendationRow
+                                        options={allOpts.map(o => ({ key: o.key, label: o.label, consequence: o.consequence, why: o.why, onClick: () => pickOverdue(o.key) }))}
+                                        recommendedKey={poRec.action}
+                                        selectedKey={selectedKey}
+                                      />
+                                    )
+                                  })()}
                                   <details className="mb-3">
                                     <summary className="text-[11px] text-gray-400 cursor-pointer hover:text-gray-600 select-none">
-                                      ▸ Why this recommendation?
+                                      ▸ Why this recommendation? (signals)
                                     </summary>
                                     <div className="mt-2 space-y-1 pl-3 border-l-2 border-gray-100">
                                       <div className="text-[11px] text-gray-500">OTR: <span className="font-semibold text-gray-700">{drawerSup.onTimeRate}%</span></div>
@@ -8812,32 +8864,27 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                     <p className="text-[11px] text-gray-400 mb-3">
                                       {drawerGroup.pos.length} PO{drawerGroup.pos.length > 1 ? 's' : ''} · £{drawerOrderVal.toLocaleString()} at risk · {daysPushed}-day push requested
                                     </p>
-                                    <div className={`border rounded-xl px-4 py-3 mb-3 ${recBg}`}>
-                                      <p className={`text-[11px] font-bold mb-1 ${recHd}`}>Recommendation: {dateRec.primaryLabel.split('(')[0].trim().replace(/\+$/, '').trim()}.</p>
-                                      <p className={`text-[11px] leading-relaxed ${recBody}`}>{dateRec.rationale}</p>
-                                    </div>
-                                    <button
-                                      onClick={() => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: dateRec.action }))}
-                                      className="w-full rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-3 text-left mb-3 transition-colors"
-                                    >
-                                      <div className="text-[12px] font-bold">{dateRec.primaryLabel}</div>
-                                      <div className="text-[10px] text-indigo-200 mt-0.5">{dateRec.primaryForecast}</div>
-                                    </button>
-                                    <div className="grid grid-cols-2 gap-2 mb-3">
-                                      {dateRec.altOptions.map(opt => (
-                                        <button
-                                          key={opt.key}
-                                          onClick={() => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: opt.key }))}
-                                          className="border border-gray-200 rounded-xl px-2 py-2 text-left hover:bg-gray-50 hover:border-gray-300 transition-colors"
-                                        >
-                                          <div className="text-[11px] font-semibold text-gray-700 leading-tight">{opt.label}</div>
-                                          <div className="text-[10px] text-gray-400 mt-0.5 leading-tight">{opt.forecast}</div>
-                                        </button>
-                                      ))}
-                                    </div>
+                                    {(() => {
+                                      void recBg; void recHd; void recBody
+                                      const allOpts = [
+                                        { key: dateRec.action, label: dateRec.primaryLabel, consequence: dateRec.primaryForecast, why: dateRec.rationale },
+                                        ...dateRec.altOptions.map(o => ({ key: o.key, label: o.label, consequence: o.forecast, why: undefined as string | undefined })),
+                                      ]
+                                      const pickAtRisk = (k: string) => {
+                                        if (!drawerCardKey) return
+                                        setSelectedActionPill(prev => ({ ...prev, [drawerCardKey]: k }))
+                                      }
+                                      return (
+                                        <ActionRecommendationRow
+                                          options={allOpts.map(o => ({ key: o.key, label: o.label, consequence: o.consequence, why: o.why, onClick: () => pickAtRisk(o.key) }))}
+                                          recommendedKey={dateRec.action}
+                                          selectedKey={drawerCurrentPill}
+                                        />
+                                      )
+                                    })()}
                                     <details className="mb-3">
                                       <summary className="text-[11px] text-gray-400 cursor-pointer hover:text-gray-600 select-none">
-                                        ▸ Why this recommendation?
+                                        ▸ Why this recommendation? (signals)
                                       </summary>
                                       <div className="mt-2 space-y-1 pl-3 border-l-2 border-gray-100">
                                         <div className="text-[11px] text-gray-500">OTR: <span className="font-semibold text-gray-700">{drawerSup.onTimeRate}%</span></div>
@@ -8869,38 +8916,35 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                     <p className="text-[11px] text-gray-400 mb-3">
                                       {drawerGroup.pos.length} PO{drawerGroup.pos.length > 1 ? 's' : ''} · £{drawerOrderVal.toLocaleString()} · Booking confirmation overdue
                                     </p>
-                                    <div className={`border rounded-xl px-4 py-3 mb-3 ${recBg}`}>
-                                      <p className={`text-[11px] font-bold mb-1 ${recHd}`}>Recommendation: Investigate root cause.</p>
-                                      <p className={`text-[11px] leading-relaxed ${recBody}`}>
-                                        {drawerSup.name}'s OTR is {drawerSup.onTimeRate}% — a DC booking delay from a structurally unreliable supplier warrants investigation, not just a routine confirmation. A pattern of late bookings may signal deeper dispatch problems.
-                                      </p>
-                                    </div>
-                                    <button
-                                      onClick={() => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: 'alt_slot' }))}
-                                      className="w-full rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-3 text-left mb-3 transition-colors"
-                                    >
-                                      <div className="text-[12px] font-bold">Request dispatch evidence first</div>
-                                      <div className="text-[10px] text-indigo-200 mt-0.5">Request goods-ready confirmation before committing slot · Reduces booking risk</div>
-                                    </button>
-                                    <div className="grid grid-cols-2 gap-2 mb-3">
-                                      <button
-                                        onClick={() => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: 'confirm_booking' }))}
-                                        className="border border-gray-200 rounded-xl px-2 py-2 text-left hover:bg-gray-50 transition-colors"
-                                      >
-                                        <div className="text-[11px] font-semibold text-gray-700 leading-tight">Confirm booking (accept risk)</div>
-                                        <div className="text-[10px] text-gray-400 mt-0.5 leading-tight">Confirms slot at {drawerSup.onTimeRate}% OTR · Reliability risk remains</div>
-                                      </button>
-                                      <button
-                                        onClick={() => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: 'chase' }))}
-                                        className="border border-gray-200 rounded-xl px-2 py-2 text-left hover:bg-gray-50 transition-colors"
-                                      >
-                                        <div className="text-[11px] font-semibold text-gray-700 leading-tight">Chase for update</div>
-                                        <div className="text-[10px] text-gray-400 mt-0.5 leading-tight">Routine follow-up · May not resolve root cause</div>
-                                      </button>
-                                    </div>
+                                    {(() => { void recBg; void recHd; void recBody; return null })()}
+                                    <ActionRecommendationRow
+                                      recommendedKey="alt_slot"
+                                      selectedKey={drawerCurrentPill}
+                                      options={[
+                                        {
+                                          key:         'alt_slot',
+                                          label:       'Request dispatch evidence first',
+                                          consequence: 'Request goods-ready confirmation before committing slot · Reduces booking risk',
+                                          why:         `${drawerSup.name}'s OTR is ${drawerSup.onTimeRate}% — a DC booking delay from a structurally unreliable supplier warrants investigation, not just a routine confirmation.`,
+                                          onClick:     () => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: 'alt_slot' })),
+                                        },
+                                        {
+                                          key:         'confirm_booking',
+                                          label:       'Confirm booking (accept risk)',
+                                          consequence: `Confirms slot at ${drawerSup.onTimeRate}% OTR · Reliability risk remains`,
+                                          onClick:     () => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: 'confirm_booking' })),
+                                        },
+                                        {
+                                          key:         'chase',
+                                          label:       'Chase for update',
+                                          consequence: 'Routine follow-up · May not resolve root cause',
+                                          onClick:     () => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: 'chase' })),
+                                        },
+                                      ]}
+                                    />
                                     <details className="mb-3">
                                       <summary className="text-[11px] text-gray-400 cursor-pointer hover:text-gray-600 select-none">
-                                        ▸ Why this recommendation?
+                                        ▸ Why this recommendation? (signals)
                                       </summary>
                                       <div className="mt-2 space-y-1 pl-3 border-l-2 border-gray-100">
                                         <div className="text-[11px] text-gray-500">OTR: <span className="font-semibold text-gray-700">{drawerSup.onTimeRate}%</span></div>
@@ -8914,7 +8958,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                 )
                               }
 
-                              // Tier 3: highly reliable supplier — transactional
+                              // Tier 3: highly reliable supplier — single recommended action with reason.
                               if (dcTier === 3) {
                                 const primaryPO    = drawerGroup.pos[0]
                                 const dispatchStr  = new Date(primaryPO.expectedDelivery).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
@@ -8922,21 +8966,25 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                   <>
                                     <p className="text-[13px] font-bold text-gray-900 mb-0.5">Confirm the DC booking with {drawerSup.name}?</p>
                                     <p className="text-[11px] text-gray-500 mb-3">
-                                      {drawerSup.name} typically dispatches on schedule ({drawerSup.onTimeRate}% OTR). Agent will send booking confirmation when ready.
+                                      {drawerGroup.pos.length} PO{drawerGroup.pos.length > 1 ? 's' : ''} · £{drawerOrderVal.toLocaleString()} · Expected dispatch {dispatchStr} · OTR {drawerSup.onTimeRate}%
                                     </p>
-                                    <button
-                                      onClick={() => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: 'confirm_booking' }))}
-                                      className="w-full rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-3 text-left mb-3 transition-colors"
-                                    >
-                                      <div className="text-[12px] font-bold">Confirm booking</div>
-                                      <div className="text-[10px] text-indigo-200 mt-0.5">Locks in {dispatchStr} dispatch · DC slot reserved</div>
-                                    </button>
+                                    <ActionRecommendationRow
+                                      recommendedKey="confirm_booking"
+                                      selectedKey={drawerCurrentPill}
+                                      options={[{
+                                        key:         'confirm_booking',
+                                        label:       'Confirm booking',
+                                        consequence: `Locks in ${dispatchStr} dispatch · DC slot reserved`,
+                                        why:         `${drawerSup.name} typically dispatches on schedule (${drawerSup.onTimeRate}% OTR) — routine confirmation is the right call.`,
+                                        onClick:     () => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: 'confirm_booking' })),
+                                      }]}
+                                    />
                                     {snoozeRow}
                                   </>
                                 )
                               }
 
-                              // Tier 2: deliberate DC booking with recommendation banner
+                              // Tier 2: deliberate DC booking — horizontal row of recommended + alt.
                               const dcRec       = getDCBookingRecommendation(drawerGroup, drawerSup)
                               const primaryPill = dcRec.action === 'confirm' ? 'confirm_booking' : 'alt_slot'
                               const altPill     = dcRec.action === 'confirm' ? 'alt_slot'        : 'confirm_booking'
@@ -8946,25 +8994,25 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                   <p className="text-[11px] text-gray-400 mb-3">
                                     {drawerGroup.pos.length} PO{drawerGroup.pos.length > 1 ? 's' : ''} · £{drawerOrderVal.toLocaleString()} · Expected dispatch {new Date(drawerGroup.pos[0].expectedDelivery).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
                                   </p>
-                                  <div className="bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-2.5 mb-3">
-                                    <p className="text-[11px] text-indigo-800">
-                                      <span className="font-bold">Recommendation: </span>{dcRec.recommendLine}
-                                    </p>
-                                  </div>
-                                  <button
-                                    onClick={() => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: primaryPill }))}
-                                    className="w-full rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-3 text-left mb-2 transition-colors"
-                                  >
-                                    <div className="text-[12px] font-bold">{dcRec.primaryLabel}</div>
-                                    <div className="text-[10px] text-indigo-200 mt-0.5">{dcRec.primaryForecast}</div>
-                                  </button>
-                                  <button
-                                    onClick={() => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: altPill }))}
-                                    className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-left hover:bg-gray-50 hover:border-gray-300 transition-colors mb-3"
-                                  >
-                                    <div className="text-[11px] font-semibold text-gray-700">{dcRec.altLabel}</div>
-                                    <div className="text-[10px] text-gray-400 mt-0.5">{dcRec.altForecast}</div>
-                                  </button>
+                                  <ActionRecommendationRow
+                                    recommendedKey={primaryPill}
+                                    selectedKey={drawerCurrentPill}
+                                    options={[
+                                      {
+                                        key:         primaryPill,
+                                        label:       dcRec.primaryLabel,
+                                        consequence: dcRec.primaryForecast,
+                                        why:         dcRec.recommendLine,
+                                        onClick:     () => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: primaryPill })),
+                                      },
+                                      {
+                                        key:         altPill,
+                                        label:       dcRec.altLabel,
+                                        consequence: dcRec.altForecast,
+                                        onClick:     () => setSelectedActionPill(prev => ({ ...prev, [drawerCardKey!]: altPill })),
+                                      },
+                                    ]}
+                                  />
                                   {snoozeRow}
                                 </>
                               )
