@@ -6,6 +6,7 @@ import {
   ChevronDown, RefreshCw, Activity,
   Bot, User, X, Clock, Mail, Check,
   Calendar, MessageSquare, Send, ChevronRight, ChevronLeft, Plus, AlertCircle, Info, Pencil,
+  PlusCircle, StickyNote, Phone,
 } from 'lucide-react'
 import { ComposedChart, LineChart, Cell, Bar, Line, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceArea, ReferenceLine } from 'recharts'
 import { INVENTORY_PRODUCTS, REORDER_RECOMMENDATIONS } from './mockData'
@@ -259,6 +260,14 @@ interface InquiryRound {
   supplierReply: SupplierNegReply | null
 }
 
+type ActivityKind = 'note' | 'call' | 'action'
+interface ActivityLogEntry {
+  id:        string
+  kind:      ActivityKind
+  author:    string
+  timestamp: string
+  content:   string
+}
 interface InquiryThread {
   recId:          string
   supplierId:     string
@@ -268,6 +277,7 @@ interface InquiryThread {
   agreedMOQ:      number | null
   flaggedReason:  string | null
   internalNotes:  string
+  activityLog?:   ActivityLogEntry[]
   scenario:       'accepted' | 'counter' | 'escalate' | 'uncertain'
   closeReason?:   string
   escalatedTo?:   string
@@ -792,6 +802,7 @@ function SupplierWorkspaceLayout({
   emptyRightSubtitle,
   rightPane,
   briefing,
+  headerExtra,
 }: {
   title:               string
   count:               number
@@ -805,6 +816,7 @@ function SupplierWorkspaceLayout({
   emptyRightSubtitle?: string
   rightPane:           React.ReactNode
   briefing?:           React.ReactNode
+  headerExtra?:        React.ReactNode
 }) {
   return (
     <div className="flex flex-col lg:flex-row gap-0 lg:gap-0 h-[calc(100vh-220px)] min-h-[640px] border border-gray-200 rounded-2xl overflow-hidden bg-white">
@@ -825,6 +837,7 @@ function SupplierWorkspaceLayout({
               className="w-full h-7 pl-6 pr-2 rounded-md border border-gray-200 bg-white text-[11px] text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-300 placeholder:text-gray-400"
             />
           </div>
+          {headerExtra && <div className="mt-2">{headerExtra}</div>}
         </div>
         {briefing && items.length > 0 && (
           <div className="border-b border-gray-100 px-3 py-2 bg-gray-50/30 shrink-0">
@@ -2922,7 +2935,6 @@ function InquiryDrawer({
   const [followUpOriginal,  setFollowUpOriginal]  = useState('')
   const [isSending,         setIsSending]         = useState(false)
   const [sentAt,            setSentAt]            = useState<string | null>(null)
-  const [internalNotes,     setInternalNotes]     = useState(thread?.internalNotes ?? '')
   const [alertSent,         setAlertSent]         = useState(false)
   const [appliedToBuySheet, setAppliedToBuySheet] = useState(false)
   const [mgrComment,        setMgrComment]        = useState('')
@@ -2946,6 +2958,12 @@ function InquiryDrawer({
   const [escalateDialogOpen,setEscalateDialogOpen]= useState(false)
   const [escalateContext,   setEscalateContext]   = useState('')
 
+  // Log activity popover state
+  const [logActivityOpen,   setLogActivityOpen]   = useState(false)
+  const [logActivityKind,   setLogActivityKind]   = useState<ActivityKind>('note')
+  const [logActivityText,   setLogActivityText]   = useState('')
+  const [logActivityToast,  setLogActivityToast]  = useState<string | null>(null)
+
   // Auto-generate draft on open
   useEffect(() => {
     if (thread) {
@@ -2954,7 +2972,6 @@ function InquiryDrawer({
         setOriginalBody(lastRound.emailBody)
         setEditedBody(lastRound.emailBody)
       }
-      setInternalNotes(thread.internalNotes)
       return
     }
     const scenario    = getProductScenario(rec)
@@ -3117,6 +3134,38 @@ function InquiryDrawer({
   const buyDaysOut    = daysFromToday(buyDeadline)
   const exFactoryOut  = daysFromToday(exFactory)
 
+  // Activity log — merge explicit log entries with a migrated entry for any legacy internalNotes text.
+  const activityEntries: ActivityLogEntry[] = useMemo(() => {
+    const explicit = thread?.activityLog ?? []
+    const legacy   = thread?.internalNotes?.trim()
+      ? [{
+          id:        `legacy-notes-${thread!.recId}`,
+          kind:      'note' as ActivityKind,
+          author:    'You',
+          timestamp: thread!.rounds[0]?.sentAt ? `${thread!.rounds[0].sentAt}T08:00:00Z` : new Date().toISOString(),
+          content:   thread!.internalNotes,
+        }]
+      : []
+    return [...legacy, ...explicit]
+  }, [thread?.activityLog, thread?.internalNotes, thread?.recId, thread?.rounds])
+
+  const handleLogActivity = () => {
+    if (!thread || !logActivityText.trim()) return
+    const newEntry: ActivityLogEntry = {
+      id:        `act-${Date.now()}`,
+      kind:      logActivityKind,
+      author:    'You',
+      timestamp: new Date().toISOString(),
+      content:   logActivityText.trim(),
+    }
+    onUpdate({ ...thread, activityLog: [...(thread.activityLog ?? []), newEntry] })
+    setLogActivityOpen(false)
+    setLogActivityText('')
+    setLogActivityKind('note')
+    setLogActivityToast('Activity logged.')
+    setTimeout(() => setLogActivityToast(null), 2200)
+  }
+
   const exFactoryRecDt   = rec.exFactoryDate ? new Date(rec.exFactoryDate) : null
   const weeksToExFactory = exFactoryRecDt ? (exFactoryRecDt.getTime() - today.getTime()) / (7 * 86400000) : null
   const leadTimeBreach   = weeksToExFactory !== null && !!lastReply && (lastReply as SupplierNegReply).leadTimeWeeks > weeksToExFactory
@@ -3206,48 +3255,276 @@ function InquiryDrawer({
             </div>
             <div className="text-xs text-gray-400">{rec.supplier} · {rec.sku}</div>
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 transition-colors shrink-0 mt-0.5">
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-1 shrink-0 mt-0.5 relative">
+            <button
+              onClick={() => setLogActivityOpen(o => !o)}
+              className="h-7 px-2 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-800 transition-colors flex items-center gap-1 text-[11px] font-medium"
+              title="Log a note, call, or action"
+            >
+              <PlusCircle className="w-3.5 h-3.5" /> Log activity
+            </button>
+            <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 transition-colors">
+              <X className="w-4 h-4" />
+            </button>
+            {logActivityOpen && (
+              <div className="absolute top-9 right-0 z-30 w-[360px] bg-white rounded-xl shadow-xl border border-gray-200 p-3">
+                <div className="flex items-center gap-1 mb-2 bg-gray-50 rounded-lg p-0.5">
+                  {(['note', 'call', 'action'] as const).map(k => (
+                    <button
+                      key={k}
+                      onClick={() => setLogActivityKind(k)}
+                      className={`flex-1 h-7 rounded-md text-[11px] font-semibold transition-colors capitalize ${
+                        logActivityKind === k ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                      }`}
+                    >
+                      {k}
+                    </button>
+                  ))}
+                </div>
+                <textarea
+                  value={logActivityText}
+                  onChange={e => setLogActivityText(e.target.value)}
+                  rows={4}
+                  autoFocus
+                  placeholder={
+                    logActivityKind === 'note' ? 'Add a note for the team…'
+                    : logActivityKind === 'call' ? 'What did you discuss? Who did you speak with?'
+                    : 'What did you do?'
+                  }
+                  className="w-full text-[11px] text-gray-700 leading-relaxed p-2.5 rounded-lg border border-gray-200 bg-white resize-none focus:outline-none focus:ring-1 focus:ring-indigo-400 placeholder:text-gray-400 mb-2"
+                />
+                <div className="flex justify-end gap-2">
+                  <button
+                    onClick={() => { setLogActivityOpen(false); setLogActivityText('') }}
+                    className="h-7 px-3 text-[11px] font-medium rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleLogActivity}
+                    disabled={!logActivityText.trim()}
+                    className="h-7 px-3 text-[11px] font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                  >
+                    Log activity
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Scrollable body */}
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
 
-          {/* [1] Negotiation timeline — primary content */}
-          {thread && thread.rounds.map((round, ri) => (
-            <div key={ri} className="space-y-2">
-              {round.sentAt && (
-                <RoundSentBlock
-                  roundNumber={round.roundNumber}
-                  sentAt={round.sentAt}
-                  requestedCP={round.requestedCP}
-                  emailBody={round.emailBody}
-                />
-              )}
-              {round.supplierReply && scenario !== 'uncertain' && (
-                <ReplyBlock
-                  reply={round.supplierReply}
-                  rec={rec}
-                  cpDeltaColor={cpDeltaColor}
-                  cpDeltaLabel={cpDeltaLabel}
-                  currentMarginPct={currentMarginPct}
-                  leadTimeBreach={leadTimeBreach}
-                />
-              )}
-              {round.supplierReply && scenario === 'uncertain' && (
-                <div className="border border-amber-200 rounded-xl overflow-hidden">
-                  <div className="flex items-center justify-between px-3.5 py-2.5 bg-amber-50 border-b border-amber-100">
-                    <span className="text-[11px] font-semibold text-amber-700">Supplier Reply — {round.supplierReply.receivedAt}</span>
-                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">No CP offered</span>
+          {/* Context card — compact 3-column top-of-panel reference */}
+          <div className="border border-gray-200 rounded-xl bg-white">
+            <div className="grid grid-cols-3 gap-0 divide-x divide-gray-100">
+              {/* Col 1 — This ask */}
+              <div className="px-3.5 py-3">
+                <div className="text-[13px] font-semibold text-gray-900 leading-tight">This ask</div>
+                <div className="text-[11px] text-gray-400 leading-tight mb-2">One-off, this draft only</div>
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[12px] text-gray-500">Target CP</span>
+                    {editingTargetCp ? (
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="number" step="0.01" min={0}
+                          value={effectiveDraftCP}
+                          onChange={e => setDraftCpOverride(Number(e.target.value))}
+                          autoFocus
+                          className="w-20 h-6 rounded border border-gray-200 px-1.5 text-[12px] font-semibold text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
+                        />
+                        <button onClick={() => setEditingTargetCp(false)} className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800">Done</button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[13px] font-semibold text-gray-800">£{effectiveDraftCP.toFixed(2)}</span>
+                        <button onClick={() => setEditingTargetCp(true)} className="text-gray-400 hover:text-gray-600" aria-label="Edit target CP">
+                          <Pencil className="w-3 h-3" />
+                        </button>
+                      </div>
+                    )}
                   </div>
-                  <div className="px-3.5 pt-2 pb-3 bg-white">
-                    <pre className="text-[10px] text-gray-600 font-mono leading-relaxed whitespace-pre-wrap">{round.supplierReply.rawText}</pre>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[12px] text-gray-500">Walk-away</span>
+                    {editingWalkAway ? (
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="number" step="0.01" min={0}
+                          value={effectiveWalkAway}
+                          onChange={e => setDraftWalkAway(Number(e.target.value))}
+                          autoFocus
+                          className="w-20 h-6 rounded border border-gray-200 px-1.5 text-[12px] font-semibold text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
+                        />
+                        <button onClick={() => setEditingWalkAway(false)} className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800">Done</button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[13px] font-semibold text-gray-800">£{effectiveWalkAway.toFixed(2)}</span>
+                        <button onClick={() => setEditingWalkAway(true)} className="text-gray-400 hover:text-gray-600" aria-label="Edit walk-away">
+                          <Pencil className="w-3 h-3" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[12px] text-gray-500">Max rounds</span>
+                    {editingMaxRounds ? (
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="number" step="1" min={1} max={10}
+                          value={effectiveMaxRounds}
+                          onChange={e => setDraftMaxRounds(Number(e.target.value))}
+                          autoFocus
+                          className="w-14 h-6 rounded border border-gray-200 px-1.5 text-[12px] font-semibold text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
+                        />
+                        <button onClick={() => setEditingMaxRounds(false)} className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800">Done</button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[13px] font-semibold text-gray-800">{effectiveMaxRounds}</span>
+                        <button onClick={() => setEditingMaxRounds(true)} className="text-gray-400 hover:text-gray-600" aria-label="Edit max rounds">
+                          <Pencil className="w-3 h-3" />
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
-              )}
+              </div>
+              {/* Col 2 — Deal facts */}
+              <div className="px-3.5 py-3">
+                <div className="text-[13px] font-semibold text-gray-900 leading-tight">Deal facts</div>
+                <div className="text-[11px] text-gray-400 leading-tight mb-2">Read-only</div>
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[12px] text-gray-500">Line value</span>
+                    <span className="text-[13px] font-semibold text-gray-800">{lineValue}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[12px] text-gray-500">Relationship</span>
+                    <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold ${relColors}`}>{relTier}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[12px] text-gray-500">Buy decision</span>
+                    <span className="text-[12px] font-semibold text-gray-800">{buyDlStr} <span className="text-gray-400 font-normal">· {buyDaysOut}d</span></span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[12px] text-gray-500">Ex-factory</span>
+                    <span className="text-[12px] font-semibold text-gray-800">{exFactoryStr} <span className="text-gray-400 font-normal">· {exFactoryOut}d</span></span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[12px] text-gray-500">Current CP</span>
+                    <span className="text-[13px] font-semibold text-gray-800">£{rec.costPrice.toFixed(2)}</span>
+                  </div>
+                </div>
+              </div>
+              {/* Col 3 — Negotiation rules */}
+              <div className="px-3.5 py-3">
+                <div className="text-[13px] font-semibold text-gray-900 leading-tight">Negotiation rules</div>
+                <div className="text-[11px] text-gray-400 leading-tight mb-2">Apply to all {rec.category} / volume {tierThresholdLabel}+</div>
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[12px] text-gray-500">Opening ask</span>
+                    <span className="text-[13px] font-semibold text-gray-800">−{globalCpRules.openingAskPct}%</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[12px] text-gray-500">Escalate if</span>
+                    <span className="text-[13px] font-semibold text-gray-800">&gt; +{globalCpRules.escalateIfPct}%</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[12px] text-gray-500">Max rounds</span>
+                    <span className="text-[13px] font-semibold text-gray-800">{globalCpRules.maxRounds}</span>
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    setDialogOpeningAsk(globalCpRules.openingAskPct)
+                    setDialogEscalateIf(globalCpRules.escalateIfPct)
+                    setDialogMaxRoundsVal(globalCpRules.maxRounds)
+                    setRulesDialogOpen(true)
+                  }}
+                  className="mt-2 text-[11px] font-medium text-indigo-600 hover:text-indigo-800 transition-colors"
+                >
+                  Edit rules in playbook →
+                </button>
+              </div>
             </div>
-          ))}
+          </div>
+
+          {/* [1] Negotiation timeline — rounds + replies + inline activity entries, sorted by timestamp */}
+          {thread && (() => {
+            type TLItem =
+              | { kind: 'round-sent'; ts: string; round: typeof thread.rounds[0] }
+              | { kind: 'reply';      ts: string; round: typeof thread.rounds[0] }
+              | { kind: 'activity';   ts: string; entry: ActivityLogEntry }
+            const items: TLItem[] = []
+            thread.rounds.forEach(r => {
+              if (r.sentAt) items.push({ kind: 'round-sent', ts: `${r.sentAt}T08:00:00Z`, round: r })
+              if (r.supplierReply) items.push({ kind: 'reply', ts: `${r.supplierReply.receivedAt}T12:00:00Z`, round: r })
+            })
+            activityEntries.forEach(a => items.push({ kind: 'activity', ts: a.timestamp, entry: a }))
+            items.sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime())
+            return items.map((it, ix) => {
+              if (it.kind === 'round-sent') {
+                return (
+                  <RoundSentBlock
+                    key={`rs-${ix}`}
+                    roundNumber={it.round.roundNumber}
+                    sentAt={it.round.sentAt!}
+                    requestedCP={it.round.requestedCP}
+                    emailBody={it.round.emailBody}
+                  />
+                )
+              }
+              if (it.kind === 'reply') {
+                const reply = it.round.supplierReply!
+                if (scenario !== 'uncertain') {
+                  return (
+                    <ReplyBlock
+                      key={`rep-${ix}`}
+                      reply={reply}
+                      rec={rec}
+                      cpDeltaColor={cpDeltaColor}
+                      cpDeltaLabel={cpDeltaLabel}
+                      currentMarginPct={currentMarginPct}
+                      leadTimeBreach={leadTimeBreach}
+                    />
+                  )
+                }
+                return (
+                  <div key={`rep-${ix}`} className="border border-amber-200 rounded-xl overflow-hidden">
+                    <div className="flex items-center justify-between px-3.5 py-2.5 bg-amber-50 border-b border-amber-100">
+                      <span className="text-[11px] font-semibold text-amber-700">Supplier Reply — {reply.receivedAt}</span>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">No CP offered</span>
+                    </div>
+                    <div className="px-3.5 pt-2 pb-3 bg-white">
+                      <pre className="text-[10px] text-gray-600 font-mono leading-relaxed whitespace-pre-wrap">{reply.rawText}</pre>
+                    </div>
+                  </div>
+                )
+              }
+              // activity entry — subtle supplementary card
+              const a = it.entry
+              const Icon = a.kind === 'call' ? Phone : a.kind === 'action' ? Activity : StickyNote
+              const tint = a.kind === 'call' ? 'text-blue-500 bg-blue-50' : a.kind === 'action' ? 'text-indigo-500 bg-indigo-50' : 'text-gray-500 bg-gray-50'
+              return (
+                <div key={`act-${ix}`} className="rounded-lg border border-gray-100 bg-gray-50/40 px-3 py-2">
+                  <div className="flex items-center gap-1.5 mb-0.5">
+                    <span className={`inline-flex w-4 h-4 rounded items-center justify-center ${tint}`}>
+                      <Icon className="w-2.5 h-2.5" />
+                    </span>
+                    <span className="text-[10px] font-semibold text-gray-600 capitalize">{a.kind}</span>
+                    <span className="text-[10px] text-gray-400">· {a.author}</span>
+                    <span className="text-[10px] text-gray-400 ml-auto">
+                      {new Date(a.timestamp).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-gray-700 leading-relaxed whitespace-pre-wrap">{a.content}</div>
+                </div>
+              )
+            })
+          })()}
 
           {/* Editable email draft */}
           {status === 'draft' && (
@@ -3596,212 +3873,10 @@ function InquiryDrawer({
             </div>
           )}
 
-          {/* Context — single panel, always visible (reference: target, deal facts, playbook rules) */}
-          <div className="border border-gray-200 rounded-xl bg-white">
-            <div className="px-4 py-4 space-y-4">
-
-              {/* Section 1 — This ask */}
-              <div>
-                <div className="mb-3">
-                  <div className="text-[11px] font-semibold text-gray-700">This ask</div>
-                  <div className="text-[10px] text-gray-400">One-off, applies to this draft only.</div>
-                </div>
-                <div className="space-y-2">
-                  {/* Target CP */}
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-[11px] text-gray-500">Target CP</span>
-                    {editingTargetCp ? (
-                      <div className="flex items-center gap-2">
-                        <span className="text-[11px] text-gray-400">£</span>
-                        <input
-                          type="number" step="0.01" min={0}
-                          value={effectiveDraftCP}
-                          onChange={e => setDraftCpOverride(Number(e.target.value))}
-                          autoFocus
-                          className="w-24 h-7 rounded-md border border-gray-200 px-2 text-xs font-semibold text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
-                        />
-                        <button
-                          onClick={() => setEditingTargetCp(false)}
-                          className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800"
-                        >
-                          Done
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-semibold text-gray-800">£{effectiveDraftCP.toFixed(2)}</span>
-                        <button
-                          onClick={() => setEditingTargetCp(true)}
-                          className="text-gray-400 hover:text-gray-600 transition-colors"
-                          aria-label="Edit target CP"
-                        >
-                          <Pencil className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Walk-away */}
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-[11px] text-gray-500">Walk-away</span>
-                    {editingWalkAway ? (
-                      <div className="flex items-center gap-2">
-                        <span className="text-[11px] text-gray-400">£</span>
-                        <input
-                          type="number" step="0.01" min={0}
-                          value={effectiveWalkAway}
-                          onChange={e => setDraftWalkAway(Number(e.target.value))}
-                          autoFocus
-                          className="w-24 h-7 rounded-md border border-gray-200 px-2 text-xs font-semibold text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
-                        />
-                        <button
-                          onClick={() => setEditingWalkAway(false)}
-                          className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800"
-                        >
-                          Done
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-semibold text-gray-800">£{effectiveWalkAway.toFixed(2)}</span>
-                        <button
-                          onClick={() => setEditingWalkAway(true)}
-                          className="text-gray-400 hover:text-gray-600 transition-colors"
-                          aria-label="Edit walk-away"
-                        >
-                          <Pencil className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Max rounds */}
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-[11px] text-gray-500">Max rounds</span>
-                    {editingMaxRounds ? (
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="number" step="1" min={1} max={10}
-                          value={effectiveMaxRounds}
-                          onChange={e => setDraftMaxRounds(Number(e.target.value))}
-                          autoFocus
-                          className="w-16 h-7 rounded-md border border-gray-200 px-2 text-xs font-semibold text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
-                        />
-                        <button
-                          onClick={() => setEditingMaxRounds(false)}
-                          className="text-[10px] font-medium text-indigo-600 hover:text-indigo-800"
-                        >
-                          Done
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-semibold text-gray-800">{effectiveMaxRounds}</span>
-                        <button
-                          onClick={() => setEditingMaxRounds(true)}
-                          className="text-gray-400 hover:text-gray-600 transition-colors"
-                          aria-label="Edit max rounds"
-                        >
-                          <Pencil className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              <div className="border-t border-gray-100" />
-
-              {/* Section 2 — Deal facts (read-only) */}
-              <div>
-                <div className="mb-3">
-                  <div className="text-[11px] font-semibold text-gray-700">Deal facts</div>
-                  <div className="text-[10px] text-gray-400">Read-only.</div>
-                </div>
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-[11px] text-gray-500">Line value</span>
-                    <span className="text-xs font-semibold text-gray-800">{lineValue}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-[11px] text-gray-500">Relationship</span>
-                    <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold ${relColors}`}>{relTier}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-[11px] text-gray-500">Buy decision</span>
-                    <span className="text-xs font-semibold text-gray-800">
-                      {buyDlStr} <span className="text-gray-400 font-normal">· {buyDaysOut} days</span>
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-[11px] text-gray-500">Ex-factory</span>
-                    <span className="text-xs font-semibold text-gray-800">
-                      {exFactoryStr} <span className="text-gray-400 font-normal">· {exFactoryOut} days</span>
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-[11px] text-gray-500">Current CP</span>
-                    <span className="text-xs font-semibold text-gray-800">£{rec.costPrice.toFixed(2)}</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="border-t border-gray-100" />
-
-              {/* Section 3 — Negotiation rules (global, from playbook) */}
-              <div>
-                <div className="mb-3">
-                  <div className="text-[11px] font-semibold text-gray-700">Negotiation rules</div>
-                  <div className="text-[10px] text-gray-400">
-                    Apply to all {rec.category} / volume {tierThresholdLabel}+ — from your CP playbook.
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-[11px] text-gray-500">Opening ask</span>
-                    <span className="text-xs font-semibold text-gray-800">−{globalCpRules.openingAskPct}%</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-[11px] text-gray-500">Escalate if</span>
-                    <span className="text-xs font-semibold text-gray-800">&gt; +{globalCpRules.escalateIfPct}%</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-[11px] text-gray-500">Max rounds</span>
-                    <span className="text-xs font-semibold text-gray-800">{globalCpRules.maxRounds}</span>
-                  </div>
-                </div>
-                <button
-                  onClick={() => {
-                    setDialogOpeningAsk(globalCpRules.openingAskPct)
-                    setDialogEscalateIf(globalCpRules.escalateIfPct)
-                    setDialogMaxRoundsVal(globalCpRules.maxRounds)
-                    setRulesDialogOpen(true)
-                  }}
-                  className="mt-3 text-[11px] font-medium text-indigo-600 hover:text-indigo-800 transition-colors"
-                >
-                  Edit rules in playbook →
-                </button>
-              </div>
-
-            </div>
-          </div>
-
-          {/* Internal notes */}
-          {thread && (
-            <div>
-              <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1.5 mt-4">
-                Internal notes <span className="font-normal normal-case">— {new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
-              </div>
-              <textarea
-                className="w-full text-[11px] text-gray-700 leading-relaxed p-3 rounded-xl border border-gray-200 bg-gray-50 resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-200"
-                rows={3}
-                placeholder="Add notes for the team…"
-                value={internalNotes}
-                onChange={e => {
-                  setInternalNotes(e.target.value)
-                  onUpdate({ ...thread, internalNotes: e.target.value })
-                }}
-              />
+          {/* Activity log lives inline in the conversation timeline above (added via "Log activity" header button). */}
+          {logActivityToast && (
+            <div className="rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-[11px] font-semibold text-green-700 flex items-center gap-1.5">
+              <Check className="w-3 h-3" /> {logActivityToast}
             </div>
           )}
         </div>
@@ -4243,7 +4318,35 @@ function ActiveNegotiationsView({
     />
   ) : null
 
+  // Start-inquiry dialog
+  const [startInquiryOpen, setStartInquiryOpen] = useState(false)
+  const [startInquiryQuery, setStartInquiryQuery] = useState('')
+
+  const eligibleRecs = useMemo(() => {
+    const q = startInquiryQuery.trim().toLowerCase()
+    return REORDER_RECOMMENDATIONS.filter(r => {
+      const existing = inquiries[r.id]
+      if (existing && existing.status !== 'idle') return false
+      if (!q) return true
+      return (
+        r.name.toLowerCase().includes(q) ||
+        r.supplier.toLowerCase().includes(q) ||
+        r.sku.toLowerCase().includes(q)
+      )
+    })
+  }, [inquiries, startInquiryQuery])
+
+  const headerExtra = (
+    <button
+      onClick={() => { setStartInquiryQuery(''); setStartInquiryOpen(true) }}
+      className="w-full h-7 inline-flex items-center justify-center gap-1.5 rounded-md border border-gray-200 bg-white text-[11px] font-semibold text-gray-700 hover:bg-gray-50 transition-colors"
+    >
+      <PlusCircle className="w-3 h-3" /> Start inquiry
+    </button>
+  )
+
   return (
+    <>
     <SupplierWorkspaceLayout
       title="Active Negotiations"
       count={allItems.length}
@@ -4257,7 +4360,64 @@ function ActiveNegotiationsView({
       emptyRightSubtitle="Pick an item from the left to review the supplier reply and decide the next step."
       rightPane={rightPane}
       briefing={briefing}
+      headerExtra={headerExtra}
     />
+    {startInquiryOpen && (
+      <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
+        <div className="bg-white rounded-2xl shadow-2xl w-[520px] max-h-[80vh] flex flex-col overflow-hidden">
+          <div className="px-5 pt-5 pb-3 border-b border-gray-100">
+            <div className="text-sm font-bold text-gray-900 mb-0.5">Start a new supplier inquiry</div>
+            <div className="text-xs text-gray-500 mb-3">Pick a product to draft a Round 1 CP inquiry email.</div>
+            <div className="relative">
+              <Search className="w-3 h-3 text-gray-400 absolute top-1/2 -translate-y-1/2 left-2.5" />
+              <input
+                autoFocus
+                type="text"
+                value={startInquiryQuery}
+                onChange={e => setStartInquiryQuery(e.target.value)}
+                placeholder="Search by product, supplier, SKU…"
+                className="w-full h-8 pl-7 pr-3 rounded-lg border border-gray-200 bg-white text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 placeholder:text-gray-400"
+              />
+            </div>
+          </div>
+          <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1">
+            {eligibleRecs.length === 0 ? (
+              <div className="text-center text-[11px] text-gray-400 py-10">
+                {startInquiryQuery ? 'No matching recommendations.' : 'No recommendations available — all have active inquiries.'}
+              </div>
+            ) : eligibleRecs.map(r => (
+              <button
+                key={r.id}
+                onClick={() => {
+                  onOpenInquiry(r.id)
+                  setStartInquiryOpen(false)
+                }}
+                className="w-full text-left px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-3"
+              >
+                <img src={r.imageUrl} className="w-9 h-9 rounded object-cover shrink-0" alt="" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-semibold text-gray-900 truncate">{r.name}</div>
+                  <div className="text-[10px] text-gray-400 truncate">{r.supplier} · {r.sku}</div>
+                </div>
+                <div className="text-[10px] text-gray-500 shrink-0 text-right">
+                  <div>£{r.costPrice.toFixed(2)}</div>
+                  <div className="text-gray-400">Current CP</div>
+                </div>
+              </button>
+            ))}
+          </div>
+          <div className="border-t border-gray-100 px-5 py-3 flex justify-end">
+            <button
+              onClick={() => setStartInquiryOpen(false)}
+              className="h-8 px-3 text-xs font-medium rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   )
 }
 
@@ -7599,6 +7759,42 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Tier-1 single-state: auto-select the agent's recommended action whenever a Tier-1 card opens.
+  // This lands the user directly on the email-draft state, where all actions remain swappable inline.
+  useEffect(() => {
+    if (!drawerCardKey) return
+    const g = actionGroups.find(gr => cardKey(gr) === drawerCardKey)
+    if (!g) return
+    const sup = getSupplier(g.supplierId)
+    if (!sup) return
+    // Skip if user already explicitly chose something for this card
+    if (selectedActionPill[drawerCardKey]) return
+    if (g.type === 'overdue') {
+      const maxOver = Math.max(...g.pos.map(p => daysOverdue(p)))
+      const orderVal = g.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0)
+      const poRec = getPORecommendation(g, sup, maxOver, orderVal, 10)
+      if (poRec.action === 'chase') {
+        setSelectedActionPill(prev => ({ ...prev, [drawerCardKey]: 'chase' }))
+      } else {
+        setSelectedActionPill(prev => ({ ...prev, [drawerCardKey]: 'decision' }))
+        setDrawerDecision(prev => ({ ...prev, [drawerCardKey]: poRec.action as 'accept_late' | 'cpr' | 'cancel' }))
+      }
+    } else if (g.type === 'at_risk') {
+      const daysPushed = Math.max(...g.pos.map(p => {
+        if (!p.revisedDelivery) return 0
+        return Math.round((new Date(p.revisedDelivery).getTime() - new Date(p.expectedDelivery).getTime()) / 86400000)
+      }))
+      const substantiveReason = isSubstantiveReason(g.triggerMessage)
+      const orderVal = g.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0)
+      const dateRec = getDateChangeRecommendation(g, sup, daysPushed, substantiveReason, orderVal)
+      setSelectedActionPill(prev => ({ ...prev, [drawerCardKey]: dateRec.action }))
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drawerCardKey])
+
+  // Draft-switch confirmation: pending action key when user has edited the draft and tries to swap.
+  const [pendingSwitchAction, setPendingSwitchAction] = useState<{ pill: string; decision?: 'accept_late' | 'cpr' | 'cancel' } | null>(null)
+
   const generateDraftEmail = (groups: ActionGroup[]): string => {
     if (groups.length === 0) return ''
     const sup = getSupplier(groups[0].supplierId)
@@ -8033,11 +8229,29 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           const daysSinceChase = drawerThread ? Math.floor((Date.now() - new Date(drawerThread.startedAt).getTime()) / 86400000) : 3
           const dp3DefaultDraft = (drawerGroup && drawerSup) ? generateDP3Draft(currentDp3Action, drawerGroup, drawerSup, Math.max(daysSinceChase, 3)) : ''
           const currentDp3Draft = drawerCardKey ? (dp3Draft[drawerCardKey] ?? dp3DefaultDraft) : dp3DefaultDraft
-          const selectedActionLabel = (() => {
-            if (!drawerCardKey) return ''
-            const pill = selectedActionPill[drawerCardKey]
-            return ({ chase:'Chase supplier', decision:'Make commercial decision', approve_date:'Approve date change', counter:'Counter-propose', reject:'Reject', confirm_booking:'Confirm DC booking', alt_slot:'Request alternate slot' } as Record<string,string>)[pill] ?? pill
-          })()
+          // Resolve label for the action key (used by the draft-switch confirmation Dialog)
+          const labelFor = (pillKey: string, decKey?: string): string => {
+            if (pillKey === 'decision' && decKey) {
+              return decKey === 'cancel' ? 'Cancel' : decKey === 'cpr' ? `Request CPR ${cprPct}%` : 'Accept late delivery'
+            }
+            return ({ chase:'Chase supplier', decision:'Make commercial decision', approve_date:'Approve date change', counter:'Counter-propose', reject:'Reject', confirm_booking:'Confirm DC booking', alt_slot:'Request alternate slot' } as Record<string,string>)[pillKey] ?? pillKey
+          }
+          // Wrap setSelectedActionPill: if the draft is dirty and the new action differs from the current one, ask first.
+          const tryPickAction = (pill: string, decKey?: 'accept_late' | 'cpr' | 'cancel') => {
+            const currentPill = drawerCardKey ? selectedActionPill[drawerCardKey] : undefined
+            const currentDec  = drawerCardKey ? drawerDecision[drawerCardKey] : undefined
+            const same = currentPill === pill && currentDec === decKey
+            if (!drawerCardKey || same) return
+            if (drawerDirty && (currentPill === 'chase')) {
+              setPendingSwitchAction({ pill, decision: decKey })
+              return
+            }
+            setSelectedActionPill(prev => ({ ...prev, [drawerCardKey]: pill }))
+            if (pill === 'decision' && decKey) {
+              setDrawerDecision(prev => ({ ...prev, [drawerCardKey]: decKey }))
+            }
+          }
+          void labelFor; void tryPickAction
           const cpDate = drawerCardKey ? (counterProposeDate[drawerCardKey] ?? '') : ''
           const rrText = drawerCardKey ? (rejectReason[drawerCardKey] ?? '') : ''
           const nl = '\n'
@@ -8474,9 +8688,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                       <div className="text-[11px] text-gray-500">Pattern: <span className="font-semibold text-gray-700 capitalize">{pattern}</span></div>
                                     </div>
                                   </details>
-                                  <div className="border border-dashed border-gray-200 rounded-xl px-4 py-4 text-center">
-                                    <p className="text-[11px] text-gray-400">Once you choose an action, the agent will draft the communication or record the decision.</p>
-                                  </div>
                                   <div className="flex items-center gap-3 mt-3">
                                     {isSnoozeConfirm ? (
                                       <span className="text-[11px] text-gray-600">Reappear in 3 days?
@@ -8565,9 +8776,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                         <div className="text-[11px] text-gray-500">Pattern: <span className="font-semibold text-gray-700 capitalize">{pattern}</span></div>
                                       </div>
                                     </details>
-                                    <div className="border border-dashed border-gray-200 rounded-xl px-4 py-4 text-center mb-1">
-                                      <p className="text-[11px] text-gray-400">Once you choose an action, the agent will draft the communication or record the decision.</p>
-                                    </div>
                                     {snoozeRow}
                                   </>
                                 )
@@ -8629,9 +8837,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                         <div className="text-[11px] text-gray-500">Pattern: <span className="font-semibold text-gray-700">Structural underperformer</span></div>
                                       </div>
                                     </details>
-                                    <div className="border border-dashed border-gray-200 rounded-xl px-4 py-4 text-center mb-1">
-                                      <p className="text-[11px] text-gray-400">Once you choose an action, the agent will draft the communication or record the decision.</p>
-                                    </div>
                                     {snoozeRow}
                                   </>
                                 )
@@ -8695,13 +8900,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                           </>
                         ) : (
                           <>
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2">
-                                <span className="w-2 h-2 rounded-full bg-purple-500 shrink-0" />
-                                <span className="text-[12px] font-semibold text-gray-800">Action: {selectedActionLabel}</span>
-                              </div>
-                              <button onClick={() => setSelectedActionPill(prev => { const n = { ...prev }; delete n[drawerCardKey!]; return n })} className="text-[11px] text-indigo-600 hover:text-indigo-800 font-medium transition-colors">Change action</button>
-                            </div>
                             {drawerCurrentPill === 'decision' && (
                               <div className="mt-3 space-y-2.5">
                                 <p className="text-[11px] text-gray-500 italic leading-relaxed">
@@ -9302,6 +9500,41 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                     )}
 
                   </div>{/* end drawer body flex-1 */}
+
+                  {/* Draft-switch confirmation Dialog (B1) */}
+                  {pendingSwitchAction && (
+                    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
+                      <div className="bg-white rounded-2xl shadow-2xl w-[420px] p-5">
+                        <div className="text-sm font-bold text-gray-900 mb-1">Replace your edits?</div>
+                        <div className="text-xs text-gray-500 mb-4">
+                          You've edited this draft. Switching to <span className="font-semibold text-gray-700">{labelFor(pendingSwitchAction.pill, pendingSwitchAction.decision)}</span> will replace your edits.
+                        </div>
+                        <div className="flex justify-end gap-2">
+                          <button
+                            onClick={() => setPendingSwitchAction(null)}
+                            className="h-8 px-3 text-xs font-medium rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            onClick={() => {
+                              if (!drawerCardKey) return
+                              setSelectedActionPill(prev => ({ ...prev, [drawerCardKey]: pendingSwitchAction.pill }))
+                              if (pendingSwitchAction.pill === 'decision' && pendingSwitchAction.decision) {
+                                setDrawerDecision(prev => ({ ...prev, [drawerCardKey]: pendingSwitchAction.decision! }))
+                              }
+                              // Reset any user edits on the chase draft for this supplier
+                              setChaseDraftMap(prev => { const n = { ...prev }; delete n[drawerGroup!.supplierId]; return n })
+                              setPendingSwitchAction(null)
+                            }}
+                            className="h-8 px-3 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors"
+                          >
+                            Replace draft
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="flex-1 flex flex-col items-center justify-center px-6 text-center bg-white">
