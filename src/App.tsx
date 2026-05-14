@@ -791,6 +791,7 @@ function SupplierWorkspaceLayout({
   emptyRightTitle,
   emptyRightSubtitle,
   rightPane,
+  briefing,
 }: {
   title:               string
   count:               number
@@ -803,6 +804,7 @@ function SupplierWorkspaceLayout({
   emptyRightTitle?:    string
   emptyRightSubtitle?: string
   rightPane:           React.ReactNode
+  briefing?:           React.ReactNode
 }) {
   return (
     <div className="flex flex-col lg:flex-row gap-0 lg:gap-0 h-[calc(100vh-220px)] min-h-[640px] border border-gray-200 rounded-2xl overflow-hidden bg-white">
@@ -824,6 +826,11 @@ function SupplierWorkspaceLayout({
             />
           </div>
         </div>
+        {briefing && items.length > 0 && (
+          <div className="border-b border-gray-100 px-3 py-2 bg-gray-50/30 shrink-0">
+            {briefing}
+          </div>
+        )}
         <div className="flex-1 overflow-y-auto py-2 px-2 space-y-1">
           {items.length === 0 ? (
             <div className="px-3 py-6 text-center text-[11px] text-gray-400">
@@ -4173,6 +4180,30 @@ function ActiveNegotiationsView({
     ready:    'Ready to progress',
   }
 
+  // Auto-select highest-severity item on mount when no item is selected and no deep-link is pending.
+  // The list is already sorted by section: needs → awaiting → ready, so allItems[0] is the top priority.
+  useEffect(() => {
+    if (!openInquiryId && allItems.length > 0) {
+      onOpenInquiry(allItems[0].p.id)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Briefing card — one-line orientation summary
+  const awaitingCount = negNeedsResponse.length
+  const top = allItems[0]?.p
+  const briefing = top ? (
+    <div>
+      <div className="text-[11px] font-semibold text-gray-700">
+        {allItems.length} negotiation{allItems.length === 1 ? '' : 's'}
+        {awaitingCount > 0 && <> · {awaitingCount} awaiting your response</>}
+      </div>
+      <div className="text-[10px] text-gray-500 mt-0.5 leading-snug">
+        Top priority: {top.name} ({top.supplier}).
+      </div>
+    </div>
+  ) : null
+
   const selectedRec = openInquiryId ? REORDER_RECOMMENDATIONS.find(r => r.id === openInquiryId) : null
 
   const rightPane = selectedRec ? (
@@ -4204,6 +4235,7 @@ function ActiveNegotiationsView({
       emptyRightTitle="Select a negotiation"
       emptyRightSubtitle="Pick an item from the left to review the supplier reply and decide the next step."
       rightPane={rightPane}
+      briefing={briefing}
     />
   )
 }
@@ -4597,6 +4629,14 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
   const [globalCpRules, setGlobalCpRules]       = useState<CpRulesState>(DEFAULT_CP_RULES)
 
   useEffect(() => { if (initialOpenInquiry) setOpenInquiryId(initialOpenInquiry) }, [initialOpenInquiry])
+
+  // Supplier Inquiry → route through Active Negotiations workspace (no more floating side panel).
+  // If a thread already exists for this rec we just navigate; otherwise the InquiryDrawer's
+  // own onMount effect will create the draft thread.
+  const openSupplierInquiry = (recId: string) => {
+    setRecoSubView('negotiations')
+    setOpenInquiryId(recId)
+  }
   const [editQty, setEditQty]                   = useState(0)
   const [editExFactory, setEditExFactory]       = useState('')
   const [editCostPrice, setEditCostPrice]       = useState(0)
@@ -4766,7 +4806,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                         Push to PO draft
                       </button>
                     )}
-                    <button onClick={() => setOpenInquiryId(p.id)}
+                    <button onClick={() => openSupplierInquiry(p.id)}
                       className="h-7 px-2.5 text-[10px] font-medium rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 transition-colors flex items-center gap-1"
                       title="Send supplier inquiry">
                       <Mail className="w-3 h-3" />Supplier Inquiry
@@ -5682,7 +5722,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                             {/* Inquiry indicator + side-action button (all statuses) */}
                             <div className="flex items-center gap-1.5 mt-0.5">
                               <button
-                                onClick={() => setOpenInquiryId(p.id)}
+                                onClick={() => openSupplierInquiry(p.id)}
                                 className="h-6 px-2 text-[10px] font-medium rounded-md border border-gray-200 text-gray-500 hover:bg-gray-50 transition-colors flex items-center gap-1"
                                 title="Send supplier inquiry"
                               >
@@ -5691,7 +5731,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                               {inquiries[p.id] && inquiries[p.id].status !== 'idle' && (() => {
                                 const nsCfg = NEG_STATUS_CFG[inquiries[p.id].status]
                                 return (
-                                  <button onClick={() => setOpenInquiryId(p.id)} className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-semibold border cursor-pointer hover:opacity-80 transition-opacity ${nsCfg.bg} ${nsCfg.text} ${nsCfg.border}`} title="Open negotiation">
+                                  <button onClick={() => openSupplierInquiry(p.id)} className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-semibold border cursor-pointer hover:opacity-80 transition-opacity ${nsCfg.bg} ${nsCfg.text} ${nsCfg.border}`} title="Open negotiation">
                                     <span className={`w-1.5 h-1.5 rounded-full ${nsCfg.dot}`} />1
                                   </button>
                                 )
@@ -5727,22 +5767,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
         )}
       </div>
 
-      {/* Floating Inquiry drawer — used only when opened from Recommendations sub-view (row-level Supplier Inquiry button) */}
-      {recoSubView === 'recommendations' && openInquiryId && (() => {
-        const rec = REORDER_RECOMMENDATIONS.find(r => r.id === openInquiryId)
-        if (!rec) return null
-        return (
-          <InquiryDrawer
-            rec={rec}
-            thread={inquiries[openInquiryId]}
-            onClose={() => setOpenInquiryId(null)}
-            onUpdate={t => setInquiries(prev => ({ ...prev, [t.recId]: t }))}
-            globalCpRules={globalCpRules}
-            onUpdateGlobalCpRules={setGlobalCpRules}
-            onNavigateToPO={onNavigateToPO}
-          />
-        )
-      })()}
+      {/* Supplier Inquiry flow now routes through Active Negotiations sub-view (no floating drawer). */}
 
       {/* SendToManager modal */}
       {sendMgrModalIds.length > 0 && (
@@ -5886,6 +5911,12 @@ function ManagerReorderView() {
   const [bulkRejectComment, setBulkRejectComment] = useState('')
   const [mgrSubView, setMgrSubView] = useState<'recommendations' | 'negotiations'>('recommendations')
   const [lowMarginOnly, setLowMarginOnly] = useState(false)
+
+  // Supplier Inquiry → route through Active Negotiations workspace (no more floating side panel).
+  const openSupplierInquiry = (recId: string) => {
+    setMgrSubView('negotiations')
+    setOpenInquiryId(recId)
+  }
 
   const effStatus = (p: typeof REORDER_RECOMMENDATIONS[0]): ApprovalStatus =>
     (overrides[p.id]?.status ?? p.approvalStatus) as ApprovalStatus
@@ -6553,7 +6584,7 @@ function ManagerReorderView() {
                           )}
                           <div className="flex items-center gap-1.5">
                             <button
-                              onClick={() => setOpenInquiryId(p.id)}
+                              onClick={() => openSupplierInquiry(p.id)}
                               className="h-6 px-2 text-[10px] font-medium rounded-md border border-gray-200 text-gray-500 hover:bg-gray-50 transition-colors flex items-center gap-1"
                               title="Send supplier inquiry"
                             >
@@ -6653,30 +6684,7 @@ function ManagerReorderView() {
           )
         })()}
       </div>
-      {mgrSubView === 'recommendations' && openInquiryId && (() => {
-        const rec = REORDER_RECOMMENDATIONS.find(r => r.id === openInquiryId)
-        if (!rec) return null
-        return (
-          <InquiryDrawer
-            rec={rec}
-            thread={inquiries[openInquiryId]}
-            onClose={() => setOpenInquiryId(null)}
-            onUpdate={t => setInquiries(prev => ({ ...prev, [t.recId]: t }))}
-            isManager={true}
-            globalCpRules={mgrCpRules}
-            onUpdateGlobalCpRules={setMgrCpRules}
-            onApprove={() => {
-              approve(rec.id)
-              setOpenInquiryId(null)
-              showMgrToast(`${rec.name} approved.`)
-            }}
-            onReject={() => {
-              setRejectOpen(o => ({ ...o, [rec.id]: true }))
-              setOpenInquiryId(null)
-            }}
-          />
-        )
-      })()}
+      {/* Supplier Inquiry flow now routes through Active Negotiations sub-view (no floating drawer). */}
 
       {/* Bulk reject modal */}
       {bulkRejectModal && (
@@ -7558,6 +7566,18 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
   }
   const cardScore = (g: ActionGroup) => urgWt(g) * g.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0)
 
+  // Auto-select highest-severity action on mount when no deep-link is pending.
+  // Match the same sort the rail uses: cardScore desc.
+  useEffect(() => {
+    if (drawerCardKey) return
+    if (initialOpenAction) return
+    const sortedForAuto = [...actionGroups].sort((a, b) => cardScore(b) - cardScore(a))
+    if (sortedForAuto.length > 0) {
+      setDrawerCardKey(cardKey(sortedForAuto[0]))
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const generateDraftEmail = (groups: ActionGroup[]): string => {
     if (groups.length === 0) return ''
     const sup = getSupplier(groups[0].supplierId)
@@ -8147,6 +8167,29 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                   <span className="text-xs font-bold text-gray-900">Actions</span>
                   <span className="text-[10px] text-gray-400 font-medium">{withHeaders.length}</span>
                 </div>
+                {/* Briefing card — one-line orientation summary */}
+                {withHeaders.length > 0 && (() => {
+                  const totalValAtRisk = withHeaders.reduce((s, { g }) => s + g.pos.reduce((ss, p) => ss + parseOrderVal(p.orderValue), 0), 0)
+                  const topItem = withHeaders[0]?.g
+                  const topSup = topItem ? getSupplier(topItem.supplierId) : null
+                  const decisionsCount = withHeaders.filter(({ g }) => getCardState(g) === 'decision-needed').length
+                  return (
+                    <div className="border-b border-gray-100 px-3 py-2 bg-gray-50/30 shrink-0">
+                      <div className="text-[11px] font-semibold text-gray-700">
+                        {withHeaders.length} action{withHeaders.length === 1 ? '' : 's'}
+                        {decisionsCount > 0 && <> · {decisionsCount} require{decisionsCount === 1 ? 's' : ''} a decision</>}
+                        {totalValAtRisk > 0 && <> · £{totalValAtRisk.toLocaleString()} at risk</>}
+                      </div>
+                      {topSup && (
+                        <div className="text-[10px] text-gray-500 mt-0.5 leading-snug">
+                          {decisionsCount > 0
+                            ? `${decisionsCount} overdue decision${decisionsCount === 1 ? ' is' : 's are'} most urgent — start with ${topSup.name}.`
+                            : `Top priority: ${topSup.name}.`}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })()}
                 <div className="flex-1 overflow-y-auto py-2 px-2 space-y-1">
                 {withHeaders.length === 0 && (
                   <div className="flex flex-col items-center justify-center py-20 text-gray-400 px-4">
