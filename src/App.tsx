@@ -142,8 +142,9 @@ const ACTION_STATE_PILL_LBL: Record<ActionCardState, string> = {
 }
 
 const actionCardKey   = (g: ActionGroup) => `${g.supplierId}-${g.type}`
-const actionTypeLbl   = (g: ActionGroup) => g.type === 'overdue' ? 'Chase' : g.type === 'at_risk' ? 'Approve date change' : 'Confirm DC booking'
-const actionTypeCls   = (g: ActionGroup) => g.type === 'overdue' ? 'bg-red-50 text-red-600' : g.type === 'at_risk' ? 'bg-orange-50 text-orange-600' : 'bg-amber-50 text-amber-600'
+// Legacy state-pill maps retained for any external lookups (e.g. tooltips) — pill rendering itself
+// now goes through ActionCardPills + deriveCardPills.
+void ACTION_STATE_PILL_CLS; void ACTION_STATE_PILL_LBL
 const parseOrderValAt = (v: string) => parseInt(v.replace(/[^0-9]/g, '')) || 0
 const daysOverdueAt   = (po: PO, today: Date) => Math.ceil((today.getTime() - new Date(po.expectedDelivery).getTime()) / 86400000)
 const actionUrgWt     = (g: ActionGroup) => g.type === 'overdue' ? 3 : g.type === 'at_risk' ? 2 : 1
@@ -1033,6 +1034,129 @@ function ActionQueueCard({
   )
 }
 
+// ── Shared ActionCardPills (status + action-type, used everywhere a card or header surfaces an action) ──
+type CardStatusKind = 'decision-needed' | 'agent-drafted' | 'agent-will-handle'
+
+const CARD_STATUS_LBL: Record<CardStatusKind, string> = {
+  'decision-needed':  'Decision needed',
+  'agent-drafted':    'Agent drafted',
+  'agent-will-handle':'Agent will handle',
+}
+const CARD_STATUS_CLS: Record<CardStatusKind, string> = {
+  'decision-needed':  'bg-red-100 text-red-700',
+  'agent-drafted':    'bg-purple-100 text-purple-700',
+  'agent-will-handle':'bg-gray-100 text-gray-600',
+}
+
+// Derive the two pills for a card from its group + supplier. Tier 1 weak-supplier overdues
+// (OTR < 70) upgrade to "Decision needed / Commercial decision" even before the 14-day mark.
+function deriveCardPills(group: ActionGroup, sup: Supplier | null): { status: CardStatusKind; actionTypeLabel: string } {
+  if (group.type === 'overdue') {
+    const maxOver = Math.max(...group.pos.map(p => Math.ceil((Date.now() - new Date(p.expectedDelivery).getTime()) / 86400000)))
+    const decisionNeeded = maxOver >= 14 || (sup && sup.onTimeRate < 70)
+    if (decisionNeeded) return { status: 'decision-needed',   actionTypeLabel: 'Commercial decision' }
+    return                     { status: 'agent-will-handle', actionTypeLabel: 'Routine chase' }
+  }
+  if (group.type === 'at_risk') return { status: 'agent-drafted', actionTypeLabel: 'Approve date change' }
+  return                                { status: 'agent-drafted', actionTypeLabel: 'Confirm DC booking' }
+}
+
+function ActionCardPills({ group, supplier, size = 'sm' }: {
+  group:    ActionGroup
+  supplier: Supplier | null
+  size?:    'sm' | 'md'
+}) {
+  const { status, actionTypeLabel } = deriveCardPills(group, supplier)
+  const pillSize = size === 'md' ? 'text-[10px] px-2 py-0.5' : 'text-[9px] px-1.5 py-0.5'
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap">
+      <span className={`${pillSize} font-bold rounded-full ${CARD_STATUS_CLS[status]}`}>{CARD_STATUS_LBL[status]}</span>
+      <span className={`${pillSize} font-semibold rounded bg-gray-100 text-gray-600`}>{actionTypeLabel}</span>
+    </div>
+  )
+}
+
+// ── Shared LogActivityButton (header button + self-contained popover, used by both supplier workspaces) ──
+function LogActivityButton({
+  onSave,
+  buttonLabel = 'Log activity',
+  toastText,
+}: {
+  onSave:       (kind: ActivityKind, text: string) => void
+  buttonLabel?: string
+  toastText?:   string | null
+}) {
+  const [open, setOpen]     = useState(false)
+  const [kind, setKind]     = useState<ActivityKind>('note')
+  const [text, setText]     = useState('')
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="h-7 px-2 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-800 transition-colors flex items-center gap-1 text-[11px] font-medium"
+        title="Log a note, call, or action"
+      >
+        <PlusCircle className="w-3.5 h-3.5" /> {buttonLabel}
+      </button>
+      {open && (
+        <div className="absolute top-9 right-0 z-30 w-[360px] bg-white rounded-xl shadow-xl border border-gray-200 p-3">
+          <div className="flex items-center gap-1 mb-2 bg-gray-50 rounded-lg p-0.5">
+            {(['note', 'call', 'action'] as const).map(k => (
+              <button
+                key={k}
+                onClick={() => setKind(k)}
+                className={`flex-1 h-7 rounded-md text-[11px] font-semibold transition-colors capitalize ${
+                  kind === k ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                {k}
+              </button>
+            ))}
+          </div>
+          <textarea
+            value={text}
+            onChange={e => setText(e.target.value)}
+            rows={4}
+            autoFocus
+            placeholder={
+              kind === 'note' ? 'Add a note for the team…'
+              : kind === 'call' ? 'What did you discuss? Who did you speak with?'
+              : 'What did you do?'
+            }
+            className="w-full text-[11px] text-gray-700 leading-relaxed p-2.5 rounded-lg border border-gray-200 bg-white resize-none focus:outline-none focus:ring-1 focus:ring-indigo-400 placeholder:text-gray-400 mb-2"
+          />
+          <div className="flex justify-end gap-2">
+            <button
+              onClick={() => { setOpen(false); setText(''); setKind('note') }}
+              className="h-7 px-3 text-[11px] font-medium rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => {
+                if (!text.trim()) return
+                onSave(kind, text.trim())
+                setOpen(false)
+                setText('')
+                setKind('note')
+              }}
+              disabled={!text.trim()}
+              className="h-7 px-3 text-[11px] font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors disabled:opacity-50"
+            >
+              Log activity
+            </button>
+          </div>
+        </div>
+      )}
+      {toastText && (
+        <div className="absolute top-9 right-0 z-30 rounded-lg border border-green-200 bg-green-50 px-3 py-1.5 text-[11px] font-semibold text-green-700 flex items-center gap-1.5">
+          <Check className="w-3 h-3" /> {toastText}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Shared ActionItemCard (used by PO Monitoring rail + Home overview) ────────
 function ActionItemCard({
   group, state, selected, onSelect,
@@ -1068,7 +1192,7 @@ function ActionItemCard({
       } ${snoozed ? 'opacity-50' : ''}`}
     >
       {compact && showSupplierHeader && sup ? (
-        // Compact: supplier + pattern chip + state pill + action-type pill all inline (Row 1).
+        // Compact: supplier + pattern chip + 2 pills inline (Row 1).
         <div className="flex items-center gap-2 flex-wrap mb-1.5">
           <span className="inline-flex items-center gap-1 min-w-0">
             <Building2 className="w-3 h-3 text-indigo-500 shrink-0" />
@@ -1076,8 +1200,7 @@ function ActionItemCard({
           </span>
           {pat === 'structural'    && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-red-100 text-red-700">Structural underperformer</span>}
           {pat === 'concentration' && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">High concentration</span>}
-          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${ACTION_STATE_PILL_CLS[state]}`}>{ACTION_STATE_PILL_LBL[state]}</span>
-          <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded ${actionTypeCls(group)}`}>{actionTypeLbl(group)}</span>
+          <ActionCardPills group={group} supplier={sup} />
           {relativeTime && <span className="text-[10px] text-gray-400 ml-auto">{relativeTime}</span>}
         </div>
       ) : (
@@ -1090,9 +1213,8 @@ function ActionItemCard({
               {pat === 'concentration' && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">High concentration</span>}
             </div>
           )}
-          <div className="flex items-center gap-1.5 mb-1 flex-wrap">
-            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${ACTION_STATE_PILL_CLS[state]}`}>{ACTION_STATE_PILL_LBL[state]}</span>
-            <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded ${actionTypeCls(group)}`}>{actionTypeLbl(group)}</span>
+          <div className="mb-1">
+            <ActionCardPills group={group} supplier={sup ?? null} />
           </div>
         </>
       )}
@@ -2958,10 +3080,7 @@ function InquiryDrawer({
   const [escalateDialogOpen,setEscalateDialogOpen]= useState(false)
   const [escalateContext,   setEscalateContext]   = useState('')
 
-  // Log activity popover state
-  const [logActivityOpen,   setLogActivityOpen]   = useState(false)
-  const [logActivityKind,   setLogActivityKind]   = useState<ActivityKind>('note')
-  const [logActivityText,   setLogActivityText]   = useState('')
+  // Log activity toast (the popover itself is encapsulated in <LogActivityButton />)
   const [logActivityToast,  setLogActivityToast]  = useState<string | null>(null)
 
   // Auto-generate draft on open
@@ -3149,23 +3268,6 @@ function InquiryDrawer({
     return [...legacy, ...explicit]
   }, [thread?.activityLog, thread?.internalNotes, thread?.recId, thread?.rounds])
 
-  const handleLogActivity = () => {
-    if (!thread || !logActivityText.trim()) return
-    const newEntry: ActivityLogEntry = {
-      id:        `act-${Date.now()}`,
-      kind:      logActivityKind,
-      author:    'You',
-      timestamp: new Date().toISOString(),
-      content:   logActivityText.trim(),
-    }
-    onUpdate({ ...thread, activityLog: [...(thread.activityLog ?? []), newEntry] })
-    setLogActivityOpen(false)
-    setLogActivityText('')
-    setLogActivityKind('note')
-    setLogActivityToast('Activity logged.')
-    setTimeout(() => setLogActivityToast(null), 2200)
-  }
-
   const exFactoryRecDt   = rec.exFactoryDate ? new Date(rec.exFactoryDate) : null
   const weeksToExFactory = exFactoryRecDt ? (exFactoryRecDt.getTime() - today.getTime()) / (7 * 86400000) : null
   const leadTimeBreach   = weeksToExFactory !== null && !!lastReply && (lastReply as SupplierNegReply).leadTimeWeeks > weeksToExFactory
@@ -3255,61 +3357,25 @@ function InquiryDrawer({
             </div>
             <div className="text-xs text-gray-400">{rec.supplier} · {rec.sku}</div>
           </div>
-          <div className="flex items-center gap-1 shrink-0 mt-0.5 relative">
-            <button
-              onClick={() => setLogActivityOpen(o => !o)}
-              className="h-7 px-2 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-800 transition-colors flex items-center gap-1 text-[11px] font-medium"
-              title="Log a note, call, or action"
-            >
-              <PlusCircle className="w-3.5 h-3.5" /> Log activity
-            </button>
+          <div className="flex items-center gap-1 shrink-0 mt-0.5">
+            <LogActivityButton
+              onSave={(kind, text) => {
+                if (!thread) return
+                const newEntry: ActivityLogEntry = {
+                  id:        `act-${Date.now()}`,
+                  kind,
+                  author:    'You',
+                  timestamp: new Date().toISOString(),
+                  content:   text,
+                }
+                onUpdate({ ...thread, activityLog: [...(thread.activityLog ?? []), newEntry] })
+                setLogActivityToast('Activity logged.')
+                setTimeout(() => setLogActivityToast(null), 2200)
+              }}
+            />
             <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 transition-colors">
               <X className="w-4 h-4" />
             </button>
-            {logActivityOpen && (
-              <div className="absolute top-9 right-0 z-30 w-[360px] bg-white rounded-xl shadow-xl border border-gray-200 p-3">
-                <div className="flex items-center gap-1 mb-2 bg-gray-50 rounded-lg p-0.5">
-                  {(['note', 'call', 'action'] as const).map(k => (
-                    <button
-                      key={k}
-                      onClick={() => setLogActivityKind(k)}
-                      className={`flex-1 h-7 rounded-md text-[11px] font-semibold transition-colors capitalize ${
-                        logActivityKind === k ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-                      }`}
-                    >
-                      {k}
-                    </button>
-                  ))}
-                </div>
-                <textarea
-                  value={logActivityText}
-                  onChange={e => setLogActivityText(e.target.value)}
-                  rows={4}
-                  autoFocus
-                  placeholder={
-                    logActivityKind === 'note' ? 'Add a note for the team…'
-                    : logActivityKind === 'call' ? 'What did you discuss? Who did you speak with?'
-                    : 'What did you do?'
-                  }
-                  className="w-full text-[11px] text-gray-700 leading-relaxed p-2.5 rounded-lg border border-gray-200 bg-white resize-none focus:outline-none focus:ring-1 focus:ring-indigo-400 placeholder:text-gray-400 mb-2"
-                />
-                <div className="flex justify-end gap-2">
-                  <button
-                    onClick={() => { setLogActivityOpen(false); setLogActivityText('') }}
-                    className="h-7 px-3 text-[11px] font-medium rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleLogActivity}
-                    disabled={!logActivityText.trim()}
-                    className="h-7 px-3 text-[11px] font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors disabled:opacity-50"
-                  >
-                    Log activity
-                  </button>
-                </div>
-              </div>
-            )}
           </div>
         </div>
 
@@ -4429,7 +4495,7 @@ const PIPELINE_STAGE_LABELS: Record<PipelineStage, string> = {
   draft:            'Draft',
   pending_approval: 'Pending approval',
   approved:         'Approved',
-  pushed:           'Sent to PO draft',
+  pushed:           'Sent to Order App',
   rejected:         'Rejected',
 }
 
@@ -4982,9 +5048,9 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                     {curStatus === 'Approved' && (
                       <button onClick={() => {
                         setStatusOverrides(o => ({ ...o, [p.id]: 'Sent' }))
-                        showToast(`${p.name} pushed to draft Purchase Order.`)
+                        showToast(`${p.name} pushed to Order App.`)
                       }} className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors">
-                        Push to PO draft
+                        Push to Order App
                       </button>
                     )}
                     <button onClick={() => openSupplierInquiry(p.id)}
@@ -5743,7 +5809,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                   onClick={handlePushToOrderApp}
                   className="h-8 px-4 rounded-lg text-xs font-semibold bg-emerald-600 text-white disabled:opacity-40 disabled:cursor-not-allowed hover:bg-emerald-700 transition-colors"
                 >
-                  Push to PO draft{approvedEligible > 0 ? ` (${approvedEligible})` : ''}
+                  Push to Order App{approvedEligible > 0 ? ` (${approvedEligible})` : ''}
                 </button>
               </div>
             )}
@@ -5879,11 +5945,11 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                             {stage === 'approved' && (
                               <button onClick={() => setPushModalIds([p.id])}
                                 className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors">
-                                Push to PO draft
+                                Push to Order App
                               </button>
                             )}
                             {stage === 'pushed' && (
-                              <span className="text-[10px] text-gray-400 font-medium py-0.5">Sent to PO draft</span>
+                              <span className="text-[10px] text-gray-400 font-medium py-0.5">Sent to Order App</span>
                             )}
                             {stage === 'rejected' && (() => {
                               const meta = REJECTION_META[p.id]
@@ -5995,8 +6061,8 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
             <div className="bg-white rounded-2xl shadow-2xl p-6 w-[480px]">
-              <div className="text-sm font-bold text-gray-900 mb-1">Push {pushModalIds.length} line{pushModalIds.length !== 1 ? 's' : ''} to draft Purchase Order</div>
-              <div className="text-xs text-gray-400 mb-4">Pre-flight check before pushing to draft Purchase Order.</div>
+              <div className="text-sm font-bold text-gray-900 mb-1">Push {pushModalIds.length} line{pushModalIds.length !== 1 ? 's' : ''} to Order App</div>
+              <div className="text-xs text-gray-400 mb-4">Pre-flight check before pushing to Order App.</div>
               <div className="mb-3">
                 <label className="text-xs font-semibold text-gray-600 block mb-1">Collection name</label>
                 <input type="text" defaultValue={defaultCollection}
@@ -6046,7 +6112,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                   })
                   setPushModalIds([])
                   setSelectedIds(new Set())
-                  showToast(`${pushModalIds.length} line${pushModalIds.length !== 1 ? 's' : ''} pushed to draft Purchase Order.`)
+                  showToast(`${pushModalIds.length} line${pushModalIds.length !== 1 ? 's' : ''} pushed to Order App.`)
                 }}
                   className="flex-1 h-9 rounded-lg bg-green-600 text-white text-xs font-semibold hover:bg-green-700 transition-colors">
                   Push {pushModalIds.length} line{pushModalIds.length !== 1 ? 's' : ''}
@@ -8323,10 +8389,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           const drawerTrigger      = drawerGroup?.triggerMessage ?? null
           const triggerIsExpanded  = !!(drawerCardKey && triggerExpanded[drawerCardKey])
 
-          // State → visual mapping pulled from module-level ACTION_STATE_PILL_CLS / _LBL.
-          // The drawer header still uses these via lookups below.
-          const statePillCls  = ACTION_STATE_PILL_CLS
-          const statePillLbl  = ACTION_STATE_PILL_LBL
+          // Pill rendering for the drawer header is delegated to <ActionCardPills /> below.
 
           return (
           <>
@@ -8484,15 +8547,29 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                     {drawerView === 'action' ? (
                       <>
                         <div className="flex items-start justify-between gap-3 mb-3">
-                          <div>
-                            <div className="flex items-center gap-2 mb-0.5">
-                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${drawerState ? statePillCls[drawerState] : ''}`}>{drawerState ? statePillLbl[drawerState] : ''}</span>
-                              <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-md ${actionTypeCls(drawerGroup)}`}>{actionTypeLbl(drawerGroup)}</span>
+                          <div className="min-w-0 flex-1">
+                            <div className="mb-0.5">
+                              <ActionCardPills group={drawerGroup} supplier={drawerSup} size="md" />
                             </div>
                             <div className="text-base font-bold text-gray-900">{drawerSup.name}</div>
                             <div className="text-xs text-gray-400 mt-0.5">{SUPPLIER_EMAILS[drawerGroup.supplierId]} · {drawerGroup.pos.length} PO{drawerGroup.pos.length > 1 ? 's' : ''}</div>
                           </div>
-                          <button onClick={() => setDrawerCardKey(null)} className="p-1 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 shrink-0"><X className="w-4 h-4" /></button>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <LogActivityButton
+                              onSave={(kind, text) => {
+                                if (!drawerGroup) return
+                                const prefix = kind === 'call' ? '[Call] ' : kind === 'action' ? '[Action] ' : ''
+                                drawerGroup.pos.forEach(p => addPOEvent(p.id, {
+                                  id:        `act-${Date.now()}-${p.id}`,
+                                  type:      'manual_note',
+                                  timestamp: new Date().toISOString(),
+                                  author:    'buyer',
+                                  body:      prefix + text,
+                                }))
+                              }}
+                            />
+                            <button onClick={() => setDrawerCardKey(null)} className="p-1 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
+                          </div>
                         </div>
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${drawerSup.onTimeRate >= 80 ? 'bg-green-50 text-green-700 border-green-100' : drawerSup.onTimeRate >= 70 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'}`}>OTR {drawerSup.onTimeRate}%</span>
@@ -8593,12 +8670,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                 )}
                               </>
                             )}
-                            <div className="pt-1.5 border-t border-sky-100">
-                              <button
-                                onClick={() => setLogNoteOpen(prev => ({ ...prev, [drawerCardKey!]: true }))}
-                                className="text-[10px] text-sky-500 hover:text-sky-700 transition-colors"
-                              >+ Log call or note</button>
-                            </div>
+                            {/* Log call/note now lives in the workspace header (Log activity button). */}
                           </div>
                         ) : (
                           <div className="text-[10px] text-gray-400">
@@ -8976,7 +9048,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                         )}
                         <div className="flex items-center gap-3">
                           <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors">Snooze 3 days</button>
-                          <button onClick={() => setLogNoteOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors">Log call or note</button>
                         </div>
                         {isSnoozeConfirm && (
                           <span className="text-[11px] text-gray-600">Reappear in 3 days?
@@ -9055,14 +9126,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                               <button onClick={() => setLogNoteOpen(prev => ({ ...prev, [drawerCardKey!]: false }))} className="text-[11px] text-gray-400 hover:text-gray-600">Cancel</button>
                             </div>
                           </div>
-                        ) : (
-                          <button
-                            onClick={() => setLogNoteOpen(prev => ({ ...prev, [drawerCardKey!]: true }))}
-                            className="flex items-center gap-1.5 text-[11px] text-gray-400 hover:text-gray-600 transition-colors mb-3"
-                          >
-                            <span className="text-gray-300 font-semibold">+</span> Log call or note
-                          </button>
-                        )}
+                        ) : null /* "+ Log call or note" trigger removed — use the Log activity button in the header */}
                       </div>
                       )}
 
@@ -9301,8 +9365,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                         </div>
                         <div className="flex items-center justify-center gap-4">
                           <button onClick={() => handleNoReplyTrigger(drawerGroup)} className="text-[11px] text-amber-600 hover:text-amber-800 font-medium transition-colors">Mark: no reply (demo)</button>
-                          <span className="text-gray-200">·</span>
-                          <button onClick={() => setLogNoteOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-500 hover:text-gray-700 font-medium transition-colors">Log call or note</button>
                           <span className="text-gray-200">·</span>
                           <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-500 hover:text-gray-700 font-medium transition-colors">Snooze 3 days</button>
                         </div>
