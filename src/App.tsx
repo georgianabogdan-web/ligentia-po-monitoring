@@ -985,7 +985,7 @@ function ActionQueueCard({
           View all in PO Monitoring →
         </button>
       </div>
-      <div className="px-2 py-2 space-y-1">
+      <div className="px-4 py-3 grid grid-cols-1 min-[900px]:grid-cols-2 gap-4 items-stretch">
         {top5.map(g => {
           const sup = getSupplier(g.supplierId)
           const state = stateOf(g)
@@ -1003,6 +1003,7 @@ function ActionQueueCard({
               showSnooze={false}
               relativeTime={rel || undefined}
               today={today}
+              compact
             />
           )
         })}
@@ -1025,6 +1026,7 @@ function ActionItemCard({
   supplier, showSupplierHeader = false,
   showAgentRec = true, showSnooze = false, snoozed = false, onSnoozeToggle,
   relativeTime, today,
+  compact = false,
 }: {
   group:                ActionGroup
   state:                ActionCardState
@@ -1038,30 +1040,49 @@ function ActionItemCard({
   onSnoozeToggle?:      () => void
   relativeTime?:        string
   today:                Date
+  compact?:             boolean
 }) {
   const sup = supplier
   const pat = sup ? getRelationshipPattern(sup) : null
+  const padding = compact ? 'px-3 py-2.5' : 'px-3 py-2'
   return (
     <button
       onClick={onSelect}
-      className={`w-full text-left rounded-lg border-l-2 transition-colors px-3 py-2 ${
+      className={`w-full h-full text-left rounded-lg border-l-2 transition-colors ${padding} ${
         selected
           ? 'bg-white border-l-indigo-500 shadow-[0_1px_2px_rgba(0,0,0,0.04)] border-r border-r-gray-200 border-t border-t-gray-200 border-b border-b-gray-200'
           : 'bg-white/0 border-l-transparent hover:bg-white'
       } ${snoozed ? 'opacity-50' : ''}`}
     >
-      {showSupplierHeader && sup && (
-        <div className="flex items-center gap-1.5 mb-1 flex-wrap">
-          <Building2 className="w-3 h-3 text-indigo-500 shrink-0" />
-          <span className="text-[10px] font-bold text-gray-700 truncate">{sup.name}</span>
+      {compact && showSupplierHeader && sup ? (
+        // Compact: supplier + pattern chip + state pill + action-type pill all inline (Row 1).
+        <div className="flex items-center gap-2 flex-wrap mb-1.5">
+          <span className="inline-flex items-center gap-1 min-w-0">
+            <Building2 className="w-3 h-3 text-indigo-500 shrink-0" />
+            <span className="text-[10px] font-bold text-gray-700 truncate">{sup.name}</span>
+          </span>
           {pat === 'structural'    && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-red-100 text-red-700">Structural underperformer</span>}
           {pat === 'concentration' && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">High concentration</span>}
+          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${ACTION_STATE_PILL_CLS[state]}`}>{ACTION_STATE_PILL_LBL[state]}</span>
+          <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded ${actionTypeCls(group)}`}>{actionTypeLbl(group)}</span>
+          {relativeTime && <span className="text-[10px] text-gray-400 ml-auto">{relativeTime}</span>}
         </div>
+      ) : (
+        <>
+          {showSupplierHeader && sup && (
+            <div className="flex items-center gap-1.5 mb-1 flex-wrap">
+              <Building2 className="w-3 h-3 text-indigo-500 shrink-0" />
+              <span className="text-[10px] font-bold text-gray-700 truncate">{sup.name}</span>
+              {pat === 'structural'    && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-red-100 text-red-700">Structural underperformer</span>}
+              {pat === 'concentration' && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">High concentration</span>}
+            </div>
+          )}
+          <div className="flex items-center gap-1.5 mb-1 flex-wrap">
+            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${ACTION_STATE_PILL_CLS[state]}`}>{ACTION_STATE_PILL_LBL[state]}</span>
+            <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded ${actionTypeCls(group)}`}>{actionTypeLbl(group)}</span>
+          </div>
+        </>
       )}
-      <div className="flex items-center gap-1.5 mb-1 flex-wrap">
-        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${ACTION_STATE_PILL_CLS[state]}`}>{ACTION_STATE_PILL_LBL[state]}</span>
-        <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded ${actionTypeCls(group)}`}>{actionTypeLbl(group)}</span>
-      </div>
       <div className="text-[11px] font-semibold text-gray-900 mb-0.5 leading-snug line-clamp-2">{actionHeadline(group, today)}</div>
       <div className="text-[10px] text-gray-500 mb-1 truncate">
         {group.pos.length <= 2
@@ -1072,7 +1093,7 @@ function ActionItemCard({
       {showAgentRec && (
         <div className="text-[10px] text-gray-400 italic line-clamp-2">{actionAgentRec(group, state, today)}</div>
       )}
-      {(showSnooze || relativeTime) && (
+      {!compact && (showSnooze || relativeTime) && (
         <div className="flex items-center justify-between mt-1.5">
           {relativeTime ? <span className="text-[10px] text-gray-400">{relativeTime}</span> : <span />}
           {showSnooze && (
