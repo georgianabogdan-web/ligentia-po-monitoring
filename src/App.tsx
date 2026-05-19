@@ -150,6 +150,7 @@ const daysOverdueAt   = (po: PO, today: Date) => Math.ceil((today.getTime() - ne
 const actionUrgWt     = (g: ActionGroup) => g.type === 'overdue' ? 3 : g.type === 'at_risk' ? 2 : 1
 const actionScore     = (g: ActionGroup) => actionUrgWt(g) * g.pos.reduce((s, p) => s + parseOrderValAt(p.orderValue), 0)
 
+// Legacy headline helper retained for potential reuse — superseded by actionIssueTitle/actionImpactSubtitle on rail.
 function actionHeadline(g: ActionGroup, today: Date): string {
   const totalVal = g.pos.reduce((s, p) => s + parseOrderValAt(p.orderValue), 0)
   const valStr = totalVal > 0 ? ` · £${totalVal.toLocaleString()} at risk` : ''
@@ -157,6 +158,7 @@ function actionHeadline(g: ActionGroup, today: Date): string {
   if (g.type === 'at_risk') return `${g.pos.length} date change${g.pos.length > 1 ? 's' : ''} requested${valStr}`
   return `${g.pos.length} PO${g.pos.length > 1 ? 's' : ''} with unconfirmed DC booking${valStr}`
 }
+void actionHeadline
 function actionAgentRec(g: ActionGroup, state: ActionCardState, today: Date): string {
   if (state === 'awaiting-reply') return 'Waiting for supplier response — no action needed'
   if (state === 'reply-received') return 'Agent summary: supplier replied — review proposed date changes'
@@ -164,6 +166,48 @@ function actionAgentRec(g: ActionGroup, state: ActionCardState, today: Date): st
   if (g.type === 'overdue') return `Agent recommends: urgent chase covering ${g.pos.length > 1 ? 'all ' + g.pos.length + ' orders' : 'this order'}`
   if (g.type === 'at_risk') return 'Agent recommends: request root cause and revised schedule'
   return 'Agent recommends: confirm freight forwarder booking reference'
+}
+void actionAgentRec
+
+// Rail-card copy: issue title (verb-led) + impact subtitle (£ + scope + context).
+function actionIssueTitle(g: ActionGroup, today: Date): string {
+  if (g.type === 'overdue') {
+    const maxDays = Math.max(...g.pos.map(p => daysOverdueAt(p, today)))
+    const ctx = g.pos.some(p => p.revisedDelivery) ? 'revised date pending' : 'no revised date'
+    return `Supplier ${maxDays} days late · ${ctx}`
+  }
+  if (g.type === 'at_risk') {
+    const daysPushed = Math.max(...g.pos.map(p => {
+      if (!p.revisedDelivery) return 0
+      return Math.round((new Date(p.revisedDelivery).getTime() - new Date(p.expectedDelivery).getTime()) / 86400000)
+    }))
+    return `${daysPushed}-day delivery push requested`
+  }
+  // late_dc
+  const dispatchDays = Math.max(0, Math.round((new Date(g.pos[0].expectedDelivery).getTime() - today.getTime()) / 86400000))
+  return `DC booking unconfirmed · ${dispatchDays} days to dispatch`
+}
+
+function actionImpactSubtitle(g: ActionGroup, sup: Supplier | null): string {
+  const totalVal = g.pos.reduce((s, p) => s + parseOrderValAt(p.orderValue), 0)
+  const valStr = totalVal > 0 ? `£${totalVal.toLocaleString()}` : '—'
+  const poCount = g.pos.length
+  const poClause = poCount > 1 ? `${valStr} at risk across ${poCount} POs` : `${valStr} at risk · ${poCount} PO`
+  if (g.type === 'overdue') {
+    if (sup && sup.openPOs >= 20 && sup.onTimeRate < 80) return `${poClause} · High concentration supplier`
+    return `${poClause} · ${SUPPLIER_COVER_WEEKS[sup?.id ?? ''] ?? 6}w cover affected`
+  }
+  if (g.type === 'at_risk') {
+    const t = g.triggerMessage
+    const reasonHint = !t ? '' :
+      /yarn|fabric|raw material/i.test(t.body)        ? ' · Reason: yarn mill delay' :
+      /capacity|production line|priority/i.test(t.body) ? ' · Reason: capacity constraint' :
+      /qc|quality|dye lot/i.test(t.body)              ? ' · Reason: QC failure' :
+      ''
+    return `£${totalVal.toLocaleString()} affected${reasonHint}`
+  }
+  // late_dc
+  return `${valStr} at risk · Awaiting freight reference`
 }
 function relativeTimeFrom(iso: string | undefined, now: Date): string {
   if (!iso) return ''
@@ -1106,32 +1150,37 @@ function ActionRecommendationRow({
         </div>
       )}
       <div
-        className="grid gap-2"
+        className="grid gap-3 items-stretch"
         style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}
       >
         {options.map(opt => {
           const isRecommended = opt.key === recommendedKey
           const isSelected    = selectedKey === opt.key
-          const cardCls = isSelected
-            ? 'bg-indigo-600 border-indigo-600 text-white'
-            : isRecommended
-              ? 'bg-amber-50 border-amber-300 text-gray-900'
-              : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50 hover:border-gray-300'
+          // Accent-only treatment: recommended uses green border + badge + check (no fill).
+          // Selected (whether recommended or alternative) overlays a subtle indigo ring + tint.
+          const baseCls = 'bg-white text-gray-800 hover:bg-gray-50'
+          const borderCls = isRecommended
+            ? 'border-green-500 border-[1.5px]'
+            : 'border-gray-200 border'
+          const selectedCls = isSelected ? 'ring-2 ring-indigo-300 ring-offset-1 bg-indigo-50/40' : ''
           return (
             <button
               key={opt.key}
               onClick={opt.onClick}
-              className={`rounded-xl border-2 px-3 py-2.5 text-left transition-colors flex flex-col h-full ${cardCls}`}
+              className={`relative rounded-lg ${borderCls} px-3.5 py-3 text-left transition-colors flex flex-col h-full ${baseCls} ${selectedCls}`}
             >
               {isRecommended && (
-                <div className={`text-[9px] font-bold uppercase tracking-wider mb-1 ${isSelected ? 'text-indigo-100' : 'text-amber-700'}`}>
+                <span className="absolute top-2 right-2 inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-green-100 text-green-700">
                   Recommended
-                </div>
+                </span>
               )}
-              <div className={`text-[12px] font-bold leading-tight ${isSelected ? 'text-white' : 'text-gray-900'}`}>{opt.label}</div>
-              <div className={`text-[10px] mt-1 leading-snug ${isSelected ? 'text-indigo-100' : 'text-gray-500'}`}>{opt.consequence}</div>
+              <div className={`flex items-center gap-1 ${isRecommended ? 'pr-16' : ''}`}>
+                {isRecommended && <Check className="w-3 h-3 text-green-600 shrink-0" />}
+                <span className={`text-[12px] leading-tight ${isRecommended ? 'font-semibold text-gray-900' : 'font-medium text-gray-800'}`}>{opt.label}</span>
+              </div>
+              <div className="text-[10px] mt-1.5 leading-snug text-gray-500">{opt.consequence}</div>
               {isRecommended && opt.why && (
-                <div className={`text-[10px] italic mt-2 leading-snug ${isSelected ? 'text-indigo-100' : 'text-gray-500'}`}>{opt.why}</div>
+                <div className="text-[10px] italic mt-2 leading-snug text-gray-500">{opt.why}</div>
               )}
             </button>
           )
@@ -1377,6 +1426,7 @@ function ActionItemCard({
   const sup = supplier
   const pat = sup ? getRelationshipPattern(sup) : null
   const padding = compact ? 'px-3 py-2.5' : 'px-3 py-2'
+  void state; void showAgentRec  // legacy props retained for callsite compat; rail card now uses issue/impact
   return (
     <button
       onClick={onSelect}
@@ -1413,16 +1463,14 @@ function ActionItemCard({
           </div>
         </>
       )}
-      <div className="text-[11px] font-semibold text-gray-900 mb-0.5 leading-snug line-clamp-2">{actionHeadline(group, today)}</div>
-      <div className="text-[10px] text-gray-500 mb-1 truncate">
+      <div className="text-[12px] font-semibold text-gray-900 mb-0.5 leading-snug line-clamp-2">{actionIssueTitle(group, today)}</div>
+      <div className="text-[10px] text-gray-500 mb-1 leading-snug line-clamp-2">{actionImpactSubtitle(group, sup ?? null)}</div>
+      <div className="text-[10px] text-gray-400 truncate">
         {group.pos.length <= 2
           ? group.pos.map(p => p.id).join(', ')
           : `${group.pos[0].id}, ${group.pos[1].id} +${group.pos.length - 2} more`
         }
       </div>
-      {showAgentRec && (
-        <div className="text-[10px] text-gray-400 italic line-clamp-2">{actionAgentRec(group, state, today)}</div>
-      )}
       {!compact && (showSnooze || relativeTime) && (
         <div className="flex items-center justify-between mt-1.5">
           {relativeTime ? <span className="text-[10px] text-gray-400">{relativeTime}</span> : <span />}
@@ -8529,7 +8577,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           const drawerMaxOverdue = drawerGroup?.type === 'overdue' ? Math.max(...drawerGroup.pos.map(p => daysOverdue(p))) : 0
           const drawerOrderVal   = drawerGroup ? drawerGroup.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0) : 0
           const cprPct = 10
-          const cprSaving = Math.round(drawerOrderVal * cprPct / 100)
+          const cprSaving = Math.round(drawerOrderVal * cprPct / 100); void cprSaving
           const drawerViewPO = drawerViewPOId ? (ALL_POS.find(p => p.id === drawerViewPOId) ?? null) : null
           const drawerCurrentPill = drawerCardKey
             ? (selectedActionPill[drawerCardKey] ?? (
@@ -8955,10 +9003,10 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                     )}
 
                     {/* ── Decision panel ──────────────────────────────────── */}
-                    {/* DP1: States A & B */}
+                    {/* DP1: Tier-1 action picker (recommendation-first, equal-weight cards). State A and B render the same picker. */}
                     {(drawerUiState === 'A' || drawerUiState === 'B') && (
                       <div className="border-b border-gray-100 px-6 py-4 shrink-0">
-                        {drawerUiState === 'A' ? (
+                        {true ? (
                           <>
                             {drawerGroup.type === 'overdue' ? (() => {
                               const poRec = getPORecommendation(drawerGroup, drawerSup, drawerMaxOverdue, drawerOrderVal, cprPct)
@@ -8968,15 +9016,40 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                               const recBody = pattern === 'structural' ? 'text-red-700' : pattern === 'concentration' ? 'text-amber-700' : 'text-indigo-700'
                               return (
                                 <>
-                                  <p className="text-[13px] font-bold text-gray-900 mb-0.5">What should we do about {drawerSup.name}?</p>
-                                  <p className="text-[11px] text-gray-400 mb-3">
-                                    {drawerGroup.pos.length} PO{drawerGroup.pos.length > 1 ? 's' : ''} &middot; £{drawerOrderVal.toLocaleString()} at risk &middot; {drawerMaxOverdue}d overdue
-                                  </p>
                                   {(() => {
                                     void recBg; void recHd; void recBody
+                                    const coverW = SUPPLIER_COVER_WEEKS[drawerSup.id] ?? 6
+                                    const cprSav = Math.round(drawerOrderVal * cprPct / 100)
+                                    const delayWeeks = Math.ceil(drawerMaxOverdue / 7)
+
+                                    // 2-sentence rationale (gain + trade-off) per recommendation type
+                                    const rationale = (() => {
+                                      if (poRec.action === 'accept_late') {
+                                        return `Accepting locks in the order with a ${delayWeeks}-week intake slip and margin preserved. At ${drawerSup.onTimeRate}% OTR, applying CPR pressure on ${drawerSup.name} risks the relationship without improving reliability; cancelling loses ${coverW > 3 ? 3 : Math.max(1, coverW - 1)} weeks of selling cover with no certainty of replacement.`
+                                      }
+                                      if (poRec.action === 'cpr') {
+                                        return `Requesting CPR recovers £${cprSav.toLocaleString()} margin while keeping the supplier on the hook. Cancelling loses cover with no commitment recovery; accepting the slip writes off margin you can pull back.`
+                                      }
+                                      if (poRec.action === 'cancel') {
+                                        return `At ${drawerSup.onTimeRate}% OTR and ${drawerMaxOverdue}d slip with no resolution, ${drawerSup.name} won't recover this. Cancelling now protects ${coverW}w of cover; further pressure risks compounding the loss.`
+                                      }
+                                      // chase fallback (concentration / routine)
+                                      return `${drawerSup.name} typically resolves delays when chased directly. Escalating to a commercial decision risks the relationship before the supplier has had a chance to respond.`
+                                    })()
+
+                                    const recLbl = poRec.primaryLabel.split('(')[0].trim().replace(/\+$/, '').trim()
+
+                                    // Refined card outcome copy
+                                    const refinedConsequence = (key: string, fallback: string) => {
+                                      if (key === 'accept_late') return `Intake delayed ${delayWeeks} weeks · Margin preserved · Order locked`
+                                      if (key === 'cpr')         return `Margin recovered £${cprSav.toLocaleString()} · Supplier may resist · Adds tension`
+                                      if (key === 'cancel')      return `${coverW}w cover lost · No replacement secured · Commitment cancelled`
+                                      return fallback
+                                    }
+
                                     const allOpts = [
-                                      { key: poRec.action, label: poRec.primaryLabel, consequence: poRec.primaryForecast, why: poRec.rationale },
-                                      ...poRec.altOptions.map(o => ({ key: o.key, label: o.label, consequence: o.forecast, why: undefined as string | undefined })),
+                                      { key: poRec.action, label: poRec.primaryLabel, consequence: refinedConsequence(poRec.action, poRec.primaryForecast), why: undefined as string | undefined },
+                                      ...poRec.altOptions.map(o => ({ key: o.key, label: o.label, consequence: refinedConsequence(o.key, o.forecast), why: undefined as string | undefined })),
                                     ]
                                     const pickOverdue = (k: string) => {
                                       if (!drawerCardKey) return
@@ -8989,11 +9062,18 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                     }
                                     const selectedKey = drawerCurrentPill === 'chase' ? 'chase' : drawerDecChoice
                                     return (
-                                      <ActionRecommendationRow
-                                        options={allOpts.map(o => ({ key: o.key, label: o.label, consequence: o.consequence, why: o.why, onClick: () => pickOverdue(o.key) }))}
-                                        recommendedKey={poRec.action}
-                                        selectedKey={selectedKey}
-                                      />
+                                      <>
+                                        <div className="mb-3">
+                                          <div className="text-[13px] font-semibold text-gray-900">Next step</div>
+                                          <div className="text-[11px] text-gray-500 mt-0.5">Recommended: {recLbl}</div>
+                                          <p className="text-[12px] text-gray-700 leading-relaxed mt-2">{rationale}</p>
+                                        </div>
+                                        <ActionRecommendationRow
+                                          options={allOpts.map(o => ({ key: o.key, label: o.label, consequence: o.consequence, why: o.why, onClick: () => pickOverdue(o.key) }))}
+                                          recommendedKey={poRec.action}
+                                          selectedKey={selectedKey}
+                                        />
+                                      </>
                                     )
                                   })()}
                                   <details className="mb-3">
@@ -9057,26 +9137,57 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                 const recBody = pattern === 'structural' ? 'text-red-700' : pattern === 'concentration' ? 'text-amber-700' : 'text-indigo-700'
                                 return (
                                   <>
-                                    <p className="text-[13px] font-bold text-gray-900 mb-0.5">Should we approve {drawerSup.name}'s date change?</p>
-                                    <p className="text-[11px] text-gray-400 mb-3">
-                                      {drawerGroup.pos.length} PO{drawerGroup.pos.length > 1 ? 's' : ''} · £{drawerOrderVal.toLocaleString()} at risk · {daysPushed}-day push requested
-                                    </p>
                                     {(() => {
                                       void recBg; void recHd; void recBody
+                                      const coverW = SUPPLIER_COVER_WEEKS[drawerSup.id] ?? 6
+                                      const coverAfterFull = Math.max(0, coverW - Math.ceil(daysPushed / 7))
+                                      const midpointDays = Math.ceil(daysPushed / 2)
+                                      const coverAfterMid  = Math.max(0, coverW - Math.ceil(midpointDays / 7))
+
+                                      const rationale = (() => {
+                                        if (dateRec.action === 'approve_date') {
+                                          return `The supplier's reason is ${substantiveReason ? 'valid (operational issue)' : 'plausible'} and cover holds at ${coverAfterFull}w post-push. Counter-proposing risks delay without material gain; rejecting forces a hard date the supplier likely can't hit anyway.`
+                                        }
+                                        if (dateRec.action === 'counter') {
+                                          return `Countering at +${midpointDays}d splits the difference and protects ${coverAfterMid}w of cover. Approving the full +${daysPushed}d concedes more than the reason warrants; rejecting outright invites a deadlocked timeline you'll still have to resolve.`
+                                        }
+                                        return `Cover is critically low at ${coverW}w and the reason for the delay doesn't justify the push. Approving leaves you stocked out; countering loses time you don't have to negotiate.`
+                                      })()
+
+                                      const recLbl = dateRec.primaryLabel.split('(')[0].trim().replace(/\+$/, '').trim()
+
+                                      const origDate = drawerGroup.pos.reduce((min, p) => p.expectedDelivery < min ? p.expectedDelivery : min, drawerGroup.pos[0].expectedDelivery)
+                                      const midDate  = new Date(origDate); midDate.setDate(new Date(origDate).getDate() + midpointDays)
+                                      const midStr   = midDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+
+                                      const refinedConsequence = (key: string, fallback: string) => {
+                                        if (key === 'approve_date') return `Cover holds: ${coverW}w → ${coverAfterFull}w · Supplier reason valid · No QC concerns`
+                                        if (key === 'counter')      return `Splits the difference (${midStr}) · Protects ${coverAfterMid}w cover · Supplier may resist`
+                                        if (key === 'reject')       return `Forces supplier commitment · Risks formal escalation · No date certainty`
+                                        return fallback
+                                      }
+
                                       const allOpts = [
-                                        { key: dateRec.action, label: dateRec.primaryLabel, consequence: dateRec.primaryForecast, why: dateRec.rationale },
-                                        ...dateRec.altOptions.map(o => ({ key: o.key, label: o.label, consequence: o.forecast, why: undefined as string | undefined })),
+                                        { key: dateRec.action, label: dateRec.primaryLabel, consequence: refinedConsequence(dateRec.action, dateRec.primaryForecast), why: undefined as string | undefined },
+                                        ...dateRec.altOptions.map(o => ({ key: o.key, label: o.label, consequence: refinedConsequence(o.key, o.forecast), why: undefined as string | undefined })),
                                       ]
                                       const pickAtRisk = (k: string) => {
                                         if (!drawerCardKey) return
                                         setSelectedActionPill(prev => ({ ...prev, [drawerCardKey]: k }))
                                       }
                                       return (
-                                        <ActionRecommendationRow
-                                          options={allOpts.map(o => ({ key: o.key, label: o.label, consequence: o.consequence, why: o.why, onClick: () => pickAtRisk(o.key) }))}
-                                          recommendedKey={dateRec.action}
-                                          selectedKey={drawerCurrentPill}
-                                        />
+                                        <>
+                                          <div className="mb-3">
+                                            <div className="text-[13px] font-semibold text-gray-900">Next step</div>
+                                            <div className="text-[11px] text-gray-500 mt-0.5">Recommended: {recLbl}</div>
+                                            <p className="text-[12px] text-gray-700 leading-relaxed mt-2">{rationale}</p>
+                                          </div>
+                                          <ActionRecommendationRow
+                                            options={allOpts.map(o => ({ key: o.key, label: o.label, consequence: o.consequence, why: o.why, onClick: () => pickAtRisk(o.key) }))}
+                                            recommendedKey={dateRec.action}
+                                            selectedKey={drawerCurrentPill}
+                                          />
+                                        </>
                                       )
                                     })()}
                                     <details className="mb-3">
@@ -9215,36 +9326,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                               )
                             })()}
                           </>
-                        ) : (
-                          <>
-                            {drawerCurrentPill === 'decision' && (
-                              <div className="mt-3 space-y-2.5">
-                                <p className="text-[11px] text-gray-500 italic leading-relaxed">
-                                  {drawerMaxOverdue}d overdue · OTR {drawerSup.onTimeRate}% · Avg delay {drawerSup.avgDelayDays}d · Est. cover ~{SUPPLIER_COVER_WEEKS[drawerSup.id] ?? 6}w
-                                </p>
-                                <div className="flex gap-2">
-                                  {([
-                                    { key: 'cancel'      as const, label: 'Cancel',         sub: `Cover loss: ~3 weeks before intake`,    cls: 'border-red-200 bg-red-50 hover:bg-red-100 text-red-800' },
-                                    { key: 'cpr'         as const, label: `CPR ${cprPct}%`, sub: `Margin recovered: £${cprSaving.toLocaleString()}`, cls: 'border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800' },
-                                    { key: 'accept_late' as const, label: 'Accept late',    sub: `Intake delayed: ${Math.ceil(drawerMaxOverdue/7)} weeks`, cls: 'border-green-200 bg-green-50 hover:bg-green-100 text-green-800' },
-                                  ] as const).map(opt => {
-                                    const chosen = drawerDecChoice === opt.key
-                                    return (
-                                      <button
-                                        key={opt.key}
-                                        onClick={() => setDrawerDecision(p => ({ ...p, [drawerCardKey!]: opt.key }))}
-                                        className={`flex-1 border-2 rounded-xl p-2.5 text-center transition-all ${chosen ? 'ring-2 ring-offset-1 ring-indigo-400 ' + opt.cls : 'border-gray-200 bg-white hover:bg-gray-50 text-gray-700'}`}
-                                      >
-                                        <div className="text-xs font-bold">{opt.label}</div>
-                                        <div className={`text-[11px] font-semibold mt-0.5 ${chosen ? '' : 'text-gray-500'}`}>{opt.sub}</div>
-                                      </button>
-                                    )
-                                  })}
-                                </div>
-                              </div>
-                            )}
-                          </>
-                        )}
+                        ) : null}
                       </div>
                     )}
 
