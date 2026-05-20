@@ -328,6 +328,38 @@ interface InquiryThread {
   escalatedTo?:   string
 }
 
+// ── Supplier-level session (bulk negotiation across multiple SKUs) ────────────
+interface SessionRoundResponse {
+  threadId:   string
+  offered:    { cp?: number; moq?: number; leadTime?: number; exFty?: string }
+  status:     'accepted' | 'countered' | 'pushed' | 'rejected' | 'silent'
+  notes?:     string
+}
+interface SessionRound {
+  id:          string
+  roundNumber: number
+  outbound: {
+    sentAt:     string | null
+    subject:    string
+    body:       string
+    recipients: string[]
+  }
+  inbound: {
+    receivedAt:           string | null
+    summary:              string
+    fullReply:            string
+    perThreadResponses:   SessionRoundResponse[]
+  } | null
+}
+interface SupplierSession {
+  id:          string
+  supplierId:  string  // human-readable supplier name (matches REORDER_RECOMMENDATIONS[].supplier)
+  threadIds:   string[]
+  status:      'open' | 'closed'
+  createdAt:   string
+  rounds:      SessionRound[]
+}
+
 // ── Data ───────────────────────────────────────────────────────────────────────
 const SUPPLIERS: Supplier[] = [
   { id: 'ET', name: 'Eastern Textiles Co', onTimeRate: 54, avgDelayDays: 12.4, contractualLeadTimeDays: 60, trend: 'deteriorating', openPOs: 18, category: 'Apparel' },
@@ -642,6 +674,124 @@ const SEEDED_THREADS: Record<string, InquiryThread> = {
     agreedCP: null, agreedMOQ: null, flaggedReason: null, internalNotes: '',
   },
 }
+
+// ── Seeded supplier sessions (bulk negotiations across multiple SKUs) ────────
+const SEEDED_SUPPLIER_SESSIONS: SupplierSession[] = [
+  // Next Sourcing — 3 lines, round 1 reply received (mostly counter)
+  {
+    id: 'session-next-001',
+    supplierId: 'Next Sourcing',
+    threadIds: ['REC-004', 'REC-006', 'REC-008'],
+    status: 'open',
+    createdAt: '2026-05-12T09:00:00Z',
+    rounds: [{
+      id: 'sr-next-r1',
+      roundNumber: 1,
+      outbound: {
+        sentAt:  '2026-05-12T09:30:00Z',
+        subject: 'Rebuy proposal — 3 SKUs · Week 20',
+        body: `Dear Next Sourcing Team,\n\nWe're proposing the following rebuys for 30 Jun ex-fty:\n\n• REC-004 Wrap Midi Dress — 3,200 units · £20.84 · MOQ 250 · ex-fty 30 Jun\n• REC-006 Striped Cotton Tee — 4,800 units · £13.63 · MOQ 300 · ex-fty 30 Jun\n• REC-008 Ruched Bodycon Dress — 2,400 units · £18.27 · MOQ 250 · ex-fty 30 Jun\n\nPlease confirm acceptance or respond with revised terms by Fri 16 May.\n\nBest regards,\nDebenhams Buying`,
+        recipients: ['orders@nextsourcing.co.uk'],
+      },
+      inbound: {
+        receivedAt: '2026-05-15T14:20:00Z',
+        summary:    'Next Sourcing accepted 1 of 3 lines at proposed CP. 2 lines countered with average +£0.55 citing cotton market pressure. Ex-fty held at 30 Jun across all.',
+        fullReply:  `Dear Buying Team,\n\nThank you for the consolidated rebuy proposal. Our position per line:\n\n• Wrap Midi Dress — accepted at £20.84 · MOQ 250 · ex-fty 30 Jun confirmed\n• Striped Cotton Tee — unable to meet £13.63; offering £14.20 (firm) · MOQ 300 · ex-fty 30 Jun\n• Ruched Bodycon Dress — unable to meet £18.27; offering £18.95 · MOQ 250 · ex-fty 30 Jun\n\nCotton input costs have risen ~4% since our last quote; we've absorbed where possible. Happy to discuss further on the two countered lines.\n\nBest regards,\nNext Sourcing`,
+        perThreadResponses: [
+          { threadId: 'REC-004', offered: { cp: 20.84, moq: 250, exFty: '2026-06-30' }, status: 'accepted' },
+          { threadId: 'REC-006', offered: { cp: 14.20, moq: 300, exFty: '2026-06-30' }, status: 'countered', notes: 'Cotton input pressure' },
+          { threadId: 'REC-008', offered: { cp: 18.95, moq: 250, exFty: '2026-06-30' }, status: 'countered', notes: 'Cotton input pressure' },
+        ],
+      },
+    }],
+  },
+  // ASOS Brands — 3 lines, round 2 in progress (we counter-proposed; awaiting reply)
+  {
+    id: 'session-asos-001',
+    supplierId: 'ASOS Brands',
+    threadIds: ['REC-005', 'REC-007', 'REC-009'],
+    status: 'open',
+    createdAt: '2026-05-06T11:00:00Z',
+    rounds: [
+      {
+        id: 'sr-asos-r1',
+        roundNumber: 1,
+        outbound: {
+          sentAt:  '2026-05-06T11:15:00Z',
+          subject: 'Rebuy proposal — 3 SKUs · Week 19',
+          body:    'Round 1 proposal sent — see consolidated rebuy.',
+          recipients: ['wholesale@asosbrands.co.uk'],
+        },
+        inbound: {
+          receivedAt: '2026-05-08T16:40:00Z',
+          summary:    'ASOS accepted 2 of 3 lines. 1 line countered +£0.70.',
+          fullReply:  `Dear Buying Team,\n\nThank you for the rebuy. Tailored Suit Jacket and Oversized Linen Shirt accepted at proposed terms. Bamboo Lounge Set — we cannot hold £15.04 at the requested 2,200 units; offering £15.74 firm.\n\nBest regards,\nASOS Brands`,
+          perThreadResponses: [
+            { threadId: 'REC-005', offered: { cp: 31.78, moq: 200, exFty: '2026-07-05' }, status: 'accepted' },
+            { threadId: 'REC-007', offered: { cp: 16.43, moq: 200, exFty: '2026-07-05' }, status: 'accepted' },
+            { threadId: 'REC-009', offered: { cp: 15.74, moq: 250, exFty: '2026-07-05' }, status: 'countered' },
+          ],
+        },
+      },
+      {
+        id: 'sr-asos-r2',
+        roundNumber: 2,
+        outbound: {
+          sentAt:  '2026-05-15T10:00:00Z',
+          subject: 'Counter offer — 1 line · 15 May',
+          body:    `Dear ASOS Brands Team,\n\nThanks for confirming the two accepted lines. On Bamboo Lounge Set: we can meet you at £15.39 (midpoint of your £15.74 and our original £15.04) — please confirm by Tue 19 May so we can lock the 5 Jul ex-fty.\n\nBest regards,\nDebenhams Buying`,
+          recipients: ['wholesale@asosbrands.co.uk'],
+        },
+        inbound: null,
+      },
+    ],
+  },
+  // L'Oréal UK — 2 lines, round 1 sent, awaiting reply
+  {
+    id: 'session-loreal-001',
+    supplierId: "L'Oréal UK",
+    threadIds: ['REC-001', 'REC-003'],
+    status: 'open',
+    createdAt: '2026-05-18T08:30:00Z',
+    rounds: [{
+      id: 'sr-loreal-r1',
+      roundNumber: 1,
+      outbound: {
+        sentAt:  '2026-05-18T09:00:00Z',
+        subject: 'Rebuy proposal — 2 SKUs · Week 21',
+        body: `Dear L'Oréal UK Team,\n\nWe're proposing the following rebuys for 28 Jun ex-fty:\n\n• REC-001 Retinol Night Cream — 3,060 units · £11.09 · MOQ 500 · ex-fty 28 Jun\n• REC-003 Brightening Eye Cream — 2,980 units · £10.15 · MOQ 500 · ex-fty 28 Jun\n\nPlease confirm acceptance or respond with revised terms by Thu 22 May.\n\nBest regards,\nDebenhams Buying`,
+        recipients: ['orders@loreal.co.uk'],
+      },
+      inbound: null,
+    }],
+  },
+  // Unilever Ltd — single-SKU session, awaiting reply
+  {
+    id: 'session-unilever-001',
+    supplierId: 'Unilever Ltd',
+    threadIds: ['REC-002'],
+    status: 'open',
+    createdAt: '2026-04-29T08:00:00Z',
+    rounds: [{
+      id: 'sr-unilever-r1',
+      roundNumber: 1,
+      outbound: {
+        sentAt:  '2026-04-29T08:30:00Z',
+        subject: 'Rebuy proposal — 1 SKU · Week 18',
+        body:    `Dear Unilever Ltd Team,\n\nWe're proposing 2,840 units of Hyaluronic Acid Toner at £8.93 CP, MOQ 500, ex-fty 28 May.\n\nBest regards,\nDebenhams Buying`,
+        recipients: ['orders@unilever.co.uk'],
+      },
+      inbound: {
+        receivedAt: '2026-04-29T15:00:00Z',
+        summary:    'Unilever accepted at £8.97 (very slight uplift). Terms confirmed.',
+        fullReply:  `Dear Buying Team,\n\nThank you for your inquiry regarding Hyaluronic Acid Toner.\n\nWe are pleased to confirm acceptance of your terms:\n• CP: £8.97 per unit\n• MOQ: 500 units\n• Lead time: 4 weeks\n• Delivery: 28 May – 11 Jun 2026\n\nPlease proceed with the order and we will prioritise production scheduling.\n\nBest regards,\nUnilever Ltd`,
+        perThreadResponses: [
+          { threadId: 'REC-002', offered: { cp: 8.97, moq: 500, exFty: '2026-05-28' }, status: 'accepted' },
+        ],
+      },
+    }],
+  },
+]
 
 // ── Fit Families ──────────────────────────────────────────────────────────────
 const FIT_FAMILIES = [
@@ -1186,6 +1336,407 @@ function ActionRecommendationRow({
           )
         })}
       </div>
+    </div>
+  )
+}
+
+// ── Supplier session workspace — bulk negotiation across multiple SKUs ──────
+function SupplierSessionWorkspace({
+  session,
+  onClose,
+  onOpenThread,
+  onViewSupplierHistory,
+  onUpdateSession,
+  onLogActivity,
+}: {
+  session:                SupplierSession
+  onClose:                () => void
+  onOpenThread:           (threadId: string) => void
+  onViewSupplierHistory?: () => void
+  onUpdateSession?:       (s: SupplierSession) => void
+  onLogActivity?:         (kind: ActivityKind, text: string) => void
+}) {
+  const supplierName = session.supplierId
+  const supplierObj  = SUPPLIERS.find(s => s.name === supplierName)
+  const threads      = session.threadIds.map(id => REORDER_RECOMMENDATIONS.find(r => r.id === id)).filter(Boolean) as typeof REORDER_RECOMMENDATIONS
+  const totalValue   = threads.reduce((s, t) => s + (t.recommendedReorderQty * t.costPrice), 0)
+  const supplierEmail = SUPPLIER_EMAILS[supplierObj?.id ?? ''] ?? `orders@${supplierName.toLowerCase().replace(/[^a-z]/g, '')}.co.uk`
+
+  // Latest round + inbound per-thread responses for status display
+  const latestRound      = session.rounds[session.rounds.length - 1]
+  const latestInbound    = [...session.rounds].reverse().find(r => r.inbound)?.inbound ?? null
+  const responsesByThread = new Map<string, SessionRoundResponse>()
+  latestInbound?.perThreadResponses.forEach(r => responsesByThread.set(r.threadId, r))
+
+  // Line-table data per SKU
+  const lines = threads.map(t => {
+    const resp = responsesByThread.get(t.id)
+    let statusLbl = 'Draft'
+    let statusCls = 'bg-gray-100 text-gray-600'
+    if (latestRound?.outbound.sentAt && !resp) { statusLbl = 'Awaiting reply'; statusCls = 'bg-blue-100 text-blue-700' }
+    if (resp?.status === 'accepted') { statusLbl = 'Accepted';   statusCls = 'bg-green-100 text-green-700' }
+    if (resp?.status === 'countered'){ statusLbl = 'Countered';  statusCls = 'bg-amber-100 text-amber-700' }
+    if (resp?.status === 'pushed')   { statusLbl = 'Date push';  statusCls = 'bg-amber-100 text-amber-700' }
+    if (resp?.status === 'rejected') { statusLbl = 'Rejected';   statusCls = 'bg-red-100 text-red-700' }
+    if (resp?.status === 'silent')   { statusLbl = 'Silent';     statusCls = 'bg-gray-100 text-gray-500' }
+    const offeredCp = resp?.offered.cp
+    const cpDisplay = offeredCp !== undefined
+      ? `£${t.costPrice.toFixed(2)} → £${offeredCp.toFixed(2)}`
+      : `£${t.costPrice.toFixed(2)} → —`
+    // Recommended action: simple heuristic from response status
+    let recAction = '—'
+    let outcome   = '—'
+    if (resp?.status === 'accepted' && offeredCp !== undefined) {
+      const margin = +((t.sellingPrice - t.costPrice) / t.sellingPrice * 100 - (t.sellingPrice - offeredCp) / t.sellingPrice * 100).toFixed(1)
+      const saving = Math.round((t.costPrice - offeredCp) * t.recommendedReorderQty)
+      recAction = 'Apply'
+      outcome   = `Margin ${margin >= 0 ? '+' : ''}${(-margin).toFixed(1)}pp · ${saving >= 0 ? `Saves £${saving.toLocaleString('en-GB')}` : `Costs £${Math.abs(saving).toLocaleString('en-GB')}`}`
+    } else if (resp?.status === 'countered' && offeredCp !== undefined) {
+      const mid = +((t.costPrice + offeredCp) / 2).toFixed(2)
+      recAction = 'Counter'
+      outcome   = `Midpoint £${mid.toFixed(2)} · Round ${(latestRound?.roundNumber ?? 1) + 1}`
+    } else if (resp?.status === 'rejected') {
+      recAction = 'Escalate'; outcome = 'Above walk-away · manager review'
+    } else if (!resp && latestRound?.outbound.sentAt) {
+      recAction = '—'; outcome = 'Awaiting supplier response'
+    }
+    return { rec: t, response: resp, statusLbl, statusCls, cpDisplay, recAction, outcome }
+  })
+
+  // Filtering + selection state
+  const [filter, setFilter]       = useState<'all' | 'awaiting' | 'reply' | 'draft' | 'rec-accept' | 'rec-counter'>('all')
+  const [selected, setSelected]   = useState<Set<string>>(new Set())
+  const [rulebookOpen, setRulebookOpen] = useState(false)
+
+  const filteredLines = lines.filter(l => {
+    if (filter === 'all') return true
+    if (filter === 'awaiting') return l.statusLbl === 'Awaiting reply'
+    if (filter === 'reply')    return !!l.response
+    if (filter === 'draft')    return l.statusLbl === 'Draft'
+    if (filter === 'rec-accept')  return l.recAction === 'Apply'
+    if (filter === 'rec-counter') return l.recAction === 'Counter'
+    return true
+  })
+
+  const toggleRow = (id: string) => setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
+  const toggleAll = () => setSelected(prev => {
+    const allIds = filteredLines.map(l => l.rec.id)
+    const allSelected = allIds.every(id => prev.has(id))
+    if (allSelected) return new Set([...prev].filter(id => !allIds.includes(id)))
+    return new Set([...prev, ...allIds])
+  })
+
+  // Session-level "this ask" (placeholder editable values)
+  const [sessionTargetCpPct, setSessionTargetCpPct] = useState(6)
+  const [sessionWalkAwayPct, setSessionWalkAwayPct] = useState(3)
+  const [sessionMaxRounds,   setSessionMaxRounds]   = useState(3)
+  const [editingAsk, setEditingAsk] = useState<null | 'target' | 'walk' | 'rounds'>(null)
+
+  // Combined email draft (auto-generated for next round if no draft exists)
+  const nextRoundNumber = (latestRound?.roundNumber ?? 0) + (latestInbound ? 1 : 0)
+  const buildCombinedDraft = () => {
+    const countered = lines.filter(l => l.response?.status === 'countered')
+    const list = (countered.length > 0 ? countered : lines).map(l => {
+      const offered = l.response?.offered.cp ?? l.rec.costPrice
+      const mid = +((l.rec.costPrice + offered) / 2).toFixed(2)
+      return `• ${l.rec.id} ${l.rec.name} — ${l.rec.recommendedReorderQty.toLocaleString()} units · £${mid.toFixed(2)} (midpoint)`
+    }).join('\n')
+    return `Dear ${supplierName} Team,\n\nThanks for your response on round ${latestRound?.roundNumber ?? 1}. Counter-proposing:\n\n${list}\n\nPlease confirm by end of week.\n\nBest regards,\nDebenhams Buying`
+  }
+  const [combinedDraft, setCombinedDraft] = useState(() => latestInbound ? buildCombinedDraft() : '')
+  void onUpdateSession // wired for future state mutations; currently the prototype keeps session mutations local
+
+  return (
+    <div className="h-full flex flex-col bg-white overflow-hidden">
+      {/* Header */}
+      <div className="flex items-start justify-between px-5 pt-4 pb-3 border-b border-gray-100 shrink-0">
+        <div className="min-w-0 flex-1 pr-2">
+          <div className="flex items-center gap-2 flex-wrap mb-1">
+            <span className="text-base font-bold text-gray-900 truncate">{supplierName}</span>
+            {supplierObj && (() => {
+              const pat = getRelationshipPattern(supplierObj)
+              if (pat === 'structural')    return <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-700">Structural underperformer</span>
+              if (pat === 'concentration') return <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">High concentration</span>
+              return null
+            })()}
+          </div>
+          <div className="text-xs text-gray-400">
+            {supplierEmail} · {threads.length} active line{threads.length === 1 ? '' : 's'} · £{Math.round(totalValue).toLocaleString('en-GB')} total value
+            {onViewSupplierHistory && (
+              <>
+                <span className="mx-1.5 text-gray-300">·</span>
+                <button onClick={onViewSupplierHistory} className="text-indigo-600 hover:text-indigo-800 font-medium">View supplier history →</button>
+              </>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-1 shrink-0 mt-0.5">
+          {onLogActivity && <LogActivityButton onSave={onLogActivity} />}
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {/* Body */}
+      <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+
+        {/* Supplier KPI strip */}
+        {supplierObj && (
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${supplierObj.onTimeRate >= 80 ? 'bg-green-50 text-green-700 border-green-100' : supplierObj.onTimeRate >= 70 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'}`}>OTR {supplierObj.onTimeRate}%</span>
+            <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full border bg-gray-100 text-gray-600 border-gray-200">Avg delay {supplierObj.avgDelayDays}d</span>
+            <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full border bg-gray-100 text-gray-600 border-gray-200">{supplierObj.openPOs} open POs</span>
+            <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full border bg-indigo-50 text-indigo-700 border-indigo-100">Lead {supplierObj.contractualLeadTimeDays}d</span>
+          </div>
+        )}
+
+        {/* Top context card — 3 columns: This ask / Deal facts / Negotiation rules */}
+        <div className="border border-gray-200 rounded-xl bg-white">
+          <div className="grid grid-cols-3 gap-0 divide-x divide-gray-100">
+            <div className="px-3.5 py-3">
+              <div className="text-[13px] font-semibold text-gray-900">This ask</div>
+              <div className="text-[11px] text-gray-400 mb-2">Session-level · applies to all lines</div>
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[12px] text-gray-500">Target CP cut</span>
+                  {editingAsk === 'target' ? (
+                    <div className="flex items-center gap-1.5">
+                      <input type="number" min={0} max={30} value={sessionTargetCpPct} onChange={e => setSessionTargetCpPct(Number(e.target.value))} autoFocus className="w-14 h-6 rounded border border-gray-200 px-1.5 text-[12px] font-semibold text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-400" />
+                      <button onClick={() => setEditingAsk(null)} className="text-[10px] font-medium text-indigo-600">Done</button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[13px] font-semibold text-gray-800">−{sessionTargetCpPct}%</span>
+                      <button onClick={() => setEditingAsk('target')} className="text-gray-400 hover:text-gray-600"><Pencil className="w-3 h-3" /></button>
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[12px] text-gray-500">Walk-away</span>
+                  {editingAsk === 'walk' ? (
+                    <div className="flex items-center gap-1.5">
+                      <input type="number" min={0} max={30} value={sessionWalkAwayPct} onChange={e => setSessionWalkAwayPct(Number(e.target.value))} autoFocus className="w-14 h-6 rounded border border-gray-200 px-1.5 text-[12px] font-semibold text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-400" />
+                      <button onClick={() => setEditingAsk(null)} className="text-[10px] font-medium text-indigo-600">Done</button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[13px] font-semibold text-gray-800">−{sessionWalkAwayPct}%</span>
+                      <button onClick={() => setEditingAsk('walk')} className="text-gray-400 hover:text-gray-600"><Pencil className="w-3 h-3" /></button>
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[12px] text-gray-500">Max rounds</span>
+                  {editingAsk === 'rounds' ? (
+                    <div className="flex items-center gap-1.5">
+                      <input type="number" min={1} max={10} value={sessionMaxRounds} onChange={e => setSessionMaxRounds(Number(e.target.value))} autoFocus className="w-12 h-6 rounded border border-gray-200 px-1.5 text-[12px] font-semibold text-gray-800 focus:outline-none focus:ring-1 focus:ring-indigo-400" />
+                      <button onClick={() => setEditingAsk(null)} className="text-[10px] font-medium text-indigo-600">Done</button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[13px] font-semibold text-gray-800">{sessionMaxRounds}</span>
+                      <button onClick={() => setEditingAsk('rounds')} className="text-gray-400 hover:text-gray-600"><Pencil className="w-3 h-3" /></button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="px-3.5 py-3">
+              <div className="text-[13px] font-semibold text-gray-900">Deal facts</div>
+              <div className="text-[11px] text-gray-400 mb-2">Read-only</div>
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2"><span className="text-[12px] text-gray-500">Lines</span><span className="text-[13px] font-semibold text-gray-800">{threads.length}</span></div>
+                <div className="flex items-center justify-between gap-2"><span className="text-[12px] text-gray-500">Total value</span><span className="text-[13px] font-semibold text-gray-800">£{Math.round(totalValue).toLocaleString('en-GB')}</span></div>
+                <div className="flex items-center justify-between gap-2"><span className="text-[12px] text-gray-500">Current round</span><span className="text-[13px] font-semibold text-gray-800">R{latestRound?.roundNumber ?? 1}</span></div>
+                <div className="flex items-center justify-between gap-2"><span className="text-[12px] text-gray-500">Created</span><span className="text-[12px] font-semibold text-gray-800">{new Date(session.createdAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}</span></div>
+              </div>
+            </div>
+            <div className="px-3.5 py-3">
+              <div className="text-[13px] font-semibold text-gray-900">Negotiation rules</div>
+              <div className="text-[11px] text-gray-400 mb-2">Standard rebuy ruleset</div>
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2"><span className="text-[12px] text-gray-500">Opening ask</span><span className="text-[13px] font-semibold text-gray-800">−6%</span></div>
+                <div className="flex items-center justify-between gap-2"><span className="text-[12px] text-gray-500">CPR grace</span><span className="text-[13px] font-semibold text-gray-800">1 week</span></div>
+                <div className="flex items-center justify-between gap-2"><span className="text-[12px] text-gray-500">Max rounds</span><span className="text-[13px] font-semibold text-gray-800">3</span></div>
+              </div>
+              <button onClick={() => setRulebookOpen(true)} className="mt-2 text-[11px] font-medium text-indigo-600 hover:text-indigo-800">View all rules in Rulebook →</button>
+            </div>
+          </div>
+        </div>
+
+        {/* Filter chips */}
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {([
+            { k: 'all',          lbl: `All (${lines.length})` },
+            { k: 'awaiting',     lbl: 'Awaiting reply' },
+            { k: 'reply',        lbl: 'Reply rcvd' },
+            { k: 'draft',        lbl: 'Draft' },
+            { k: 'rec-accept',   lbl: 'Recommended: Accept' },
+            { k: 'rec-counter',  lbl: 'Recommended: Counter' },
+          ] as const).map(opt => (
+            <button
+              key={opt.k}
+              onClick={() => setFilter(opt.k)}
+              className={`text-[11px] font-medium px-2.5 py-1 rounded-full transition-colors ${filter === opt.k ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+            >
+              {opt.lbl}
+            </button>
+          ))}
+        </div>
+
+        {/* Bulk action bar — appears when selection is non-empty */}
+        {selected.size > 0 && (
+          <div className="bg-indigo-50 border border-indigo-200 rounded-xl px-3 py-2 flex items-center gap-3 flex-wrap">
+            <span className="text-[12px] font-semibold text-indigo-700">{selected.size} selected</span>
+            <button className="text-[11px] font-semibold text-white bg-indigo-600 hover:bg-indigo-700 px-3 py-1.5 rounded-lg">Apply recommended action to selected</button>
+            <button className="text-[11px] font-semibold text-indigo-700 bg-white border border-indigo-200 hover:bg-indigo-50 px-3 py-1.5 rounded-lg">Send drafts ({selected.size})</button>
+            <button className="text-[11px] font-semibold text-indigo-700 bg-white border border-indigo-200 hover:bg-indigo-50 px-3 py-1.5 rounded-lg">Counter all ({selected.size})</button>
+            <button onClick={() => setSelected(new Set())} className="ml-auto text-[11px] text-gray-500 hover:text-gray-700">Clear selection</button>
+          </div>
+        )}
+
+        {/* Lines table */}
+        <div className="border border-gray-200 rounded-xl overflow-hidden">
+          <table className="w-full text-[11px]">
+            <thead className="bg-gray-50 border-b border-gray-100">
+              <tr>
+                <th className="px-2 py-2 w-7">
+                  <input
+                    type="checkbox"
+                    checked={filteredLines.length > 0 && filteredLines.every(l => selected.has(l.rec.id))}
+                    onChange={toggleAll}
+                    className="w-3 h-3"
+                  />
+                </th>
+                <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">SKU</th>
+                <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Product</th>
+                <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Status</th>
+                <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Round</th>
+                <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">CP → Offer</th>
+                <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Recommended</th>
+                <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Outcome</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredLines.map(l => (
+                <tr
+                  key={l.rec.id}
+                  onClick={() => onOpenThread(l.rec.id)}
+                  className="border-b border-gray-50 last:border-0 hover:bg-gray-50 cursor-pointer transition-colors"
+                >
+                  <td className="px-2 py-2" onClick={e => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={selected.has(l.rec.id)}
+                      onChange={() => toggleRow(l.rec.id)}
+                      className="w-3 h-3"
+                    />
+                  </td>
+                  <td className="px-2 py-2 font-mono text-[10px] text-gray-500">{l.rec.id}</td>
+                  <td className="px-2 py-2 text-gray-800 font-medium">{l.rec.name}</td>
+                  <td className="px-2 py-2"><span className={`inline-flex px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${l.statusCls}`}>{l.statusLbl}</span></td>
+                  <td className="px-2 py-2 text-gray-700 font-semibold">R{latestRound?.roundNumber ?? 1}</td>
+                  <td className="px-2 py-2 text-gray-700 font-mono text-[10px]">{l.cpDisplay}</td>
+                  <td className="px-2 py-2 text-gray-800 font-medium">{l.recAction}</td>
+                  <td className="px-2 py-2 text-gray-500">{l.outcome}</td>
+                </tr>
+              ))}
+              {filteredLines.length === 0 && (
+                <tr><td colSpan={8} className="px-3 py-6 text-center text-[11px] text-gray-400">No lines match the current filter.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Combined email panel */}
+        {latestInbound && (
+          <div className="border border-violet-200 rounded-xl overflow-hidden">
+            <div className="flex items-center justify-between px-3.5 py-2 bg-violet-50 border-b border-violet-100">
+              <div className="flex items-center gap-2">
+                <Mail className="w-3.5 h-3.5 text-violet-500" />
+                <span className="text-[11px] font-semibold text-violet-700">Combined draft — Round {nextRoundNumber} · {threads.length} SKU{threads.length === 1 ? '' : 's'}</span>
+              </div>
+              <span className="text-[10px] text-violet-400">{combinedDraft.length} chars</span>
+            </div>
+            <textarea
+              className="w-full text-[11px] text-gray-700 font-mono leading-relaxed p-3.5 resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-violet-200"
+              rows={10}
+              value={combinedDraft}
+              onChange={e => setCombinedDraft(e.target.value)}
+            />
+            <div className="px-3.5 py-2.5 bg-violet-50 border-t border-violet-100">
+              <button className="w-full h-8 rounded-lg bg-violet-600 text-white text-xs font-semibold hover:bg-violet-700 transition-colors flex items-center justify-center gap-1.5">
+                <Mail className="w-3.5 h-3.5" /> Send combined email
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Round history */}
+        <div className="space-y-3">
+          <div className="text-[11px] font-bold text-gray-500 uppercase tracking-wide">Round history</div>
+          {[...session.rounds].reverse().map(r => (
+            <div key={r.id} className="border border-gray-200 rounded-xl overflow-hidden">
+              <div className="px-3.5 py-2.5 bg-gray-50 border-b border-gray-100 flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-gray-700">Round {r.roundNumber} {r.outbound.sentAt ? `· sent ${new Date(r.outbound.sentAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}` : '· draft'}</span>
+                {r.inbound && <span className="text-[10px] text-blue-700 font-semibold">Reply received</span>}
+              </div>
+              <details className="bg-white">
+                <summary className="px-3.5 py-2 text-[10px] text-gray-500 cursor-pointer hover:bg-gray-50 select-none">▸ Outbound: {r.outbound.subject}</summary>
+                <pre className="text-[10px] text-gray-600 font-mono whitespace-pre-wrap px-3.5 pb-3 pt-1">{r.outbound.body}</pre>
+              </details>
+              {r.inbound && (
+                <>
+                  <div className="px-3.5 py-2.5 border-t border-gray-100 bg-blue-50/40">
+                    <div className="text-[10px] font-semibold text-blue-700 uppercase tracking-wide mb-1">Agent summary</div>
+                    <p className="text-[11px] text-gray-700 leading-relaxed">{r.inbound.summary}</p>
+                  </div>
+                  <div className="px-3.5 py-2.5 border-t border-gray-100">
+                    <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Per-SKU response</div>
+                    <table className="w-full text-[10px]">
+                      <tbody>
+                        {r.inbound.perThreadResponses.map(resp => {
+                          const t = REORDER_RECOMMENDATIONS.find(rr => rr.id === resp.threadId)
+                          if (!t) return null
+                          const stCls = resp.status === 'accepted' ? 'text-green-700' : resp.status === 'countered' || resp.status === 'pushed' ? 'text-amber-700' : resp.status === 'rejected' ? 'text-red-700' : 'text-gray-500'
+                          return (
+                            <tr key={resp.threadId} className="border-b border-gray-50 last:border-0">
+                              <td className="py-1 font-mono text-gray-500">{resp.threadId}</td>
+                              <td className="py-1 text-gray-800">{t.name}</td>
+                              <td className={`py-1 font-semibold capitalize ${stCls}`}>{resp.status}</td>
+                              <td className="py-1 text-gray-600">{resp.offered.cp !== undefined ? `£${resp.offered.cp.toFixed(2)}` : '—'}</td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  <details className="border-t border-gray-100">
+                    <summary className="px-3.5 py-2 text-[10px] text-gray-500 cursor-pointer hover:bg-gray-50 select-none">▸ View full reply</summary>
+                    <pre className="text-[10px] text-gray-600 font-mono whitespace-pre-wrap px-3.5 pb-3 pt-1">{r.inbound.fullReply}</pre>
+                  </details>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Rulebook placeholder Dialog */}
+      {rulebookOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-2xl shadow-2xl w-[440px] p-6">
+            <div className="text-sm font-bold text-gray-900 mb-1">Customer Rulebook</div>
+            <div className="text-xs text-gray-500 mb-4">
+              The Rulebook (full list of negotiation rules, CPR ladders, escalation thresholds, ex-fty cutoffs by category) is coming soon. For now, this session uses the standard rebuy ruleset shown in the Context card.
+            </div>
+            <div className="flex justify-end">
+              <button onClick={() => setRulebookOpen(false)} className="h-8 px-3 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700">Got it</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -4529,6 +5080,7 @@ function ActiveNegotiationsView({
   negNeedsResponse, negAwaiting, negReady, inquiries, onOpenInquiry, cpRules,
   openInquiryId, onCloseInquiry, onUpdateInquiry, onUpdateGlobalCpRules,
   onNavigateToPO, onViewDetails, isManager, onApprove, onReject,
+  sessions,
 }: {
   negNeedsResponse:      typeof REORDER_RECOMMENDATIONS
   negAwaiting:           typeof REORDER_RECOMMENDATIONS
@@ -4546,8 +5098,13 @@ function ActiveNegotiationsView({
   isManager?:            boolean
   onApprove?:            () => void
   onReject?:             () => void
+  sessions?:             SupplierSession[]
 }) {
   const [filterText, setFilterText] = useState('')
+  // Supplier-grouped rail state — selecting a rail item opens a supplier session in the right pane.
+  // Clicking a row in the lines table drills into that SKU as a Sheet overlay (openInquiryId).
+  const [openSessionId, setOpenSessionId] = useState<string | null>(null)
+  const supplierSessions = sessions ?? []
 
   // Combine the three buckets into a single flat list with section ids preserved.
   const allItems = useMemo(() => {
@@ -4569,77 +5126,147 @@ function ActiveNegotiationsView({
     )
   }, [allItems, filterText])
 
-  const workspaceItems: WorkspaceListItem[] = filtered.map(({ sectionId, p }) => {
-    const thread    = inquiries[p.id]
-    const lastRound = thread?.rounds[thread.rounds.length - 1]
-    const lastReply = lastRound?.supplierReply
-    const sentDays  = lastRound?.sentAt
-      ? Math.floor((Date.now() - new Date(lastRound.sentAt).getTime()) / 86400000)
-      : null
-    const nsCfg = thread ? NEG_STATUS_CFG[thread.status] : null
-    return {
-      id:        p.id,
-      sectionId,
-      selected:  openInquiryId === p.id,
-      onSelect:  () => onOpenInquiry(p.id),
-      title:     p.name,
-      subtitle:  <>
-        <div className="text-gray-500 truncate">{p.supplier}</div>
-        {lastReply && (
-          <div className="text-gray-400 italic truncate">{lastReply.rawText.split('\n').filter(l => l.trim())[0] ?? ''}</div>
-        )}
-      </>,
-      meta: <>
-        <span>Round {lastRound?.roundNumber ?? 1} of {cpRules.maxRounds}</span>
-        <span className="mx-1 text-gray-300">·</span>
-        <span>£{p.costPrice.toFixed(2)} → £{calcRequestedCP(p.costPrice, 1).toFixed(2)}</span>
-        {sentDays !== null && sectionId === 'awaiting' && (
-          <span className="ml-auto inline-flex px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded-full text-[9px] font-semibold">
-            {sentDays}d waiting
+  // Build rail items grouped by supplier session.
+  // Each rail item = one supplier session. Click → opens supplier workspace.
+  // For SKUs with no session (legacy / single-thread), fall back to a per-SKU rail item.
+  const sessionItems: WorkspaceListItem[] = supplierSessions
+    .filter(s => {
+      const q = filterText.trim().toLowerCase()
+      if (!q) return true
+      if (s.supplierId.toLowerCase().includes(q)) return true
+      return s.threadIds.some(id => {
+        const r = REORDER_RECOMMENDATIONS.find(rr => rr.id === id)
+        return r && (r.name.toLowerCase().includes(q) || r.sku.toLowerCase().includes(q))
+      })
+    })
+    .map(s => {
+      const sup = SUPPLIERS.find(su => su.name === s.supplierId)
+      const lastRound = s.rounds[s.rounds.length - 1]
+      const replyRcvd = lastRound?.inbound?.perThreadResponses ?? []
+      const acceptedCount = replyRcvd.filter(r => r.status === 'accepted').length
+      const counteredCount = replyRcvd.filter(r => r.status === 'countered').length
+      const awaitingCount = lastRound?.outbound.sentAt && !lastRound?.inbound ? s.threadIds.length : 0
+      const lineCount = s.threadIds.length
+      const totalValue = s.threadIds.reduce((sum, id) => {
+        const r = REORDER_RECOMMENDATIONS.find(rr => rr.id === id)
+        return sum + (r ? r.recommendedReorderQty * r.costPrice : 0)
+      }, 0)
+      const summary = [
+        `${lineCount} line${lineCount > 1 ? 's' : ''}`,
+        awaitingCount > 0 ? `${awaitingCount} awaiting` : null,
+        replyRcvd.length > 0 ? `${replyRcvd.length} replied` : null,
+        acceptedCount > 0 ? `${acceptedCount} accepted` : null,
+        counteredCount > 0 ? `${counteredCount} countered` : null,
+      ].filter(Boolean).join(' · ')
+      const status: 'reply' | 'awaiting' | 'draft' = lastRound?.inbound ? 'reply' : lastRound?.outbound.sentAt ? 'awaiting' : 'draft'
+      const badgeCls = status === 'reply' ? 'bg-amber-100 text-amber-700 border-amber-200' : status === 'awaiting' ? 'bg-blue-100 text-blue-700 border-blue-200' : 'bg-gray-100 text-gray-600 border-gray-200'
+      const badgeLbl = status === 'reply' ? 'Reply rcvd' : status === 'awaiting' ? 'Awaiting' : 'Draft'
+      return {
+        id:        s.id,
+        sectionId: status,
+        selected:  openSessionId === s.id && !openInquiryId,
+        onSelect:  () => { setOpenSessionId(s.id); onCloseInquiry() },
+        title:     s.supplierId,
+        subtitle:  <>
+          <div className="text-gray-500 truncate">{summary}</div>
+          {sup && (() => {
+            const pat = getRelationshipPattern(sup)
+            if (pat === 'structural')    return <div className="text-[9px] font-bold text-red-700 uppercase tracking-wider mt-0.5">Structural underperformer</div>
+            if (pat === 'concentration') return <div className="text-[9px] font-bold text-amber-700 uppercase tracking-wider mt-0.5">High concentration</div>
+            return null
+          })()}
+        </>,
+        meta: <>
+          <span>R{lastRound?.roundNumber ?? 1}</span>
+          <span className="mx-1 text-gray-300">·</span>
+          <span>£{Math.round(totalValue).toLocaleString('en-GB')}</span>
+        </>,
+        badge: (
+          <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-semibold border ${badgeCls} shrink-0`}>
+            {badgeLbl}
           </span>
-        )}
-      </>,
-      badge: nsCfg ? (
-        <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-semibold border ${nsCfg.bg} ${nsCfg.text} ${nsCfg.border} shrink-0`}>
-          <span className={`w-1 h-1 rounded-full ${nsCfg.dot}`} />{nsCfg.label}
-        </span>
-      ) : null,
-    }
-  })
+        ),
+      }
+    })
+    .sort((a, b) => {
+      // Reply first, then awaiting, then draft
+      const order = { reply: 0, awaiting: 1, draft: 2 }
+      return (order[a.sectionId as keyof typeof order] ?? 3) - (order[b.sectionId as keyof typeof order] ?? 3)
+    })
 
+  // Per-SKU legacy items for threads that aren't in any session
+  const sessionThreadIds = new Set(supplierSessions.flatMap(s => s.threadIds))
+  const orphanItems: WorkspaceListItem[] = filtered
+    .filter(({ p }) => !sessionThreadIds.has(p.id))
+    .map(({ sectionId, p }) => {
+      const thread = inquiries[p.id]
+      const lastRound = thread?.rounds[thread.rounds.length - 1]
+      const nsCfg = thread ? NEG_STATUS_CFG[thread.status] : null
+      return {
+        id:        p.id,
+        sectionId: 'legacy',
+        selected:  openInquiryId === p.id,
+        onSelect:  () => { setOpenSessionId(null); onOpenInquiry(p.id) },
+        title:     p.name,
+        subtitle:  <div className="text-gray-500 truncate">{p.supplier} · {p.sku}</div>,
+        meta: <>
+          <span>R{lastRound?.roundNumber ?? 1}</span>
+          <span className="mx-1 text-gray-300">·</span>
+          <span>£{p.costPrice.toFixed(2)}</span>
+        </>,
+        badge: nsCfg ? (
+          <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-semibold border ${nsCfg.bg} ${nsCfg.text} ${nsCfg.border} shrink-0`}>
+            <span className={`w-1 h-1 rounded-full ${nsCfg.dot}`} />{nsCfg.label}
+          </span>
+        ) : null,
+      }
+      void sectionId
+    })
+
+  const workspaceItems: WorkspaceListItem[] = [...sessionItems, ...orphanItems]
   const sectionLabels: Record<string, string> = {
-    needs:    'Needs your response',
+    reply:    'Reply received',
     awaiting: 'Awaiting supplier',
-    ready:    'Ready to progress',
+    draft:    'Draft',
+    legacy:   'Single-SKU threads',
   }
 
-  // Auto-select highest-severity item on mount when no item is selected and no deep-link is pending.
-  // The list is already sorted by section: needs → awaiting → ready, so allItems[0] is the top priority.
+  // Auto-select highest-priority supplier session on mount.
   useEffect(() => {
-    if (!openInquiryId && allItems.length > 0) {
-      onOpenInquiry(allItems[0].p.id)
+    if (!openSessionId && !openInquiryId && sessionItems.length > 0) {
+      setOpenSessionId(sessionItems[0].id)
+    } else if (!openSessionId && !openInquiryId && orphanItems.length > 0) {
+      onOpenInquiry(orphanItems[0].id)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Briefing card — one-line orientation summary
-  const awaitingCount = negNeedsResponse.length
-  const top = allItems[0]?.p
-  const briefing = top ? (
+  // Briefing card
+  const totalLines = supplierSessions.reduce((s, sess) => s + sess.threadIds.length, 0)
+  const briefing = supplierSessions.length > 0 ? (
     <div>
       <div className="text-[11px] font-semibold text-gray-700">
-        {allItems.length} negotiation{allItems.length === 1 ? '' : 's'}
-        {awaitingCount > 0 && <> · {awaitingCount} awaiting your response</>}
+        {supplierSessions.length} supplier{supplierSessions.length === 1 ? '' : 's'} · {totalLines} line{totalLines === 1 ? '' : 's'}
       </div>
       <div className="text-[10px] text-gray-500 mt-0.5 leading-snug">
-        Top priority: {top.name} ({top.supplier}).
+        Top priority: {sessionItems[0]?.title ?? '—'}
       </div>
     </div>
   ) : null
 
+  const selectedSession = openSessionId ? supplierSessions.find(s => s.id === openSessionId) : null
   const selectedRec = openInquiryId ? REORDER_RECOMMENDATIONS.find(r => r.id === openInquiryId) : null
 
-  const rightPane = selectedRec ? (
+  // Right pane: session workspace if a session is selected, else legacy InquiryDrawer.
+  // Per-SKU drill-in from the session's lines table opens InquiryDrawer as a Sheet OVERLAY (rendered separately below).
+  const rightPane = selectedSession ? (
+    <SupplierSessionWorkspace
+      session={selectedSession}
+      onClose={() => setOpenSessionId(null)}
+      onOpenThread={onOpenInquiry}
+      onLogActivity={(_kind, _text) => { /* session-scoped activity log — prototype stub */ }}
+    />
+  ) : selectedRec ? (
     <InquiryDrawer
       embed
       rec={selectedRec}
@@ -4654,6 +5281,29 @@ function ActiveNegotiationsView({
       onNavigateToPO={onNavigateToPO}
       onViewDetails={onViewDetails}
     />
+  ) : null
+
+  // Drill-in Sheet: rendered as overlay when both a session AND a SKU are selected.
+  const skuDrillSheet = (selectedSession && selectedRec) ? (
+    <div className="fixed inset-0 z-[55] flex">
+      <div className="flex-1 bg-black/30" onClick={onCloseInquiry} />
+      <div className="w-[720px] max-w-[95vw] bg-white h-full flex flex-col shadow-2xl overflow-hidden">
+        <InquiryDrawer
+          embed
+          rec={selectedRec}
+          thread={inquiries[selectedRec.id]}
+          onClose={onCloseInquiry}
+          onUpdate={onUpdateInquiry}
+          isManager={isManager}
+          onApprove={onApprove}
+          onReject={onReject}
+          globalCpRules={cpRules}
+          onUpdateGlobalCpRules={onUpdateGlobalCpRules}
+          onNavigateToPO={onNavigateToPO}
+          onViewDetails={onViewDetails}
+        />
+      </div>
+    </div>
   ) : null
 
   // Start-inquiry dialog
@@ -4687,19 +5337,20 @@ function ActiveNegotiationsView({
     <>
     <SupplierWorkspaceLayout
       title="Active Negotiations"
-      count={allItems.length}
+      count={supplierSessions.length + orphanItems.length}
       filter={filterText}
       onFilterChange={setFilterText}
-      filterPlaceholder="Filter by product, supplier, SKU…"
+      filterPlaceholder="Filter by supplier, product, SKU…"
       items={workspaceItems}
       sectionLabels={sectionLabels}
       emptyListText="No active negotiations."
-      emptyRightTitle="Select a negotiation"
-      emptyRightSubtitle="Pick an item from the left to review the supplier reply and decide the next step."
+      emptyRightTitle="Select a supplier"
+      emptyRightSubtitle="Pick a supplier from the left to review the active negotiation across all their open lines."
       rightPane={rightPane}
       briefing={briefing}
       headerExtra={headerExtra}
     />
+    {skuDrillSheet}
     {startInquiryOpen && (
       <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
         <div className="bg-white rounded-2xl shadow-2xl w-[520px] max-h-[80vh] flex flex-col overflow-hidden">
@@ -5144,6 +5795,8 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
   const [selectedIds, setSelectedIds]           = useState<Set<string>>(new Set())
   const [toast, setToast]                       = useState<string | null>(null)
   const [inquiries, setInquiries]               = useState<Record<string, InquiryThread>>(() => ({ ...SEEDED_THREADS }))
+  const [supplierSessions, setSupplierSessions] = useState<SupplierSession[]>(() => [...SEEDED_SUPPLIER_SESSIONS])
+  void setSupplierSessions
   const [openInquiryId, setOpenInquiryId]       = useState<string | null>(initialOpenInquiry ?? null)
   const [detailSheetRecId, setDetailSheetRecId] = useState<string | null>(null)
   const [globalCpRules, setGlobalCpRules]       = useState<CpRulesState>(DEFAULT_CP_RULES)
@@ -6066,26 +6719,56 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
             </div>
 
             {/* Bulk action toolbar */}
-            {selectedIds.size > 0 && (
-              <div className="flex items-center gap-3 mb-3 px-4 py-2.5 bg-indigo-50 border border-indigo-100 rounded-xl">
-                <span className="text-xs font-semibold text-indigo-700">{selectedIds.size} line{selectedIds.size !== 1 ? 's' : ''} selected</span>
-                <div className="flex-1" />
-                <button
-                  disabled={draftEligible === 0}
-                  onClick={handleSendToManager}
-                  className="h-8 px-4 rounded-lg text-xs font-semibold bg-indigo-600 text-white disabled:opacity-40 disabled:cursor-not-allowed hover:bg-indigo-700 transition-colors"
-                >
-                  Send to manager for approval{draftEligible > 0 ? ` (${draftEligible})` : ''}
-                </button>
-                <button
-                  disabled={approvedEligible === 0}
-                  onClick={handlePushToOrderApp}
-                  className="h-8 px-4 rounded-lg text-xs font-semibold bg-emerald-600 text-white disabled:opacity-40 disabled:cursor-not-allowed hover:bg-emerald-700 transition-colors"
-                >
-                  Push to Order App{approvedEligible > 0 ? ` (${approvedEligible})` : ''}
-                </button>
-              </div>
-            )}
+            {selectedIds.size > 0 && (() => {
+              const selectedRecs = [...selectedIds].map(id => REORDER_RECOMMENDATIONS.find(r => r.id === id)).filter(Boolean) as typeof REORDER_RECOMMENDATIONS
+              const supplierCount = new Set(selectedRecs.map(r => r.supplier)).size
+              const handleBulkStartInquiry = () => {
+                // Group selected recs by supplier; create one session per supplier represented.
+                const bySupplier = new Map<string, string[]>()
+                selectedRecs.forEach(r => {
+                  bySupplier.set(r.supplier, [...(bySupplier.get(r.supplier) ?? []), r.id])
+                })
+                const newSessions: SupplierSession[] = [...bySupplier.entries()].map(([sup, threadIds]) => ({
+                  id:         `session-${sup.toLowerCase().replace(/[^a-z]/g, '')}-${Date.now()}`,
+                  supplierId: sup,
+                  threadIds,
+                  status:     'open',
+                  createdAt:  new Date().toISOString(),
+                  rounds:     [],
+                }))
+                setSupplierSessions(prev => [...newSessions, ...prev])
+                setSelectedIds(new Set())
+                setRecoSubView('negotiations')
+                showToast(`${newSessions.length} supplier session${newSessions.length === 1 ? '' : 's'} started across ${selectedRecs.length} line${selectedRecs.length === 1 ? '' : 's'}.`)
+              }
+              return (
+                <div className="flex items-center gap-3 mb-3 px-4 py-2.5 bg-indigo-50 border border-indigo-100 rounded-xl">
+                  <span className="text-xs font-semibold text-indigo-700">{selectedIds.size} line{selectedIds.size !== 1 ? 's' : ''} selected</span>
+                  <span className="text-[11px] text-indigo-500">· {selectedRecs.length} line{selectedRecs.length === 1 ? '' : 's'} across {supplierCount} supplier{supplierCount === 1 ? '' : 's'}</span>
+                  <div className="flex-1" />
+                  <button
+                    onClick={handleBulkStartInquiry}
+                    className="h-8 px-4 rounded-lg text-xs font-semibold bg-violet-600 text-white hover:bg-violet-700 transition-colors flex items-center gap-1.5"
+                  >
+                    <Mail className="w-3.5 h-3.5" /> Start supplier inquiry for {selectedIds.size} line{selectedIds.size === 1 ? '' : 's'}
+                  </button>
+                  <button
+                    disabled={draftEligible === 0}
+                    onClick={handleSendToManager}
+                    className="h-8 px-4 rounded-lg text-xs font-semibold bg-indigo-600 text-white disabled:opacity-40 disabled:cursor-not-allowed hover:bg-indigo-700 transition-colors"
+                  >
+                    Send to manager for approval{draftEligible > 0 ? ` (${draftEligible})` : ''}
+                  </button>
+                  <button
+                    disabled={approvedEligible === 0}
+                    onClick={handlePushToOrderApp}
+                    className="h-8 px-4 rounded-lg text-xs font-semibold bg-emerald-600 text-white disabled:opacity-40 disabled:cursor-not-allowed hover:bg-emerald-700 transition-colors"
+                  >
+                    Push to Order App{approvedEligible > 0 ? ` (${approvedEligible})` : ''}
+                  </button>
+                </div>
+              )
+            })()}
 
             {/* Table */}
             <div className="bg-white border border-gray-100 rounded-xl shadow-sm overflow-x-auto">
@@ -6284,6 +6967,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
             onUpdateGlobalCpRules={setGlobalCpRules}
             onNavigateToPO={onNavigateToPO}
             onViewDetails={setDetailSheetRecId}
+            sessions={supplierSessions}
           />
         )}
       </div>
@@ -7210,6 +7894,7 @@ function ManagerReorderView() {
               onUpdateInquiry={t => setInquiries(prev => ({ ...prev, [t.recId]: t }))}
               onUpdateGlobalCpRules={setMgrCpRules}
               onViewDetails={setMgrDetailSheetRecId}
+              sessions={SEEDED_SUPPLIER_SESSIONS}
               isManager={true}
               onApprove={rec ? () => {
                 approve(rec.id)
