@@ -9395,17 +9395,10 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
   }
   const cardScore = (g: ActionGroup) => urgWt(g) * g.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0)
 
-  // Auto-select highest-severity action on mount when no deep-link is pending.
-  // Match the same sort the rail uses: cardScore desc.
-  useEffect(() => {
-    if (drawerCardKey) return
-    if (initialOpenAction) return
-    const sortedForAuto = [...actionGroups].sort((a, b) => cardScore(b) - cardScore(a))
-    if (sortedForAuto.length > 0) {
-      setDrawerCardKey(cardKey(sortedForAuto[0]))
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  // Auto-select-on-mount removed: the workspace is now a Sheet overlay, so opening it
+  // unprompted is jarring. Users land on the action list; clicking a row opens the Sheet.
+  // Deep-links from Home still work (initialOpenAction is handled by a separate effect above).
+  void cardScore
 
   // Tier-1 single-state: auto-select the agent's recommended action whenever a Tier-1 card opens.
   // This lands the user directly on the email-draft state, where all actions remain swappable inline.
