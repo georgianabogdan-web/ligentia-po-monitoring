@@ -478,6 +478,244 @@ const SUPPLIER_EMAILS: Record<string, string> = {
   'EL': 'orders@esteelauder.co.uk',
 }
 
+// ── Per-supplier journey-stage performance breakdown ──────────────────────────
+type JourneyStageKey = 'sample' | 'fit' | 'booking' | 'handover' | 'shipment' | 'in_transit' | 'customs' | 'dc_arrival'
+interface StagePerf {
+  onTime:    number   // 0-100
+  avgDelay:  number   // days; negative = early
+  trend:     'improving' | 'stable' | 'worsening'
+}
+interface SupplierJourneyData {
+  byStage: Record<JourneyStageKey, StagePerf>
+  summary: string                    // 1-sentence agent summary
+  tier:    'Excellent' | 'Good' | 'Watch' | 'At risk' | 'Critical'
+  history: { month: string; onTime: number; avgDelay: number; volume: number }[]
+}
+
+const STAGE_LABELS: Record<JourneyStageKey, string> = {
+  sample:      'Sample provided',
+  fit:         'First-fit approved',
+  booking:     'Booking',
+  handover:    'Handover',
+  shipment:    'Shipment departure',
+  in_transit:  'In-transit',
+  customs:     'Customs clearance',
+  dc_arrival:  'Arrival to DC',
+}
+const STAGE_ORDER: JourneyStageKey[] = ['sample', 'fit', 'booking', 'handover', 'shipment', 'in_transit', 'customs', 'dc_arrival']
+const PRE_BOOKING_STAGES: JourneyStageKey[] = ['sample', 'fit']
+
+// Seeded stage breakdown per supplier. The Unilever-style "94% overall but weak at one stage"
+// case is on UL (customs at 81%, worsening). EL is excellent across all stages.
+const SUPPLIER_JOURNEY: Record<string, SupplierJourneyData> = {
+  UL: {
+    tier:    'Good',
+    summary: '94% on-time overall, but customs clearance is a persistent weakness (-2.4d average) and trending worse over the last 90 days.',
+    byStage: {
+      sample:     { onTime: 95, avgDelay: 0.4, trend: 'stable' },
+      fit:        { onTime: 96, avgDelay: 0.3, trend: 'stable' },
+      booking:    { onTime: 97, avgDelay: 0.2, trend: 'stable' },
+      handover:   { onTime: 96, avgDelay: 0.5, trend: 'stable' },
+      shipment:   { onTime: 96, avgDelay: 0.3, trend: 'stable' },
+      in_transit: { onTime: 92, avgDelay: 1.8, trend: 'stable' },
+      customs:    { onTime: 81, avgDelay: 2.4, trend: 'worsening' },
+      dc_arrival: { onTime: 95, avgDelay: 0.7, trend: 'stable' },
+    },
+    history: [
+      { month: 'Dec', onTime: 96, avgDelay: 0.8, volume: 18 },
+      { month: 'Jan', onTime: 95, avgDelay: 1.0, volume: 22 },
+      { month: 'Feb', onTime: 94, avgDelay: 1.1, volume: 19 },
+      { month: 'Mar', onTime: 94, avgDelay: 1.2, volume: 24 },
+      { month: 'Apr', onTime: 93, avgDelay: 1.4, volume: 21 },
+      { month: 'May', onTime: 94, avgDelay: 1.1, volume: 16 },
+    ],
+  },
+  EL: {
+    tier:    'Excellent',
+    summary: 'Excellent across every stage of the journey. Sample provision is the strongest in the portfolio at 99%.',
+    byStage: {
+      sample:     { onTime: 99, avgDelay: -0.2, trend: 'stable' },
+      fit:        { onTime: 98, avgDelay: 0.1,  trend: 'stable' },
+      booking:    { onTime: 97, avgDelay: 0.3,  trend: 'stable' },
+      handover:   { onTime: 96, avgDelay: 0.5,  trend: 'stable' },
+      shipment:   { onTime: 97, avgDelay: 0.2,  trend: 'stable' },
+      in_transit: { onTime: 95, avgDelay: 0.8,  trend: 'stable' },
+      customs:    { onTime: 94, avgDelay: 1.1,  trend: 'stable' },
+      dc_arrival: { onTime: 96, avgDelay: 0.5,  trend: 'improving' },
+    },
+    history: [
+      { month: 'Dec', onTime: 95, avgDelay: 0.9, volume: 12 },
+      { month: 'Jan', onTime: 96, avgDelay: 0.8, volume: 14 },
+      { month: 'Feb', onTime: 96, avgDelay: 0.8, volume: 13 },
+      { month: 'Mar', onTime: 96, avgDelay: 0.7, volume: 16 },
+      { month: 'Apr', onTime: 97, avgDelay: 0.6, volume: 12 },
+      { month: 'May', onTime: 96, avgDelay: 0.8, volume: 11 },
+    ],
+  },
+  LL: {
+    tier:    'Good',
+    summary: '91% on-time overall, with first-fit approval consistently late (-3.1d) — sample stage strong but fit reviews slip.',
+    byStage: {
+      sample:     { onTime: 94, avgDelay: 0.6, trend: 'stable' },
+      fit:        { onTime: 72, avgDelay: 3.1, trend: 'stable' },
+      booking:    { onTime: 94, avgDelay: 0.8, trend: 'stable' },
+      handover:   { onTime: 92, avgDelay: 1.4, trend: 'stable' },
+      shipment:   { onTime: 95, avgDelay: 0.7, trend: 'stable' },
+      in_transit: { onTime: 93, avgDelay: 1.2, trend: 'stable' },
+      customs:    { onTime: 90, avgDelay: 1.6, trend: 'stable' },
+      dc_arrival: { onTime: 94, avgDelay: 0.9, trend: 'stable' },
+    },
+    history: [
+      { month: 'Dec', onTime: 90, avgDelay: 1.5, volume: 9 },
+      { month: 'Jan', onTime: 91, avgDelay: 1.4, volume: 11 },
+      { month: 'Feb', onTime: 91, avgDelay: 1.4, volume: 8  },
+      { month: 'Mar', onTime: 92, avgDelay: 1.3, volume: 10 },
+      { month: 'Apr', onTime: 91, avgDelay: 1.4, volume: 9  },
+      { month: 'May', onTime: 91, avgDelay: 1.4, volume: 9  },
+    ],
+  },
+  UF: {
+    tier:    'Watch',
+    summary: 'Improving trend over the last 90 days, with handover slipping in the last 30 (-1.9d average vs +0.3d the prior period).',
+    byStage: {
+      sample:     { onTime: 86, avgDelay: 1.4, trend: 'stable' },
+      fit:        { onTime: 83, avgDelay: 1.8, trend: 'stable' },
+      booking:    { onTime: 88, avgDelay: 1.1, trend: 'improving' },
+      handover:   { onTime: 79, avgDelay: 1.9, trend: 'worsening' },
+      shipment:   { onTime: 91, avgDelay: 0.9, trend: 'improving' },
+      in_transit: { onTime: 86, avgDelay: 1.6, trend: 'stable' },
+      customs:    { onTime: 84, avgDelay: 1.8, trend: 'stable' },
+      dc_arrival: { onTime: 88, avgDelay: 1.3, trend: 'improving' },
+    },
+    history: [
+      { month: 'Dec', onTime: 79, avgDelay: 3.1, volume: 16 },
+      { month: 'Jan', onTime: 81, avgDelay: 2.8, volume: 18 },
+      { month: 'Feb', onTime: 82, avgDelay: 2.5, volume: 17 },
+      { month: 'Mar', onTime: 84, avgDelay: 2.3, volume: 20 },
+      { month: 'Apr', onTime: 85, avgDelay: 2.1, volume: 19 },
+      { month: 'May', onTime: 85, avgDelay: 2.1, volume: 17 },
+    ],
+  },
+  TB: {
+    tier:    'Watch',
+    summary: 'Improving overall but recovering slowly — booking confirmations are still the weakest stage at 76% on-time.',
+    byStage: {
+      sample:     { onTime: 84, avgDelay: 1.8, trend: 'improving' },
+      fit:        { onTime: 82, avgDelay: 2.0, trend: 'improving' },
+      booking:    { onTime: 76, avgDelay: 2.6, trend: 'improving' },
+      handover:   { onTime: 83, avgDelay: 1.7, trend: 'improving' },
+      shipment:   { onTime: 88, avgDelay: 1.1, trend: 'stable' },
+      in_transit: { onTime: 84, avgDelay: 1.5, trend: 'stable' },
+      customs:    { onTime: 81, avgDelay: 1.9, trend: 'stable' },
+      dc_arrival: { onTime: 86, avgDelay: 1.2, trend: 'improving' },
+    },
+    history: [
+      { month: 'Dec', onTime: 76, avgDelay: 3.4, volume: 13 },
+      { month: 'Jan', onTime: 78, avgDelay: 3.1, volume: 15 },
+      { month: 'Feb', onTime: 80, avgDelay: 2.8, volume: 12 },
+      { month: 'Mar', onTime: 81, avgDelay: 2.7, volume: 14 },
+      { month: 'Apr', onTime: 82, avgDelay: 2.6, volume: 16 },
+      { month: 'May', onTime: 82, avgDelay: 2.6, volume: 13 },
+    ],
+  },
+  BA: {
+    tier:    'Watch',
+    summary: 'Stable middle-of-the-road performance — no single weak stage but no strengths either. Handover is the slowest at 75%.',
+    byStage: {
+      sample:     { onTime: 82, avgDelay: 1.9, trend: 'stable' },
+      fit:        { onTime: 79, avgDelay: 2.2, trend: 'stable' },
+      booking:    { onTime: 81, avgDelay: 1.8, trend: 'stable' },
+      handover:   { onTime: 75, avgDelay: 2.5, trend: 'stable' },
+      shipment:   { onTime: 83, avgDelay: 1.4, trend: 'stable' },
+      in_transit: { onTime: 80, avgDelay: 1.7, trend: 'stable' },
+      customs:    { onTime: 78, avgDelay: 1.9, trend: 'stable' },
+      dc_arrival: { onTime: 81, avgDelay: 1.5, trend: 'stable' },
+    },
+    history: [
+      { month: 'Dec', onTime: 77, avgDelay: 3.9, volume: 28 },
+      { month: 'Jan', onTime: 78, avgDelay: 3.8, volume: 33 },
+      { month: 'Feb', onTime: 78, avgDelay: 3.7, volume: 31 },
+      { month: 'Mar', onTime: 79, avgDelay: 3.6, volume: 30 },
+      { month: 'Apr', onTime: 78, avgDelay: 3.8, volume: 32 },
+      { month: 'May', onTime: 78, avgDelay: 3.8, volume: 31 },
+    ],
+  },
+  NK: {
+    tier:    'At risk',
+    summary: 'Declining across multiple stages. Sample and first-fit are now both below 70%, indicating a deeper sourcing problem.',
+    byStage: {
+      sample:     { onTime: 68, avgDelay: 4.2, trend: 'worsening' },
+      fit:        { onTime: 65, avgDelay: 4.8, trend: 'worsening' },
+      booking:    { onTime: 76, avgDelay: 2.4, trend: 'stable' },
+      handover:   { onTime: 72, avgDelay: 3.1, trend: 'worsening' },
+      shipment:   { onTime: 81, avgDelay: 1.6, trend: 'stable' },
+      in_transit: { onTime: 78, avgDelay: 2.0, trend: 'stable' },
+      customs:    { onTime: 75, avgDelay: 2.4, trend: 'stable' },
+      dc_arrival: { onTime: 80, avgDelay: 1.8, trend: 'stable' },
+    },
+    history: [
+      { month: 'Dec', onTime: 80, avgDelay: 4.6, volume: 11 },
+      { month: 'Jan', onTime: 78, avgDelay: 4.8, volume: 13 },
+      { month: 'Feb', onTime: 76, avgDelay: 5.0, volume: 10 },
+      { month: 'Mar', onTime: 75, avgDelay: 5.1, volume: 12 },
+      { month: 'Apr', onTime: 74, avgDelay: 5.1, volume: 11 },
+      { month: 'May', onTime: 74, avgDelay: 5.1, volume: 11 },
+    ],
+  },
+  SS: {
+    tier:    'At risk',
+    summary: 'Customs clearance is consistently slow (-5.4d) and handover trending worse. Concentration risk: 22 open POs.',
+    byStage: {
+      sample:     { onTime: 71, avgDelay: 3.4, trend: 'stable' },
+      fit:        { onTime: 68, avgDelay: 4.1, trend: 'stable' },
+      booking:    { onTime: 74, avgDelay: 2.9, trend: 'stable' },
+      handover:   { onTime: 62, avgDelay: 4.6, trend: 'worsening' },
+      shipment:   { onTime: 72, avgDelay: 3.2, trend: 'stable' },
+      in_transit: { onTime: 70, avgDelay: 3.6, trend: 'stable' },
+      customs:    { onTime: 54, avgDelay: 5.4, trend: 'worsening' },
+      dc_arrival: { onTime: 76, avgDelay: 2.4, trend: 'stable' },
+    },
+    history: [
+      { month: 'Dec', onTime: 72, avgDelay: 6.5, volume: 23 },
+      { month: 'Jan', onTime: 71, avgDelay: 6.8, volume: 26 },
+      { month: 'Feb', onTime: 70, avgDelay: 7.1, volume: 24 },
+      { month: 'Mar', onTime: 69, avgDelay: 7.2, volume: 22 },
+      { month: 'Apr', onTime: 68, avgDelay: 7.2, volume: 25 },
+      { month: 'May', onTime: 68, avgDelay: 7.2, volume: 22 },
+    ],
+  },
+  ET: {
+    tier:    'Critical',
+    summary: 'Structurally weak — every stage below 70% except sample provision. Customs clearance is failing (-15.2d). Replace or restructure.',
+    byStage: {
+      sample:     { onTime: 64, avgDelay: 6.8,  trend: 'worsening' },
+      fit:        { onTime: 52, avgDelay: 9.3,  trend: 'worsening' },
+      booking:    { onTime: 58, avgDelay: 7.4,  trend: 'worsening' },
+      handover:   { onTime: 48, avgDelay: 11.2, trend: 'worsening' },
+      shipment:   { onTime: 62, avgDelay: 5.8,  trend: 'stable' },
+      in_transit: { onTime: 56, avgDelay: 6.9,  trend: 'worsening' },
+      customs:    { onTime: 38, avgDelay: 15.2, trend: 'worsening' },
+      dc_arrival: { onTime: 60, avgDelay: 6.4,  trend: 'worsening' },
+    },
+    history: [
+      { month: 'Dec', onTime: 62, avgDelay: 10.8, volume: 16 },
+      { month: 'Jan', onTime: 60, avgDelay: 11.4, volume: 18 },
+      { month: 'Feb', onTime: 58, avgDelay: 11.9, volume: 17 },
+      { month: 'Mar', onTime: 56, avgDelay: 12.2, volume: 20 },
+      { month: 'Apr', onTime: 55, avgDelay: 12.3, volume: 19 },
+      { month: 'May', onTime: 54, avgDelay: 12.4, volume: 18 },
+    ],
+  },
+}
+
+const HEALTH_TIER_CFG: Record<SupplierJourneyData['tier'], { bg: string; text: string; border: string; ring: string }> = {
+  'Excellent': { bg: 'bg-green-100',  text: 'text-green-800',   border: 'border-green-200',   ring: 'ring-green-200' },
+  'Good':      { bg: 'bg-emerald-100',text: 'text-emerald-800', border: 'border-emerald-200', ring: 'ring-emerald-200' },
+  'Watch':     { bg: 'bg-amber-100',  text: 'text-amber-800',   border: 'border-amber-200',   ring: 'ring-amber-200' },
+  'At risk':   { bg: 'bg-orange-100', text: 'text-orange-800',  border: 'border-orange-200',  ring: 'ring-orange-200' },
+  'Critical':  { bg: 'bg-red-100',    text: 'text-red-800',     border: 'border-red-200',     ring: 'ring-red-200' },
+}
+
 const ALL_POS: PO[] = [
   // Ex-Factory Delays — human needed
   { id: 'PO-2756', supplierId: 'ET', product: 'Beach Shorts Collection',   category: "Women's Apparel", createdOn: '01/12/25', expectedDelivery: '2026-04-08', status: 'Ex-factory delay',      priority: true,  quantity: 1200, skus: 14, orderValue: '£12,400', freight: 'Sea', handledBy: 'human' },
@@ -1829,6 +2067,260 @@ function SupplierSessionWorkspace({
               <button onClick={() => setRulebookOpen(false)} className="h-8 px-3 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700">Got it</button>
             </div>
           </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Supplier detail view — full-page surface with journey-stage breakdown ────
+function SupplierDetailView({
+  supplier,
+  onBack,
+  onLogActivity,
+  pos,
+  onOpenPO,
+}: {
+  supplier:        Supplier
+  onBack:          () => void
+  onLogActivity?:  (kind: ActivityKind, text: string) => void
+  pos:             PO[]
+  onOpenPO?:       (poId: string) => void
+}) {
+  const journey = SUPPLIER_JOURNEY[supplier.id]
+  const tierCfg = journey ? HEALTH_TIER_CFG[journey.tier] : null
+  const supplierEmail = SUPPLIER_EMAILS[supplier.id] ?? '—'
+  const openPOsForSupplier = pos.filter(p => p.supplierId === supplier.id && p.status !== 'Acknowledged')
+  const valueAtRisk = openPOsForSupplier.reduce((s, p) => s + (parseInt(p.orderValue.replace(/[^0-9]/g, '')) || 0), 0)
+
+  const [poFilter, setPoFilter] = useState<'all' | 'late' | 'awaiting' | 'critical'>('all')
+  const filteredPOs = openPOsForSupplier.filter(p => {
+    if (poFilter === 'all') return true
+    const est = getEstimatedDelivery(p)
+    if (poFilter === 'late')     return est.delayDays >= 4
+    if (poFilter === 'awaiting') return p.status === 'Late DC booking' || p.status === 'Date change required'
+    if (poFilter === 'critical') return est.status === 'critical'
+    return true
+  })
+
+  // Trend arrow + label
+  const trendBadge = (t: 'improving' | 'stable' | 'worsening') => {
+    if (t === 'improving') return <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-green-600"><TrendingUp className="w-3 h-3" /> improving</span>
+    if (t === 'worsening') return <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-red-600"><TrendingDown className="w-3 h-3" /> worsening</span>
+    return <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-gray-500"><Minus className="w-3 h-3" /> stable</span>
+  }
+
+  const stageRow = (key: JourneyStageKey, perf: StagePerf, label: string, isPreBooking: boolean) => {
+    const otCls   = perf.onTime >= 95 ? 'text-green-700'  : perf.onTime >= 85 ? 'text-amber-700'  : perf.onTime >= 70 ? 'text-orange-700' : 'text-red-700'
+    const otBar   = perf.onTime >= 95 ? 'bg-green-500'    : perf.onTime >= 85 ? 'bg-amber-400'    : perf.onTime >= 70 ? 'bg-orange-500'   : 'bg-red-500'
+    const dlyCls  = perf.avgDelay < 0 ? 'text-green-600' : perf.avgDelay <= 2 ? 'text-gray-700' : perf.avgDelay <= 5 ? 'text-amber-700' : 'text-red-700'
+    return (
+      <tr key={key} className="border-b border-gray-50 last:border-0">
+        <td className="px-3 py-2.5">
+          <div className="flex items-center gap-2">
+            <span className="text-[12px] font-medium text-gray-800">{label}</span>
+            {isPreBooking && <span className="text-[8px] font-bold px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 uppercase tracking-wider">Pre-booking</span>}
+          </div>
+        </td>
+        <td className={`px-3 py-2.5 text-[12px] font-semibold ${otCls}`}>{perf.onTime}%</td>
+        <td className={`px-3 py-2.5 text-[12px] font-medium ${dlyCls}`}>{perf.avgDelay >= 0 ? '+' : ''}{perf.avgDelay.toFixed(1)}d</td>
+        <td className="px-3 py-2.5">{trendBadge(perf.trend)}</td>
+        <td className="px-3 py-2.5">
+          <div className="w-24 h-1.5 rounded-full bg-gray-100 overflow-hidden">
+            <div className={`h-full rounded-full ${otBar}`} style={{ width: `${perf.onTime}%` }} />
+          </div>
+        </td>
+      </tr>
+    )
+  }
+
+  return (
+    <div className="space-y-5">
+      {/* Header */}
+      <div className="bg-white border border-gray-100 rounded-2xl shadow-sm">
+        <div className="px-6 pt-5 pb-4 border-b border-gray-100">
+          <button onClick={onBack} className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-800 mb-3">
+            <ChevronLeft className="w-3.5 h-3.5" /> Back to Suppliers
+          </button>
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap mb-1">
+                <span className="text-xl font-bold text-gray-900">{supplier.name}</span>
+                {(() => {
+                  const pat = getRelationshipPattern(supplier)
+                  if (pat === 'structural')    return <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-700">Structural underperformer</span>
+                  if (pat === 'concentration') return <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">High concentration</span>
+                  if (supplier.onTimeRate >= 90) return <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">Strategic</span>
+                  return null
+                })()}
+              </div>
+              <div className="text-xs text-gray-500">
+                {supplierEmail} · {openPOsForSupplier.length} active PO{openPOsForSupplier.length === 1 ? '' : 's'} · £{valueAtRisk.toLocaleString('en-GB')} total value
+              </div>
+            </div>
+            <div className="shrink-0 flex items-center gap-2">
+              {journey && tierCfg && (
+                <span className={`inline-flex items-center px-3 py-1 rounded-full text-[11px] font-bold border ${tierCfg.bg} ${tierCfg.text} ${tierCfg.border}`}>
+                  {journey.tier}
+                </span>
+              )}
+              {onLogActivity && <LogActivityButton onSave={onLogActivity} />}
+            </div>
+          </div>
+        </div>
+
+        {/* Section 1 — Overview / Health */}
+        <div className="px-6 py-5">
+          {journey && (
+            <p className="text-[13px] text-gray-700 leading-relaxed mb-4">{journey.summary}</p>
+          )}
+          <div className="grid grid-cols-5 gap-3">
+            {[
+              { label: 'On-time rate',  value: `${supplier.onTimeRate}%`, cls: supplier.onTimeRate >= 90 ? 'text-green-700' : supplier.onTimeRate >= 80 ? 'text-amber-700' : 'text-red-700' },
+              { label: 'Avg delay',     value: `${supplier.avgDelayDays.toFixed(1)}d`, cls: supplier.avgDelayDays < 2 ? 'text-green-700' : supplier.avgDelayDays < 5 ? 'text-amber-700' : 'text-red-700' },
+              { label: 'Open POs',      value: openPOsForSupplier.length.toString(), cls: 'text-gray-900' },
+              { label: 'Value at risk', value: `£${(valueAtRisk / 1000).toFixed(0)}k`, cls: valueAtRisk > 50000 ? 'text-red-700' : valueAtRisk > 20000 ? 'text-amber-700' : 'text-gray-900' },
+              { label: 'Lead time',     value: `${supplier.contractualLeadTimeDays}d`, cls: 'text-gray-900' },
+            ].map(k => (
+              <div key={k.label} className="rounded-xl bg-gray-50 border border-gray-100 px-4 py-3">
+                <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1">{k.label}</div>
+                <div className={`text-xl font-bold ${k.cls}`}>{k.value}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Section 2 — Performance by stage (centerpiece) */}
+      <div className="bg-white border border-gray-100 rounded-2xl shadow-sm">
+        <div className="px-6 pt-5 pb-3 border-b border-gray-100">
+          <div className="text-sm font-bold text-gray-900">Performance by stage</div>
+          <div className="text-[11px] text-gray-500 mt-0.5">On-time rate and average delay broken down by stage of the order journey.</div>
+        </div>
+        <div className="px-6 py-3">
+          {journey ? (
+            <>
+              <table className="w-full text-xs">
+                <thead className="border-b border-gray-100">
+                  <tr>
+                    <th className="px-3 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Stage</th>
+                    <th className="px-3 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">On-time %</th>
+                    <th className="px-3 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Avg delay</th>
+                    <th className="px-3 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Trend (90d)</th>
+                    <th className="px-3 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Visual</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {STAGE_ORDER.map(stage => stageRow(stage, journey.byStage[stage], STAGE_LABELS[stage], PRE_BOOKING_STAGES.includes(stage)))}
+                  <tr className="bg-gray-50">
+                    <td className="px-3 py-2.5 text-[12px] font-bold text-gray-900">Overall</td>
+                    <td className={`px-3 py-2.5 text-[13px] font-bold ${supplier.onTimeRate >= 95 ? 'text-green-700' : supplier.onTimeRate >= 85 ? 'text-amber-700' : 'text-red-700'}`}>{supplier.onTimeRate}%</td>
+                    <td className={`px-3 py-2.5 text-[13px] font-bold ${supplier.avgDelayDays < 2 ? 'text-gray-700' : 'text-amber-700'}`}>+{supplier.avgDelayDays.toFixed(1)}d</td>
+                    <td className="px-3 py-2.5">{trendBadge(supplier.trend === 'improving' ? 'improving' : supplier.trend === 'deteriorating' ? 'worsening' : 'stable')}</td>
+                    <td className="px-3 py-2.5">—</td>
+                  </tr>
+                </tbody>
+              </table>
+              <div className="text-[10px] text-gray-400 italic mt-3">Pre-booking stages aren't tracked in production data today — these values are mocked for this prototype.</div>
+            </>
+          ) : (
+            <div className="text-xs text-gray-400 italic py-4">Stage-level breakdown not yet available for this supplier.</div>
+          )}
+        </div>
+      </div>
+
+      {/* Section 4 — Open POs */}
+      <div className="bg-white border border-gray-100 rounded-2xl shadow-sm">
+        <div className="px-6 pt-5 pb-3 border-b border-gray-100 flex items-center justify-between">
+          <div>
+            <div className="text-sm font-bold text-gray-900">Open POs</div>
+            <div className="text-[11px] text-gray-500 mt-0.5">{openPOsForSupplier.length} active · click a PO to open its detail or action.</div>
+          </div>
+          <div className="flex items-center gap-1.5">
+            {([
+              { k: 'all',      lbl: `All open (${openPOsForSupplier.length})` },
+              { k: 'late',     lbl: 'Tracking late' },
+              { k: 'awaiting', lbl: 'Awaiting' },
+              { k: 'critical', lbl: 'Critical' },
+            ] as const).map(opt => (
+              <button
+                key={opt.k}
+                onClick={() => setPoFilter(opt.k)}
+                className={`text-[11px] font-medium px-2.5 py-1 rounded-full transition-colors ${poFilter === opt.k ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+              >
+                {opt.lbl}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="overflow-hidden">
+          <table className="w-full text-xs">
+            <thead className="bg-gray-50/40 border-b border-gray-100">
+              <tr>
+                <th className="px-4 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">PO #</th>
+                <th className="px-4 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Product</th>
+                <th className="px-4 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Value</th>
+                <th className="px-4 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Current stage</th>
+                <th className="px-4 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Est. delivery</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50">
+              {filteredPOs.map(po => {
+                const est = getEstimatedDelivery(po)
+                const currentStage =
+                  po.status === 'Ex-factory delay'     ? 'Ex-factory'         :
+                  po.status === 'Date change required' ? 'Awaiting confirmation' :
+                  po.status === 'Late DC booking'      ? 'DC booking pending' :
+                  po.status === 'Acknowledged'         ? 'Acknowledged'       :
+                  'In progress'
+                return (
+                  <tr
+                    key={po.id}
+                    onClick={() => onOpenPO?.(po.id)}
+                    className="hover:bg-gray-50 cursor-pointer"
+                  >
+                    <td className="px-4 py-2.5 font-semibold text-indigo-700">{po.id}</td>
+                    <td className="px-4 py-2.5 text-gray-700">{po.product}</td>
+                    <td className="px-4 py-2.5 text-gray-700 font-medium">{po.orderValue}</td>
+                    <td className="px-4 py-2.5 text-gray-600">{currentStage}</td>
+                    <td className="px-4 py-2.5">
+                      <div className="flex items-center gap-2">
+                        <EstDeliveryPill po={po} />
+                        {est.gatingFactor && <span className="text-[10px] text-gray-400 italic truncate max-w-xs">{est.gatingFactor}</span>}
+                      </div>
+                    </td>
+                  </tr>
+                )
+              })}
+              {filteredPOs.length === 0 && (
+                <tr><td colSpan={5} className="px-4 py-8 text-center text-[11px] text-gray-400">No POs match the selected filter.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Section 5 — Performance history (3-col charts) */}
+      {journey && (
+        <div className="grid grid-cols-3 gap-4">
+          {[
+            { title: 'On-time rate (6 mo)', key: 'onTime' as const,  fmt: (v: number) => `${v}%`, color: '#10b981' },
+            { title: 'Avg delay (6 mo)',    key: 'avgDelay' as const, fmt: (v: number) => `${v.toFixed(1)}d`, color: '#f59e0b' },
+            { title: 'PO volume (6 mo)',    key: 'volume' as const,   fmt: (v: number) => `${v}`, color: '#6366f1' },
+          ].map(chart => (
+            <div key={chart.title} className="bg-white border border-gray-100 rounded-2xl shadow-sm p-4">
+              <div className="text-[11px] font-bold text-gray-700 mb-2">{chart.title}</div>
+              <ResponsiveContainer width="100%" height={140}>
+                <LineChart data={journey.history} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" vertical={false} />
+                  <XAxis dataKey="month" tick={{ fontSize: 9, fill: '#9ca3af' }} tickLine={false} axisLine={false} />
+                  <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} tickLine={false} axisLine={false} tickFormatter={chart.fmt} />
+                  <Tooltip contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #e5e7eb' }} formatter={(v: unknown) => [chart.fmt(Number(v) || 0)]} />
+                  <Line dataKey={chart.key} type="monotone" stroke={chart.color} strokeWidth={2} dot={{ r: 3 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -8781,6 +9273,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
     }
   }, [initialOpenAction])
   const [snoozedCards,     setSnoozedCards]     = useState<Set<string>>(new Set())
+  const [selectedSupplierId, setSelectedSupplierId] = useState<string | null>(null)
   const [actTypeFilter,    setActTypeFilter]    = useState('all')
   const [urgencyFilter,    setUrgencyFilter]    = useState('all')
   const [sortMode,         setSortMode]         = useState<'urgency_value' | 'alpha'>('urgency_value')
@@ -10846,6 +11339,29 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
 
         {/* ── SUPPLIERS ── */}
         {subTab === 'suppliers' && (() => {
+          // Detail view takes over when a supplier is selected.
+          if (selectedSupplierId) {
+            const sup = SUPPLIERS.find(s => s.id === selectedSupplierId)
+            if (sup) return (
+              <SupplierDetailView
+                supplier={sup}
+                onBack={() => setSelectedSupplierId(null)}
+                pos={ALL_POS}
+                onOpenPO={poId => { setSelectedPOId(poId); setSelectedSupplierId(null) }}
+                onLogActivity={(kind, text) => {
+                  // Prototype stub: log against the supplier's first PO so it surfaces in events.
+                  const sample = ALL_POS.find(p => p.supplierId === sup.id)
+                  if (sample) addPOEvent(sample.id, {
+                    id:        `supnote-${Date.now()}`,
+                    type:      'manual_note',
+                    timestamp: new Date().toISOString(),
+                    author:    'buyer',
+                    body:      (kind === 'call' ? '[Call] ' : kind === 'action' ? '[Action] ' : '') + text,
+                  })
+                }}
+              />
+            )
+          }
           const underperforming = SUPPLIERS.filter(s => s.onTimeRate < 75 || s.trend === 'deteriorating')
           return (
             <div className="space-y-4">
@@ -10864,8 +11380,8 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                     {SUPPLIERS.map(s => {
                       const atRisk = s.onTimeRate < 75 || s.trend === 'deteriorating'
                       return (
-                        <tr key={s.id} className="hover:bg-gray-50">
-                          <td className="px-4 py-3 font-semibold text-gray-900">{s.name}</td>
+                        <tr key={s.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => setSelectedSupplierId(s.id)}>
+                          <td className="px-4 py-3 font-semibold text-indigo-700 hover:text-indigo-900">{s.name}</td>
                           <td className="px-4 py-3 text-gray-500">{s.category}</td>
                           <td className="px-4 py-3">
                             <div className="flex items-center gap-2">
