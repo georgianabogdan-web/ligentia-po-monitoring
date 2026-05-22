@@ -224,6 +224,100 @@ function relativeTimeFrom(iso: string | undefined, now: Date): string {
   return `${wks}w ago`
 }
 
+// ── Estimated delivery prediction ──────────────────────────────────────────────
+// Derives an agent-style "best guess" delivery date + status from the PO's existing
+// fields (expectedDelivery, revisedDelivery, status). This is a mocked stand-in for
+// real stage-by-stage progression data — the prototype doesn't have stage tracking
+// wired up, so we infer from the high-level status pattern.
+type DeliveryStatus = 'on_track' | 'at_risk' | 'late' | 'critical'
+interface EstimatedDelivery {
+  date:         string       // ISO date
+  status:       DeliveryStatus
+  delayDays:    number       // days vs expectedDelivery (positive = late)
+  gatingFactor: string | null
+}
+function getEstimatedDelivery(po: { expectedDelivery: string; revisedDelivery?: string; status: string }, today: Date = new Date()): EstimatedDelivery {
+  const expected = new Date(po.expectedDelivery)
+  const daysOverdue = Math.max(0, Math.ceil((today.getTime() - expected.getTime()) / 86400000))
+
+  // On-track POs: estimate matches expected, no delay.
+  if (po.status === 'On track' || po.status === 'Acknowledged' || po.status === 'Sent to supplier') {
+    return { date: po.expectedDelivery, status: 'on_track', delayDays: 0, gatingFactor: null }
+  }
+
+  // Late DC booking: small drift if booking is still missing.
+  if (po.status === 'Late DC booking') {
+    const slip = 5 + Math.floor((po.expectedDelivery.charCodeAt(po.expectedDelivery.length - 1) % 5)) // deterministic 5-9
+    const est = new Date(expected); est.setDate(est.getDate() + slip)
+    return {
+      date:      est.toISOString().slice(0, 10),
+      status:    slip <= 3 ? 'at_risk' : slip <= 13 ? 'late' : 'critical',
+      delayDays: slip,
+      gatingFactor: 'DC booking unconfirmed · awaiting freight reference',
+    }
+  }
+
+  // Date change required: trust revisedDelivery, classify by drift.
+  if (po.status === 'Date change required') {
+    if (po.revisedDelivery) {
+      const revised = new Date(po.revisedDelivery)
+      const drift = Math.ceil((revised.getTime() - expected.getTime()) / 86400000)
+      return {
+        date:      po.revisedDelivery,
+        status:    drift <= 3 ? 'at_risk' : drift <= 13 ? 'late' : 'critical',
+        delayDays: drift,
+        gatingFactor: 'Supplier requested date change',
+      }
+    }
+    // No revised date yet — agent estimates +14d slip pending confirmation.
+    const est = new Date(expected); est.setDate(est.getDate() + 14)
+    return {
+      date:      est.toISOString().slice(0, 10),
+      status:    'late',
+      delayDays: 14,
+      gatingFactor: 'Awaiting revised date from supplier',
+    }
+  }
+
+  // Ex-factory delay (overdue): estimate compounds days overdue + buffer for in-transit.
+  if (po.status === 'Ex-factory delay') {
+    const buffer = 7 // typical sea freight + DC handoff after dispatch
+    const totalSlip = daysOverdue + buffer
+    const est = new Date(today); est.setDate(today.getDate() + buffer)
+    return {
+      date:      est.toISOString().slice(0, 10),
+      status:    totalSlip >= 14 ? 'critical' : 'late',
+      delayDays: totalSlip,
+      gatingFactor: daysOverdue >= 21 ? 'No supplier response · escalation needed' : `Ex-factory ${daysOverdue}d overdue · awaiting dispatch`,
+    }
+  }
+
+  // Default: use expectedDelivery as-is.
+  return { date: po.expectedDelivery, status: 'on_track', delayDays: 0, gatingFactor: null }
+}
+
+const DELIVERY_STATUS_CFG: Record<DeliveryStatus, { bg: string; text: string; border: string; label: (delay: number) => string }> = {
+  on_track: { bg: 'bg-green-50',  text: 'text-green-700',  border: 'border-green-200',  label: () => 'On track' },
+  at_risk:  { bg: 'bg-amber-50',  text: 'text-amber-700',  border: 'border-amber-200',  label: d => `${d}d late` },
+  late:     { bg: 'bg-orange-50', text: 'text-orange-700', border: 'border-orange-200', label: d => `${d}d late` },
+  critical: { bg: 'bg-red-50',    text: 'text-red-700',    border: 'border-red-200',    label: d => `${d}d late` },
+}
+
+function EstDeliveryPill({ po, size = 'sm' }: { po: { expectedDelivery: string; revisedDelivery?: string; status: string }; size?: 'sm' | 'md' }) {
+  const est = getEstimatedDelivery(po)
+  const cfg = DELIVERY_STATUS_CFG[est.status]
+  const dateStr = new Date(est.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+  const cls = size === 'md' ? 'text-[11px] px-2 py-0.5' : 'text-[10px] px-1.5 py-0.5'
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full border font-semibold ${cls} ${cfg.bg} ${cfg.text} ${cfg.border}`}
+      title={est.gatingFactor ? `Agent prediction · ${est.gatingFactor}` : 'Agent prediction · stages on plan'}
+    >
+      Est. {dateStr} · {cfg.label(est.delayDays)}
+    </span>
+  )
+}
+
 interface POEvent {
   id:        string
   type:      POEventType
@@ -9452,38 +9546,36 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
               </div>
             </div>
 
-            {/* ── Supplier Workspace: left rail (compact action list) + right pane (existing drawer body) ── */}
-            <div className="flex flex-col lg:flex-row gap-0 h-[calc(100vh-340px)] min-h-[640px] border border-gray-200 rounded-2xl overflow-hidden bg-white">
-              {/* LEFT RAIL — Actions queue */}
-              <div className="w-full lg:w-[300px] lg:shrink-0 lg:border-r border-gray-100 flex flex-col bg-gray-50/40">
-                <div className="px-4 py-3 border-b border-gray-100 shrink-0 flex items-baseline justify-between">
-                  <span className="text-xs font-bold text-gray-900">Actions</span>
-                  <span className="text-[10px] text-gray-400 font-medium">{withHeaders.length}</span>
-                </div>
-                {/* Briefing card — one-line orientation summary */}
-                {withHeaders.length > 0 && (() => {
-                  const totalValAtRisk = withHeaders.reduce((s, { g }) => s + g.pos.reduce((ss, p) => ss + parseOrderVal(p.orderValue), 0), 0)
-                  const topItem = withHeaders[0]?.g
-                  const topSup = topItem ? getSupplier(topItem.supplierId) : null
-                  const decisionsCount = withHeaders.filter(({ g }) => getCardState(g) === 'decision-needed').length
-                  return (
-                    <div className="border-b border-gray-100 px-3 py-2 bg-gray-50/30 shrink-0">
-                      <div className="text-[11px] font-semibold text-gray-700">
-                        {withHeaders.length} action{withHeaders.length === 1 ? '' : 's'}
-                        {decisionsCount > 0 && <> · {decisionsCount} require{decisionsCount === 1 ? 's' : ''} a decision</>}
-                        {totalValAtRisk > 0 && <> · £{totalValAtRisk.toLocaleString()} at risk</>}
-                      </div>
-                      {topSup && (
-                        <div className="text-[10px] text-gray-500 mt-0.5 leading-snug">
-                          {decisionsCount > 0
-                            ? `${decisionsCount} overdue decision${decisionsCount === 1 ? ' is' : 's are'} most urgent — start with ${topSup.name}.`
-                            : `Top priority: ${topSup.name}.`}
-                        </div>
-                      )}
+            {/* ── Full-width action list — primary surface (Sheet overlay opens on click) ── */}
+            <div className="bg-white border border-gray-200 rounded-2xl overflow-hidden">
+              <div className="px-5 py-3 border-b border-gray-100 flex items-baseline justify-between">
+                <span className="text-sm font-bold text-gray-900">Actions</span>
+                <span className="text-[11px] text-gray-400 font-medium">{withHeaders.length}</span>
+              </div>
+              {/* Briefing line */}
+              {withHeaders.length > 0 && (() => {
+                const totalValAtRisk = withHeaders.reduce((s, { g }) => s + g.pos.reduce((ss, p) => ss + parseOrderVal(p.orderValue), 0), 0)
+                const topItem = withHeaders[0]?.g
+                const topSup = topItem ? getSupplier(topItem.supplierId) : null
+                const decisionsCount = withHeaders.filter(({ g }) => getCardState(g) === 'decision-needed').length
+                return (
+                  <div className="border-b border-gray-100 px-5 py-2.5 bg-gray-50/40">
+                    <div className="text-[12px] font-semibold text-gray-700">
+                      {withHeaders.length} action{withHeaders.length === 1 ? '' : 's'}
+                      {decisionsCount > 0 && <> · {decisionsCount} require{decisionsCount === 1 ? 's' : ''} a decision</>}
+                      {totalValAtRisk > 0 && <> · £{totalValAtRisk.toLocaleString()} at risk</>}
                     </div>
-                  )
-                })()}
-                <div className="flex-1 overflow-y-auto py-2 px-2 space-y-1">
+                    {topSup && (
+                      <div className="text-[11px] text-gray-500 mt-0.5 leading-snug">
+                        {decisionsCount > 0
+                          ? `${decisionsCount} overdue decision${decisionsCount === 1 ? ' is' : 's are'} most urgent — start with ${topSup.name}.`
+                          : `Top priority: ${topSup.name}.`}
+                      </div>
+                    )}
+                  </div>
+                )
+              })()}
+              <div className="divide-y divide-gray-100">
                 {withHeaders.length === 0 && (
                   <div className="flex flex-col items-center justify-center py-20 text-gray-400 px-4">
                     <Check className="w-8 h-8 mb-2 text-green-300" />
@@ -9491,50 +9583,105 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                     <p className="text-[10px] mt-1 text-center">Adjust filters above or check back later</p>
                   </div>
                 )}
-                {withHeaders.map(({ g, showHeader }) => {
-                  const sup   = getSupplier(g.supplierId)
-                  const state = getCardState(g)
-                  const ck    = cardKey(g)
-                  const isOpen = drawerCardKey === ck
+                {withHeaders.map(({ g }) => {
+                  const sup       = getSupplier(g.supplierId)
+                  const state     = getCardState(g)
+                  const ck        = cardKey(g)
+                  const issueTitle    = actionIssueTitle(g, today)
+                  const impactSubtitle = actionImpactSubtitle(g, sup ?? null)
+                  // Tier detection for inline-action gating
+                  const tier1Decision = g.type === 'overdue' && (state === 'decision-needed' || (sup?.onTimeRate ?? 100) < 70)
+                  const tier1DateChange = g.type === 'at_risk'
+                  const tier1 = tier1Decision || tier1DateChange
+                  // Recommended preview
+                  const recPreview = (() => {
+                    if (g.type === 'overdue' && sup) {
+                      const maxOver = Math.max(...g.pos.map(p => daysOverdue(p)))
+                      const orderVal = g.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0)
+                      const poRec = getPORecommendation(g, sup, maxOver, orderVal, 10)
+                      return poRec.primaryLabel.split('(')[0].trim().replace(/\+$/, '').trim()
+                    }
+                    if (g.type === 'at_risk' && sup) {
+                      const daysPushed = Math.max(...g.pos.map(p => {
+                        if (!p.revisedDelivery) return 0
+                        return Math.round((new Date(p.revisedDelivery).getTime() - new Date(p.expectedDelivery).getTime()) / 86400000)
+                      }))
+                      const dateRec = getDateChangeRecommendation(g, sup, daysPushed, isSubstantiveReason(g.triggerMessage), g.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0))
+                      return dateRec.primaryLabel.split('(')[0].trim().replace(/\+$/, '').trim()
+                    }
+                    if (g.type === 'late_dc') {
+                      return (sup?.onTimeRate ?? 100) > 85 ? 'Confirm booking' : 'Investigate root cause'
+                    }
+                    return 'Chase supplier'
+                  })()
+                  // Worst-case est delivery across the action's POs
+                  const worstPO = [...g.pos].sort((a, b) => getEstimatedDelivery(b).delayDays - getEstimatedDelivery(a).delayDays)[0]
                   return (
-                    <div key={ck}>
-                      {/* Supplier divider header */}
-                      {showHeader && (
-                        <div className="flex items-center gap-1.5 pt-2 pb-1 px-2 flex-wrap">
-                          <Building2 className="w-3 h-3 text-indigo-500 shrink-0" />
-                          <span className="text-[10px] font-bold text-gray-700 truncate">{sup?.name ?? g.supplierId}</span>
+                    <div
+                      key={ck}
+                      onClick={() => setDrawerCardKey(ck)}
+                      className={`flex items-center gap-4 px-5 py-3 cursor-pointer transition-colors hover:bg-gray-50 ${snoozedCards.has(ck) ? 'opacity-50' : ''}`}
+                    >
+                      {/* Left: pills + identity + issue + POs */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5 mb-1.5 flex-wrap">
+                          <ActionCardPills group={g} supplier={sup ?? null} size="md" />
                           {sup && (() => {
                             const pat = getRelationshipPattern(sup)
-                            if (pat === 'structural') return <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-red-100 text-red-700">Structural underperformer</span>
+                            if (pat === 'structural')    return <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-red-100 text-red-700">Structural underperformer</span>
                             if (pat === 'concentration') return <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">High concentration</span>
                             return null
                           })()}
                         </div>
-                      )}
-                      {/* Action card — shared component */}
-                      <ActionItemCard
-                        group={g}
-                        state={state}
-                        selected={isOpen}
-                        onSelect={() => setDrawerCardKey(isOpen ? null : ck)}
-                        supplier={sup}
-                        showSupplierHeader={false}
-                        showAgentRec
-                        showSnooze
-                        snoozed={snoozedCards.has(ck)}
-                        onSnoozeToggle={() => setSnoozedCards(prev => { const n = new Set(prev); n.has(ck) ? n.delete(ck) : n.add(ck); return n })}
-                        today={today}
-                      />
+                        <div className="flex items-baseline gap-2 mb-0.5">
+                          <span className="text-[12px] font-semibold text-gray-900">{sup?.name ?? g.supplierId}</span>
+                          <span className="text-[11px] text-gray-500">·</span>
+                          <span className="text-[12px] font-medium text-gray-800">{issueTitle}</span>
+                        </div>
+                        <div className="text-[11px] text-gray-500 mb-0.5">{impactSubtitle}</div>
+                        <div className="text-[10px] text-gray-400">
+                          {g.pos.length <= 2
+                            ? g.pos.map(p => p.id).join(', ')
+                            : `${g.pos[0].id}, ${g.pos[1].id} +${g.pos.length - 2} more`
+                          }
+                        </div>
+                      </div>
+                      {/* Right: What's next preview + est delivery + open affordance */}
+                      <div className="shrink-0 w-72 flex flex-col items-end gap-1.5" onClick={e => e.stopPropagation()}>
+                        <div className="text-[11px] text-gray-500 text-right leading-tight">
+                          <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider block">Recommended</span>
+                          <span className="text-[12px] font-semibold text-gray-800">{recPreview}</span>
+                        </div>
+                        {worstPO && <EstDeliveryPill po={worstPO} />}
+                        <div className="flex items-center gap-2 mt-0.5">
+                          {/* Inline quick actions for low-stakes tiers */}
+                          {!tier1 && g.type === 'overdue' && (
+                            <button onClick={e => { e.stopPropagation(); setDrawerCardKey(ck); /* handled in workspace */ }} className="h-7 px-2.5 text-[10px] font-semibold rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200">Send chase</button>
+                          )}
+                          {!tier1 && g.type === 'late_dc' && (sup?.onTimeRate ?? 100) > 85 && (
+                            <button onClick={e => { e.stopPropagation(); setDrawerCardKey(ck); }} className="h-7 px-2.5 text-[10px] font-semibold rounded-lg bg-green-600 text-white hover:bg-green-700">Approve &amp; send</button>
+                          )}
+                          <button onClick={() => setDrawerCardKey(ck)} className="h-7 px-3 text-[10px] font-semibold rounded-lg border border-indigo-200 text-indigo-700 hover:bg-indigo-50 inline-flex items-center gap-1">
+                            Open <ArrowRight className="w-3 h-3" />
+                          </button>
+                          <span
+                            onClick={e => { e.stopPropagation(); setSnoozedCards(prev => { const n = new Set(prev); n.has(ck) ? n.delete(ck) : n.add(ck); return n }) }}
+                            className="text-[9px] text-gray-400 hover:text-gray-600 font-medium transition-colors cursor-pointer"
+                          >{snoozedCards.has(ck) ? 'Unsnooze' : 'Snooze 3d'}</span>
+                        </div>
+                      </div>
                     </div>
                   )
                 })}
-                </div>
               </div>
+            </div>
 
-              {/* ── RIGHT PANE: Drawer content (verbatim) or empty state ────── */}
-              {drawerCardKey && drawerGroup && drawerSup ? (
+            {/* ── Sheet overlay: action workspace (existing drawer body, right-anchored 780px) ── */}
+            {drawerCardKey && drawerGroup && drawerSup && (
+              <div className="fixed inset-0 z-50 flex">
+                <div className="flex-1 bg-black/30" onClick={() => setDrawerCardKey(null)} />
                 <div
-                  className="flex-1 bg-white flex flex-col overflow-hidden"
+                  className="w-[780px] max-w-[95vw] bg-white h-full flex flex-col shadow-2xl overflow-hidden"
                   onKeyDown={e => { if (e.key === 'Escape') { if (drawerView === 'po-detail') { setDrawerView('action'); setDrawerViewPOId(null) } else setDrawerCardKey(null) } }}
                 >
                   {/* Drawer header */}
@@ -9572,6 +9719,20 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                           <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full border bg-gray-100 text-gray-600 border-gray-200">{drawerSup.openPOs} open POs</span>
                           <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full border bg-indigo-50 text-indigo-700 border-indigo-100">Lead {drawerSup.contractualLeadTimeDays}d</span>
                         </div>
+                        {/* Worst-case estimated delivery across action POs */}
+                        {(() => {
+                          const ranked = [...drawerGroup.pos].map(p => ({ p, est: getEstimatedDelivery(p) })).sort((a, b) => b.est.delayDays - a.est.delayDays)
+                          const worst = ranked[0]
+                          if (!worst) return null
+                          return (
+                            <div className="mt-2.5 flex items-center gap-2">
+                              <EstDeliveryPill po={worst.p} size="md" />
+                              {worst.est.gatingFactor && (
+                                <span className="text-[11px] text-gray-500 italic">{worst.est.gatingFactor}</span>
+                              )}
+                            </div>
+                          )
+                        })()}
                       </>
                     ) : (
                       /* View 2 breadcrumb */
@@ -9612,7 +9773,8 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                               <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${ragDot}`} />
                               <span className="font-mono font-semibold text-gray-800">{p.id}</span>
                               <span className="flex-1 truncate text-gray-500">{p.product}</span>
-                              <span className="shrink-0 text-gray-400">{formatDate(p.expectedDelivery)}</span>
+                              <span className="shrink-0 text-gray-400 line-through">{formatDate(p.expectedDelivery)}</span>
+                              <EstDeliveryPill po={p} />
                               <ChevronRight className="w-3 h-3 text-gray-300 group-hover:text-indigo-500 shrink-0" />
                             </button>
                           )
@@ -10610,16 +10772,8 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                     </div>
                   )}
                 </div>
-              ) : (
-                <div className="flex-1 flex flex-col items-center justify-center px-6 text-center bg-white">
-                  <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center mb-3">
-                    <MessageSquare className="w-5 h-5 text-gray-400" />
-                  </div>
-                  <div className="text-sm font-semibold text-gray-700 mb-1">Select an action</div>
-                  <div className="text-xs text-gray-400 max-w-xs">Pick an action from the left to review the recommendation and respond to the supplier.</div>
-                </div>
-              )}
-            </div>
+              </div>
+            )}
           </>
           )
         })()}
@@ -10658,7 +10812,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
               <div className="bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden">
                 <table className="w-full text-xs">
                   <thead className="bg-gray-50 border-b border-gray-100">
-                    <tr>{['PO Number','Supplier','Product','Status','Delivery','Value','Freight'].map(h => <th key={h} className="px-4 py-3 text-left font-semibold text-gray-500 whitespace-nowrap">{h}</th>)}</tr>
+                    <tr>{['PO Number','Supplier','Product','Status','Delivery','Est. delivery','Value','Freight'].map(h => <th key={h} className="px-4 py-3 text-left font-semibold text-gray-500 whitespace-nowrap">{h}</th>)}</tr>
                   </thead>
                   <tbody className="divide-y divide-gray-50">
                     {filtered.map(po => {
@@ -10676,6 +10830,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                             <div className={`text-[10px] mt-0.5 ${diffDays < 0 ? 'text-red-500' : diffDays <= 7 ? 'text-amber-500' : 'text-gray-400'}`}>{relLabel}</div>
                             {po.revisedDelivery && <div className="text-[10px] text-orange-500 mt-0.5">→ {formatDate(po.revisedDelivery)}</div>}
                           </td>
+                          <td className="px-4 py-3"><EstDeliveryPill po={po} /></td>
                           <td className="px-4 py-3 text-gray-700 font-medium">{po.orderValue}</td>
                           <td className="px-4 py-3"><span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${po.freight === 'Air' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>{po.freight}</span></td>
                         </tr>
