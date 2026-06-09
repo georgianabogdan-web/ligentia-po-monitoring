@@ -12502,8 +12502,10 @@ export default function App() {
     { id: 'reorder',         label: 'Reorder',               count: REORDER_RECOMMENDATIONS.length },
     { id: 'reorder-manager', label: 'Reorder - Manager View', count: REORDER_RECOMMENDATIONS.filter(r => r.approvalStatus === 'Pending Approval').length },
     { id: 'po-monitoring',  label: 'PO Monitoring',   count: ALL_POS.length },
-    { id: 'replenishment',  label: 'Replenishment',   count: REPLEN_PRODUCTS.filter(p => p.suggestedReplen > 0).length },
+    // Replenishment tab hidden — route still mounts via the conditional below so direct links keep working.
+    // { id: 'replenishment',  label: 'Replenishment',   count: REPLEN_PRODUCTS.filter(p => p.suggestedReplen > 0).length },
   ]
+  void REPLEN_PRODUCTS
 
   return (
     <div className="flex min-h-screen bg-gray-50">
