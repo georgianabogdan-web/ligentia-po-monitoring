@@ -10,7 +10,7 @@ import {
 } from 'lucide-react'
 import { ComposedChart, LineChart, Cell, Bar, Line, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceArea, ReferenceLine } from 'recharts'
 import { INVENTORY_PRODUCTS, REORDER_RECOMMENDATIONS } from './mockData'
-import type { SizeBand, StockStatus, ApprovalStatus, SizeCurveEntry, InventoryProduct, ReorderRecommendation, Category, FreightScenarioData } from './mockData'
+import type { SizeBand, StockStatus, ApprovalStatus, BuyStatus, SupplierStatus, SizeCurveEntry, InventoryProduct, ReorderRecommendation, Category, FreightScenarioData } from './mockData'
 import { REPLEN_PRODUCTS } from './replenData'
 import type { ReplenProduct, DCStatus as ReplenDCStatus } from './replenData'
 import {
@@ -3051,7 +3051,7 @@ function AlertDigest({ onOpenAction, onViewAllActions }: {
             <div className="flex gap-1.5 flex-wrap mb-2">
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-gray-100 text-gray-600">{draftCount} Draft</span>
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">{pendingCount} Pending</span>
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-green-50 text-green-700 border border-green-200">{approvedCount} Approved</span>
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-green-50 text-green-700 border border-green-200">{approvedCount} Buy-approved</span>
             </div>
             <div className="text-xs text-gray-400">{fmtGBP(totalReorderValue)} total at cost</div>
           </div>
@@ -3525,6 +3525,59 @@ const APPROVAL_CFG: Record<ApprovalStatus, { bg: string; text: string; dot: stri
   'Approved':         { bg: 'bg-green-50',  text: 'text-green-700', dot: 'bg-green-500', border: 'border-green-200' },
   'Rejected':         { bg: 'bg-red-50',    text: 'text-red-700',   dot: 'bg-red-500',   border: 'border-red-200' },
   'Sent':             { bg: 'bg-indigo-50', text: 'text-indigo-700',dot: 'bg-indigo-500',border: 'border-indigo-200' },
+}
+
+// ── Two parallel status tracks ────────────────────────────────────────────────
+// Every reorder line advances on two independent tracks at once. These render as
+// two deliberately DIFFERENT-LOOKING chip families so a user never reads an
+// internal management approval as a supplier agreement (or vice-versa):
+//   • BuyStatusChip      — Building icon + "Buy:" prefix      (internal gate)
+//   • SupplierStatusChip — Mail icon + "Supplier:" prefix     (external track)
+
+// Canonical buy gate is stored as ApprovalStatus; map it to the BuyStatus vocab.
+const BUY_STATUS_OF: Record<ApprovalStatus, BuyStatus> = {
+  'Draft':            'draft',
+  'Pending Approval': 'pending_approval',
+  'Approved':         'approved',
+  'Rejected':         'rejected',
+  'Sent':             'sent',
+}
+const buyStatusOf = (a: ApprovalStatus): BuyStatus => BUY_STATUS_OF[a]
+
+const BUY_STATUS_CFG: Record<BuyStatus, { label: string; bg: string; text: string; border: string }> = {
+  draft:            { label: 'Draft',             bg: 'bg-gray-100',  text: 'text-gray-600',   border: 'border-gray-200'   },
+  pending_approval: { label: 'Pending approval',  bg: 'bg-amber-50',  text: 'text-amber-700',  border: 'border-amber-200'  },
+  approved:         { label: 'Approved',          bg: 'bg-green-50',  text: 'text-green-700',  border: 'border-green-200'  },
+  rejected:         { label: 'Rejected',          bg: 'bg-red-50',    text: 'text-red-700',    border: 'border-red-200'    },
+  sent:             { label: 'Sent to supplier',  bg: 'bg-indigo-50', text: 'text-indigo-700', border: 'border-indigo-200' },
+}
+const SUPPLIER_STATUS_CFG: Record<SupplierStatus, { label: string; bg: string; text: string; border: string }> = {
+  not_contacted:  { label: 'Not contacted',  bg: 'bg-gray-50',   text: 'text-gray-500',   border: 'border-gray-200'   },
+  awaiting_reply: { label: 'Awaiting reply', bg: 'bg-blue-50',   text: 'text-blue-700',   border: 'border-blue-200'   },
+  replied:        { label: 'Replied',        bg: 'bg-amber-50',  text: 'text-amber-700',  border: 'border-amber-200'  },
+  agreed:         { label: 'Agreed',         bg: 'bg-green-50',  text: 'text-green-700',  border: 'border-green-200'  },
+  declined:       { label: 'Declined',       bg: 'bg-red-50',    text: 'text-red-700',    border: 'border-red-200'    },
+}
+
+// Internal management gate. Square-ish, Building icon, "Buy:" prefix.
+function BuyStatusChip({ status, className = '' }: { status: BuyStatus; className?: string }) {
+  const c = BUY_STATUS_CFG[status]
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold border ${c.bg} ${c.text} ${c.border} ${className}`}>
+      <Building2 className="w-2.5 h-2.5" />
+      <span className="font-bold opacity-60">Buy:</span> {c.label}
+    </span>
+  )
+}
+// External negotiation track. Pill-shaped, Mail icon, "Supplier:" prefix.
+function SupplierStatusChip({ status, className = '' }: { status: SupplierStatus; className?: string }) {
+  const c = SUPPLIER_STATUS_CFG[status]
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border ${c.bg} ${c.text} ${c.border} ${className}`}>
+      <Mail className="w-2.5 h-2.5" />
+      <span className="font-bold opacity-60">Supplier:</span> {c.label}
+    </span>
+  )
 }
 
 // ── Size Band Bar ──────────────────────────────────────────────────────────────
@@ -5776,7 +5829,9 @@ function BulkNegotiationsView({
   onOpenSession: (sessionId: string) => void
 }) {
   const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [approved, setApproved] = useState<Set<string>>(new Set())
+  // "applied" = the recommended SUPPLIER next-step has been actioned for this line.
+  // This is the negotiation track, NOT a management/buy approval.
+  const [applied, setApplied] = useState<Set<string>>(new Set())
 
   const q = filterText.trim().toLowerCase()
   const derived = sessions.map(deriveSession).filter(d =>
@@ -5789,9 +5844,9 @@ function BulkNegotiationsView({
   const setMany   = (ids: string[], on: boolean) => setSelected(prev => {
     const n = new Set(prev); ids.forEach(id => on ? n.add(id) : n.delete(id)); return n
   })
-  const approveMany = (ids: string[]) => { setApproved(prev => new Set([...prev, ...ids])); setSelected(prev => { const n = new Set(prev); ids.forEach(id => n.delete(id)); return n }) }
+  const applyMany = (ids: string[]) => { setApplied(prev => new Set([...prev, ...ids])); setSelected(prev => { const n = new Set(prev); ids.forEach(id => n.delete(id)); return n }) }
 
-  const isActionable = (l: SessionLineView) => l.recAction !== '—' && !approved.has(l.rec.id)
+  const isActionable = (l: SessionLineView) => l.recAction !== '—' && !applied.has(l.rec.id)
 
   // Global summary
   const allLines        = derived.flatMap(d => d.lines)
@@ -5814,10 +5869,10 @@ function BulkNegotiationsView({
         <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full border bg-blue-50 text-blue-700 border-blue-200">{awaitingCount} awaiting</span>
         <button
           disabled={actionableAll.length === 0}
-          onClick={() => approveMany(actionableAll)}
+          onClick={() => applyMany(actionableAll)}
           className="ml-auto text-[11px] font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-200 disabled:text-gray-400 px-3 py-1.5 rounded-lg transition-colors"
         >
-          Approve all recommended ({actionableAll.length})
+          Apply recommended steps ({actionableAll.length})
         </button>
       </div>
 
@@ -5856,18 +5911,18 @@ function BulkNegotiationsView({
                 {supSelected.length > 0 ? (
                   <button
                     disabled={selActionable.length === 0}
-                    onClick={() => approveMany(selActionable)}
+                    onClick={() => applyMany(selActionable)}
                     className="text-[11px] font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-200 disabled:text-gray-400 px-3 py-1.5 rounded-lg transition-colors"
                   >
-                    {uniformAction ? `Approve recommended: ${uniformAction} ×${selActionable.length}` : `Approve recommended (${selActionable.length} selected)`}
+                    {uniformAction ? `Apply recommended: ${uniformAction} ×${selActionable.length}` : `Apply recommended steps (${selActionable.length} selected)`}
                   </button>
                 ) : (
                   <button
                     disabled={supActionable.length === 0}
-                    onClick={() => approveMany(supActionable)}
+                    onClick={() => applyMany(supActionable)}
                     className="text-[11px] font-semibold text-indigo-700 bg-white border border-indigo-200 hover:bg-indigo-50 disabled:text-gray-300 disabled:border-gray-200 px-3 py-1.5 rounded-lg transition-colors"
                   >
-                    Approve all recommended ({supActionable.length})
+                    Apply recommended steps ({supActionable.length})
                   </button>
                 )}
                 <button onClick={() => onOpenSession(d.session.id)} className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-800">Open full session →</button>
@@ -5890,12 +5945,12 @@ function BulkNegotiationsView({
               </thead>
               <tbody>
                 {d.lines.map(l => {
-                  const isApproved = approved.has(l.rec.id)
+                  const isApplied = applied.has(l.rec.id)
                   return (
                     <tr
                       key={l.rec.id}
                       onClick={() => onOpenThread(l.rec.id)}
-                      className={`border-b border-gray-50 last:border-0 hover:bg-gray-50 cursor-pointer transition-colors ${isApproved ? 'bg-green-50/40' : ''}`}
+                      className={`border-b border-gray-50 last:border-0 hover:bg-gray-50 cursor-pointer transition-colors ${isApplied ? 'bg-green-50/40' : ''}`}
                     >
                       <td className="px-2 py-2" onClick={e => e.stopPropagation()}>
                         <input type="checkbox" checked={selected.has(l.rec.id)} onChange={() => toggleRow(l.rec.id)} className="w-3 h-3" />
@@ -5907,13 +5962,13 @@ function BulkNegotiationsView({
                       <td className="px-2 py-2"><NegRecChip action={l.recAction} /></td>
                       <td className="px-2 py-2 text-gray-500">{l.outcome}</td>
                       <td className="px-2 py-2 text-right" onClick={e => e.stopPropagation()}>
-                        {isApproved ? (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-green-700"><Check className="w-3 h-3" /> Approved</span>
+                        {isApplied ? (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-green-700"><Check className="w-3 h-3" /> Applied</span>
                         ) : l.recAction === '—' ? (
                           <span className="text-[10px] text-gray-300">—</span>
                         ) : (
                           <button
-                            onClick={() => approveMany([l.rec.id])}
+                            onClick={() => applyMany([l.rec.id])}
                             className="text-[10px] font-semibold text-white bg-indigo-600 hover:bg-indigo-700 px-2.5 py-1 rounded-md transition-colors"
                           >
                             {l.recAction}
@@ -6781,7 +6836,6 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
     const p = selectedProduct
     const curStatus  = effStatus(p)
     const curFreight = effFreight(p)
-    const ac = APPROVAL_CFG[curStatus]
     const riskCls = p.stockoutRisk === 'Low' ? 'bg-green-100 text-green-700' : p.stockoutRisk === 'High' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'
     const qty = editQty > 0 ? editQty : p.recommendedReorderQty
     const exFact = editExFactory || p.exFactoryDate
@@ -6847,7 +6901,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                   Rejected{rejMeta ? ` by ${rejMeta.manager}, ${rejMeta.date}` : ''}
                 </div>
                 {rejReason && <div className="text-xs text-red-600 italic mb-1">"{rejReason}"</div>}
-                <div className="text-xs text-red-600">Edit the recommendation below and resubmit for approval.</div>
+                <div className="text-xs text-red-600">Edit the recommendation below and resubmit for management approval.</div>
               </div>
             </div>
           )}
@@ -6865,9 +6919,8 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                   <div className="text-sm font-bold text-gray-900 leading-snug">{p.name}</div>
                   <div className="text-[11px] text-gray-400 mb-2">{p.sku} · {p.category}</div>
                   <div className="flex gap-1.5 flex-wrap mb-2.5">
-                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border ${ac.bg} ${ac.text} ${ac.border}`}>
-                      <span className={`w-1.5 h-1.5 rounded-full ${ac.dot}`} />{curStatus}
-                    </span>
+                    <BuyStatusChip status={buyStatusOf(curStatus)} />
+                    <SupplierStatusChip status={p.supplierStatus} />
                     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold ${riskCls}`}>
                       {p.stockoutRisk} Risk
                     </span>
@@ -6899,7 +6952,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                         setStatusOverrides(o => ({ ...o, [p.id]: 'Pending Approval' }))
                         setPoHistory(h => ({ ...h, [p.id]: [...(h[p.id] ?? []), { action: `Resubmitted with changes: ${changeStr}`, by: 'Emma (Merchandiser)', date: today }] }))
                         _sharedResubmits.add(p.id)
-                        showToast(`${p.name} resubmitted for approval.`)
+                        showToast(`${p.name} resubmitted for management approval.`)
                       }} className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors">
                         Resubmit to Manager
                       </button>
@@ -7829,7 +7882,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                               </button>
                             )}
                             {stage === 'pending_approval' && (
-                              <span className="text-[10px] text-gray-400 font-medium py-0.5">Awaiting approval</span>
+                              <span className="text-[10px] text-gray-400 font-medium py-0.5">Awaiting management approval</span>
                             )}
                             {stage === 'approved' && (
                               <button onClick={() => setPushModalIds([p.id])}
@@ -7929,7 +7982,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
           <div className="bg-white rounded-2xl shadow-2xl p-6 w-[420px]">
             <div className="text-sm font-bold text-gray-900 mb-1">
-              Send {sendMgrModalIds.length} line{sendMgrModalIds.length !== 1 ? 's' : ''} for approval
+              Send {sendMgrModalIds.length} line{sendMgrModalIds.length !== 1 ? 's' : ''} for management approval
             </div>
             <div className="text-xs text-gray-400 mb-4">Lines will be sent to your manager for review.</div>
             <textarea rows={2} placeholder="Optional message to manager…"
@@ -7946,10 +7999,10 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                 setSendMgrModalIds([])
                 setSendMgrMsg('')
                 setSelectedIds(new Set())
-                showToast(`${sendMgrModalIds.length} line${sendMgrModalIds.length !== 1 ? 's' : ''} sent for approval.`)
+                showToast(`${sendMgrModalIds.length} line${sendMgrModalIds.length !== 1 ? 's' : ''} sent for management approval.`)
               }}
                 className="flex-1 h-9 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 transition-colors">
-                Send for approval
+                Send for management approval
               </button>
               <button onClick={() => { setSendMgrModalIds([]); setSendMgrMsg('') }}
                 className="h-9 px-4 rounded-lg border border-gray-200 text-xs font-semibold text-gray-600 hover:bg-gray-50 transition-colors">
@@ -8132,7 +8185,6 @@ function ManagerReorderView() {
     const p = selectedProduct
     const status = effStatus(p)
     const comment = effComment(p)
-    const ac = APPROVAL_CFG[status]
     const rCls = p.stockoutRisk === 'Low' ? 'bg-green-100 text-green-700' : p.stockoutRisk === 'High' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'
     const qty = editQty > 0 ? editQty : p.recommendedReorderQty
     const exFact = editExFactory || p.exFactoryDate
@@ -8151,9 +8203,7 @@ function ManagerReorderView() {
             status === 'Approved' ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'
           }`}>
             <div className="flex items-center gap-3">
-              <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border ${ac.bg} ${ac.text} ${ac.border}`}>
-                <span className={`w-1.5 h-1.5 rounded-full ${ac.dot}`} />{status}
-              </span>
+              <BuyStatusChip status={buyStatusOf(status)} />
               {status === 'Rejected' && comment && (
                 <span className="text-xs text-gray-500 italic">Reason: {comment}</span>
               )}
@@ -8502,7 +8552,7 @@ function ManagerReorderView() {
         <div className="flex items-center justify-between mb-5">
           <div>
             <div className="text-base font-bold text-gray-900">Manager Review</div>
-            <div className="text-xs text-gray-400 mt-0.5">Review and action reorder recommendations submitted for approval</div>
+            <div className="text-xs text-gray-400 mt-0.5">Review and action reorder recommendations submitted for management approval</div>
           </div>
           <div className="flex items-center gap-2">
             {(['Pending Approval', 'Approved', 'Rejected'] as const).map(s => (
@@ -8617,7 +8667,6 @@ function ManagerReorderView() {
                 const status  = effStatus(p)
                 const comment = effComment(p)
                 const isOpen  = !!rejectOpen[p.id]
-                const ac = APPROVAL_CFG[status]
                 const seed = p.sku.split('').reduce((a, c) => a + c.charCodeAt(0), 0)
                 const revWow = ((seed * 11 + i * 7) % 20) - 8
                 const salesWow = ((seed * 9 + i * 5) % 20) - 8
@@ -8725,14 +8774,14 @@ function ManagerReorderView() {
                           )}
                           {status === 'Approved' && (
                             <div className="flex items-center gap-2">
-                              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border ${ac.bg} ${ac.text} ${ac.border}`}><span className={`w-1.5 h-1.5 rounded-full ${ac.dot}`} />{status}</span>
+                              <BuyStatusChip status={buyStatusOf(status)} />
                               <button onClick={() => undo(p.id)} className="text-[10px] text-gray-400 hover:text-gray-600 underline">Undo</button>
                             </div>
                           )}
                           {status === 'Rejected' && (
                             <div>
                               <div className="flex items-center gap-2">
-                                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border ${ac.bg} ${ac.text} ${ac.border}`}><span className={`w-1.5 h-1.5 rounded-full ${ac.dot}`} />{status}</span>
+                                <BuyStatusChip status={buyStatusOf(status)} />
                                 <button onClick={() => undo(p.id)} className="text-[10px] text-gray-400 hover:text-gray-600 underline">Undo</button>
                               </div>
                               {comment && <div className="text-[10px] text-gray-400 italic mt-0.5 max-w-[160px] truncate">Reason: {comment.slice(0, 60)}{comment.length > 60 ? '…' : ''}</div>}

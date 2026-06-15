@@ -6,6 +6,15 @@ export type StockStatus    = 'on-target' | 'low-stock' | 'overstocked'
 export type ApprovalStatus = 'Draft' | 'Pending Approval' | 'Approved' | 'Rejected' | 'Sent'
 export type StockoutRisk   = 'Low' | 'Medium' | 'High'
 
+// A reorder line advances on TWO independent tracks that run in parallel,
+// not in sequence:
+//   • buyStatus      — internal management gate (canonically stored as
+//                      `approvalStatus`; BuyStatus is its machine vocabulary)
+//   • supplierStatus — external negotiation track with the supplier
+// A line can be e.g. buy=approved AND supplier=awaiting_reply at the same time.
+export type BuyStatus      = 'draft' | 'pending_approval' | 'approved' | 'rejected' | 'sent'
+export type SupplierStatus = 'not_contacted' | 'awaiting_reply' | 'replied' | 'agreed' | 'declined'
+
 export interface SizeBand {
   label: string
   pct:   number
@@ -86,7 +95,8 @@ export interface ReorderRecommendation {
   forwardWeeksCover:     number
   recommendedReorderQty: number
   avgReorderCoverWeeks:  number
-  approvalStatus:        ApprovalStatus
+  approvalStatus:        ApprovalStatus   // buy gate (management) — see BuyStatus
+  supplierStatus:        SupplierStatus   // external negotiation track (parallel)
   recommendedFreight:    'Sea' | 'Air'
   freightChoice?:        'Sea' | 'Air'
   freightOverrideReason?: string
@@ -1165,6 +1175,7 @@ export const INVENTORY_PRODUCTS: InventoryProduct[] = [
 export const REORDER_RECOMMENDATIONS: ReorderRecommendation[] = [
   {
     "id": "REC-001",
+    "supplierStatus": "awaiting_reply",
     "name": "Retinol Night Cream",
     "sku": "SKU-REC001",
     "category": "Beauty",
@@ -1211,6 +1222,7 @@ export const REORDER_RECOMMENDATIONS: ReorderRecommendation[] = [
   },
   {
     "id": "REC-002",
+    "supplierStatus": "agreed",
     "name": "Hyaluronic Acid Toner",
     "sku": "SKU-REC002",
     "category": "Beauty",
@@ -1254,6 +1266,7 @@ export const REORDER_RECOMMENDATIONS: ReorderRecommendation[] = [
   },
   {
     "id": "REC-003",
+    "supplierStatus": "awaiting_reply",
     "name": "Brightening Eye Cream",
     "sku": "SKU-REC003",
     "category": "Beauty",
@@ -1296,6 +1309,7 @@ export const REORDER_RECOMMENDATIONS: ReorderRecommendation[] = [
   },
   {
     "id": "REC-004",
+    "supplierStatus": "agreed",
     "name": "Wrap Midi Dress",
     "sku": "SKU-REC004",
     "category": "Clothing",
@@ -1423,6 +1437,7 @@ export const REORDER_RECOMMENDATIONS: ReorderRecommendation[] = [
   },
   {
     "id": "REC-005",
+    "supplierStatus": "agreed",
     "name": "Tailored Suit Jacket",
     "sku": "SKU-REC005",
     "category": "Clothing",
@@ -1545,6 +1560,7 @@ export const REORDER_RECOMMENDATIONS: ReorderRecommendation[] = [
   },
   {
     "id": "REC-006",
+    "supplierStatus": "replied",
     "name": "Striped Cotton Tee",
     "sku": "SKU-REC006",
     "category": "Clothing",
@@ -1669,6 +1685,7 @@ export const REORDER_RECOMMENDATIONS: ReorderRecommendation[] = [
   },
   {
     "id": "REC-007",
+    "supplierStatus": "agreed",
     "name": "Bamboo Lounge Set",
     "sku": "SKU-REC007",
     "category": "Clothing",
@@ -1791,6 +1808,7 @@ export const REORDER_RECOMMENDATIONS: ReorderRecommendation[] = [
   },
   {
     "id": "REC-008",
+    "supplierStatus": "replied",
     "name": "Ruched Bodycon Dress",
     "sku": "SKU-REC008",
     "category": "Clothing",
@@ -1914,6 +1932,7 @@ export const REORDER_RECOMMENDATIONS: ReorderRecommendation[] = [
   },
   {
     "id": "REC-009",
+    "supplierStatus": "awaiting_reply",
     "name": "Oversized Linen Shirt",
     "sku": "SKU-REC009",
     "category": "Clothing",
@@ -2036,6 +2055,7 @@ export const REORDER_RECOMMENDATIONS: ReorderRecommendation[] = [
   },
   {
     "id": "REC-010",
+    "supplierStatus": "not_contacted",
     "name": "Platform Derby Shoes",
     "sku": "SKU-REC010",
     "category": "Footwear",
@@ -2172,6 +2192,7 @@ export const REORDER_RECOMMENDATIONS: ReorderRecommendation[] = [
   },
   {
     "id": "REC-011",
+    "supplierStatus": "not_contacted",
     "name": "Kitten Heel Mules",
     "sku": "SKU-REC011",
     "category": "Footwear",
@@ -2308,6 +2329,7 @@ export const REORDER_RECOMMENDATIONS: ReorderRecommendation[] = [
   },
   {
     "id": "REC-012",
+    "supplierStatus": "not_contacted",
     "name": "Wedge Espadrilles",
     "sku": "SKU-REC012",
     "category": "Footwear",
@@ -2444,6 +2466,7 @@ export const REORDER_RECOMMENDATIONS: ReorderRecommendation[] = [
   },
   {
     "id": "REC-013",
+    "supplierStatus": "not_contacted",
     "name": "T-Bar Heeled Sandals",
     "sku": "SKU-REC013",
     "category": "Footwear",
@@ -2580,6 +2603,7 @@ export const REORDER_RECOMMENDATIONS: ReorderRecommendation[] = [
   },
   {
     "id": "REC-014",
+    "supplierStatus": "not_contacted",
     "name": "Woven Raffia Clutch",
     "sku": "SKU-REC014",
     "category": "Accessories",
@@ -2621,6 +2645,7 @@ export const REORDER_RECOMMENDATIONS: ReorderRecommendation[] = [
   },
   {
     "id": "REC-015",
+    "supplierStatus": "not_contacted",
     "name": "Pearl Drop Earrings",
     "sku": "SKU-REC015",
     "category": "Accessories",
