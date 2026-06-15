@@ -6934,12 +6934,22 @@ function DetailWorkspaceLayout({
   )
 }
 
+// Map a negotiation thread's status → the line-level Supplier status chip, so a
+// per-line resolution (agree / escalate / etc.) updates the chip live.
+function threadToSupplierStatus(t?: InquiryThread): SupplierStatus | null {
+  if (!t || t.status === 'idle' || t.status === 'draft') return null
+  if (t.status === 'sent' || t.status === 'awaiting_reply' || t.status === 'sending') return 'awaiting_reply'
+  if (t.status === 'replied' || t.status === 'follow_up') return 'replied'
+  if (t.status === 'agreed') return 'agreed'
+  if (t.status === 'escalated' || t.status === 'closed_no_deal') return 'declined'
+  return null
+}
+
 // ── Reorder line workspace — full-page negotiation + management approval ──────
-// Reorganisation of existing features (no new logic): the InquiryDrawer body
-// (deal facts / rules / draft email / rounds / Apply·Counter·Escalate·Propose
-// alternative·Walk away / Log activity) is reused verbatim as the supplier
-// conversation, with management approval split into its own bounded section so
-// the two parallel tracks are independently usable.
+// ONE screen, two modes: single-line (N=1, one InquiryDrawer) and multi-line
+// (one supplier, N lines) — the multi-line mode renders the SAME InquiryDrawer
+// per line for the inbound flow (reply → Next step → alternatives → Why), under
+// one combined outbound email. No forked reply/recommendation rendering.
 function ReorderLineWorkspace({
   rec, thread, buyStatus, rejectionReason, onBack, onUpdateThread, onNavigateToPO,
   globalCpRules, onUpdateGlobalCpRules, onViewDetails,
@@ -6967,20 +6977,57 @@ function ReorderLineWorkspace({
   onUpdateGlobalCpRules?: (r: CpRulesState) => void
   onViewDetails?:         (recId: string) => void
 }) {
-  // Per-line drill (multi mode): open one SKU's full negotiation for resolution.
-  const [drillThreadId, setDrillThreadId] = useState<string | null>(null)
+  // Editable combined outbound draft (multi mode).
+  const [combinedDraft, setCombinedDraft] = useState<string | null>(null)
 
   // ── MULTI-LINE MODE: one supplier, N lines, one combined email ──────────────
   if (session && sessionLines) {
     const supObj   = SUPPLIERS.find(s => s.name === session.supplierId)
     const combined = sessionLines.reduce((s, l) => s + l.totalCost, 0)
-    const drillRec = drillThreadId ? (sessionLines.find(l => l.id === drillThreadId) ?? null) : null
+    const supStatusOf = (l: ReorderRecommendation) => threadToSupplierStatus(inquiries?.[l.id]) ?? l.supplierStatus
+    // A line is "in flight" once its thread has been sent (sent/awaiting/replied/…).
+    const isLineSent = (l: ReorderRecommendation) => {
+      const t = inquiries?.[l.id]
+      return !!t && t.status !== 'idle' && t.status !== 'draft'
+    }
+    const anySent = sessionLines.some(isLineSent)
+
+    const buildCombinedBody = () =>
+      `Dear ${session.supplierId} Team,\n\nWe'd like to propose the following rebuys across ${sessionLines.length} line${sessionLines.length === 1 ? '' : 's'}:\n\n` +
+      sessionLines.map(l => `• ${l.id}  ${l.name} — ${l.recommendedReorderQty.toLocaleString()} units · £${l.costPrice.toFixed(2)} CP`).join('\n') +
+      `\n\nPlease confirm acceptance or respond per line with revised terms.\n\nBest regards,\nDebenhams Buying`
+    const draftValue = combinedDraft ?? buildCombinedBody()
+
+    // ONE combined email out → seed + send every line's thread. The existing
+    // InquiryDrawer effects then auto-generate a PER-LINE reply for each.
+    const sendCombined = () => {
+      const ts = new Date().toISOString()
+      sessionLines.forEach(l => {
+        const existing = inquiries?.[l.id]
+        const requestedCP = calcRequestedCP(l.costPrice, 1)
+        if (existing && existing.rounds.length) {
+          const last = existing.rounds[existing.rounds.length - 1]
+          onUpdateThread({ ...existing, status: 'sent', rounds: [...existing.rounds.slice(0, -1), { ...last, sentAt: ts.slice(0, 10), emailBody: draftValue }] })
+        } else {
+          onUpdateThread({
+            recId: l.id, supplierId: l.supplier, status: 'sent', scenario: getProductScenario(l),
+            rounds: [{ roundNumber: 1, sentAt: ts.slice(0, 10), emailBody: draftValue, requestedCP, supplierReply: null }],
+            agreedCP: null, agreedMOQ: null, flaggedReason: null, internalNotes: '',
+          })
+        }
+      })
+    }
+
     const multiHeader = (
       <div className="bg-white border border-gray-200 rounded-2xl px-5 py-4">
         <div className="flex items-center gap-2 flex-wrap mb-3">
           <span className="text-base font-bold text-gray-900">{session.supplierId}</span>
           <span className="text-xs text-gray-400">{sessionLines.length} line{sessionLines.length === 1 ? '' : 's'} · £{Math.round(combined).toLocaleString('en-GB')} combined</span>
           {supObj && <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${supObj.onTimeRate >= 80 ? 'bg-green-50 text-green-700 border-green-100' : supObj.onTimeRate >= 70 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'}`}>OTR {supObj.onTimeRate}%</span>}
+          <span className="ml-auto"><LogActivityButton onSave={(kind, text) => {
+            const prefix = kind === 'call' ? '[Call] ' : kind === 'action' ? '[Action] ' : ''
+            sessionLines.forEach(l => { const t = inquiries?.[l.id]; if (t) onUpdateThread({ ...t, internalNotes: `${t.internalNotes ? t.internalNotes + '\n' : ''}${prefix}${text}` }) })
+          }} /></span>
         </div>
         <div className="flex flex-col gap-1.5">
           {sessionLines.map(l => (
@@ -6990,13 +7037,14 @@ function ReorderLineWorkspace({
               <span className="text-gray-400 shrink-0">· {l.recommendedReorderQty.toLocaleString()} units</span>
               <span className="ml-auto flex items-center gap-1.5 shrink-0">
                 {getBuyStatus && <BuyStatusChip status={getBuyStatus(l)} />}
-                <SupplierStatusChip status={l.supplierStatus} />
+                <SupplierStatusChip status={supStatusOf(l)} />
               </span>
             </div>
           ))}
         </div>
       </div>
     )
+
     return (
       <DetailWorkspaceLayout
         onBack={onBack}
@@ -7004,39 +7052,63 @@ function ReorderLineWorkspace({
         breadcrumb={<>Reorder · By supplier · {session.supplierId}</>}
         header={multiHeader}
       >
-        {/* Supplier conversation — combined email + per-line responses + rounds
-            + Log activity, all reusing the existing SupplierSessionWorkspace */}
+        {/* OUTBOUND — one combined email, one table of SKUs */}
         <section>
-          <div className="text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-2">Supplier conversation — {sessionLines.length} line{sessionLines.length === 1 ? '' : 's'}, one combined email</div>
-          <div className="border border-gray-200 rounded-2xl bg-white overflow-hidden h-[calc(100vh-420px)] min-h-[520px] flex flex-col">
-            <SupplierSessionWorkspace
-              session={session}
-              onClose={onBack}
-              onOpenThread={setDrillThreadId}
-              onLogActivity={() => { /* session-scoped activity — prototype stub */ }}
+          <div className="text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-2">Combined email to {session.supplierId} · {sessionLines.length} SKU{sessionLines.length === 1 ? '' : 's'}</div>
+          <div className="border border-violet-200 rounded-2xl overflow-hidden bg-white">
+            <div className="flex items-center justify-between px-3.5 py-2 bg-violet-50 border-b border-violet-100">
+              <div className="flex items-center gap-2"><Mail className="w-3.5 h-3.5 text-violet-500" /><span className="text-[11px] font-semibold text-violet-700">Round 1 draft</span></div>
+              {anySent && <span className="text-[10px] font-semibold text-green-600">✓ Sent — replies resolve per line below</span>}
+            </div>
+            <textarea
+              className="w-full text-[11px] text-gray-700 font-mono leading-relaxed p-3.5 resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-violet-200 disabled:bg-gray-50 disabled:text-gray-400"
+              rows={8}
+              value={draftValue}
+              disabled={anySent}
+              onChange={e => setCombinedDraft(e.target.value)}
             />
+            {!anySent && (
+              <div className="px-3.5 py-2.5 bg-violet-50 border-t border-violet-100">
+                <button onClick={sendCombined} className="w-full h-9 rounded-lg bg-violet-600 text-white text-xs font-semibold hover:bg-violet-700 transition-colors flex items-center justify-center gap-1.5">
+                  <Send className="w-3.5 h-3.5" /> Send combined email ({sessionLines.length})
+                </button>
+              </div>
+            )}
           </div>
         </section>
 
-        {/* Per-line resolution drill — full single-SKU negotiation (Apply / Counter /
-            Escalate) for one line, because suppliers reply per-line */}
-        {drillRec && (
-          <div className="fixed inset-0 z-[55] flex">
-            <div className="flex-1 bg-black/30" onClick={() => setDrillThreadId(null)} />
-            <div className="w-[720px] max-w-[95vw] bg-white h-full flex flex-col shadow-2xl overflow-hidden">
-              <InquiryDrawer
-                embed
-                rec={drillRec}
-                thread={inquiries?.[drillRec.id]}
-                onClose={() => setDrillThreadId(null)}
-                onUpdate={onUpdateThread}
-                globalCpRules={globalCpRules}
-                onUpdateGlobalCpRules={onUpdateGlobalCpRules}
-                onNavigateToPO={onNavigateToPO}
-                onViewDetails={onViewDetails}
-              />
+        {/* INBOUND — per-line reply + Next step + alternatives + Why, each the
+            EXACT single-line InquiryDrawer (N=1). Suppliers reply per SKU, so
+            each line is resolved independently. */}
+        {anySent && (
+          <section>
+            <div className="text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-2">Per-line replies &amp; resolution</div>
+            <div className="space-y-4">
+              {sessionLines.map(l => (
+                <div key={l.id} className="border border-gray-200 rounded-2xl bg-white overflow-hidden">
+                  <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 bg-gray-50/50 flex-wrap">
+                    <span className="font-mono text-[10px] text-gray-400">{l.id}</span>
+                    <span className="text-[12px] font-semibold text-gray-800 truncate max-w-[260px]">{l.name}</span>
+                    <span className="text-[10px] text-gray-400">· {l.recommendedReorderQty.toLocaleString()} units</span>
+                    <span className="ml-auto"><SupplierStatusChip status={supStatusOf(l)} /></span>
+                  </div>
+                  <div className="h-[560px] flex flex-col">
+                    <InquiryDrawer
+                      embed
+                      rec={l}
+                      thread={inquiries?.[l.id]}
+                      onClose={onBack}
+                      onUpdate={onUpdateThread}
+                      globalCpRules={globalCpRules}
+                      onUpdateGlobalCpRules={onUpdateGlobalCpRules}
+                      onNavigateToPO={onNavigateToPO}
+                      onViewDetails={onViewDetails}
+                    />
+                  </div>
+                </div>
+              ))}
             </div>
-          </div>
+          </section>
         )}
       </DetailWorkspaceLayout>
     )
