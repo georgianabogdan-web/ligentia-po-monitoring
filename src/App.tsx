@@ -6019,7 +6019,12 @@ function ReorderBySupplier({
   const supplierNames = [...groups.keys()].sort((a, b) => a.localeCompare(b))
 
   if (rows.length === 0) {
-    return <div className="bg-white border border-gray-100 rounded-xl shadow-sm py-16 text-center text-sm text-gray-400">No reorder lines match the current filters.</div>
+    return (
+      <div className="bg-white border border-gray-100 rounded-xl shadow-sm py-16 text-center">
+        <div className="text-sm text-gray-500">No reorder lines match the current filters.</div>
+        <div className="text-[11px] text-gray-400 mt-1.5">Each line tracks two things in parallel: Buy status (internal approval) and Supplier status (negotiation).</div>
+      </div>
+    )
   }
 
   return (
@@ -6398,8 +6403,8 @@ function ActiveNegotiationsView({
     <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
       <div className="inline-flex items-center rounded-lg border border-gray-200 bg-gray-50 p-0.5">
         {([
-          { k: 'detailed', lbl: 'Detailed', hint: 'One supplier at a time' },
-          { k: 'bulk',     lbl: 'Bulk',     hint: 'All suppliers · dense table' },
+          { k: 'detailed', lbl: 'Individual',  hint: 'One supplier at a time' },
+          { k: 'bulk',     lbl: 'By supplier', hint: 'All suppliers · dense table' },
         ] as const).map(opt => (
           <button
             key={opt.k}
@@ -6901,7 +6906,7 @@ function DetailWorkspaceLayout({
   onBack:      () => void
   backLabel:   string
   breadcrumb?: React.ReactNode
-  header:      React.ReactNode
+  header?:     React.ReactNode
   children:    React.ReactNode
 }) {
   return (
@@ -7932,6 +7937,12 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
           ))}
         </div>
 
+        {/* One-line onboarding: the two parallel tracks every line carries */}
+        <div className="flex items-center gap-1.5 text-[11px] text-gray-400 mb-3">
+          <Info className="w-3 h-3 shrink-0" />
+          Every line runs two independent tracks — <span className="font-semibold text-gray-500">Buy</span> (internal management approval) and <span className="font-semibold text-gray-500">Supplier</span> (negotiation) — shown as two chips per line.
+        </div>
+
         {/* Single working list — filters apply to both views */}
         {(
           <>
@@ -8222,6 +8233,14 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                       </tr>
                     )
                   })}
+                  {filteredRows.length === 0 && (
+                    <tr>
+                      <td colSpan={20} className="px-3 py-12 text-center">
+                        <div className="text-sm text-gray-500">No reorder lines match the current filters.</div>
+                        <div className="text-[11px] text-gray-400 mt-1.5">Each line tracks two things in parallel: Buy status (internal approval) and Supplier status (negotiation).</div>
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
@@ -9422,6 +9441,7 @@ function PODetailPane({
 }
 
 // ── PO Line Drawer ────────────────────────────────────────────────────────────
+// Full-page PO line detail (was a slide-over) — reuses the shared workspace shell.
 function POLineDrawer({
   po, onClose, onAddEvent,
 }: {
@@ -9430,12 +9450,15 @@ function POLineDrawer({
   onAddEvent?: (poId: string, event: POEvent) => void
 }) {
   return (
-    <div className="fixed inset-0 z-50 flex">
-      <div className="flex-1 bg-black/30" onClick={onClose} />
-      <div className="w-[540px] bg-white h-full flex flex-col shadow-2xl overflow-hidden">
+    <DetailWorkspaceLayout
+      onBack={onClose}
+      backLabel="Back to PO Monitoring"
+      breadcrumb={<span className="font-mono">{po.id}</span>}
+    >
+      <div className="border border-gray-200 rounded-2xl bg-white overflow-hidden h-[calc(100vh-160px)] min-h-[600px] flex flex-col">
         <PODetailPane po={po} onAddEvent={onAddEvent} showHeader fromActionDrawer={false} onClose={onClose} />
       </div>
-    </div>
+    </DetailWorkspaceLayout>
   )
 }
 
@@ -10172,6 +10195,14 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
   const [settingsAccordion, setSettingsAccordion] = useState<string | null>(null)
   // Actions queue state
   const [drawerCardKey,    setDrawerCardKey]    = useState<string | null>(initialOpenAction ?? null)
+  // Full-page action workspace: save the Actions-list scroll on open, restore on
+  // back so the merchandiser returns to the same sub-tab/filters/scroll.
+  const poScrollRef     = useRef<HTMLDivElement>(null)
+  const savedPoScroll   = useRef(0)
+  const openActionCard  = (ck: string) => { savedPoScroll.current = poScrollRef.current?.scrollTop ?? 0; setDrawerCardKey(ck) }
+  useLayoutEffect(() => {
+    if (!drawerCardKey && !selectedPOId && poScrollRef.current) poScrollRef.current.scrollTop = savedPoScroll.current
+  }, [drawerCardKey, selectedPOId])
   useEffect(() => {
     if (initialOpenAction) {
       setSubTab('actions')
@@ -10620,12 +10651,15 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
     { label: 'Weekly Supplier Summary',         trigger: 'Every Monday 08:00',                autoSend: true  },
   ]
 
-  return (
-    <div className="flex-1 overflow-y-auto relative">
+  // Full-page PO line detail (no slide-over). Returning restores the prior
+  // sub-tab/filters/scroll — POMonitoringView stays mounted, scroll is restored
+  // by the layout effect above.
+  if (selectedPO) {
+    return <POLineDrawer po={selectedPO} onClose={() => setSelectedPOId(null)} onAddEvent={addPOEvent} />
+  }
 
-      {selectedPO && (
-        <POLineDrawer po={selectedPO} onClose={() => setSelectedPOId(null)} onAddEvent={addPOEvent} />
-      )}
+  return (
+    <div ref={poScrollRef} onScroll={e => { savedPoScroll.current = e.currentTarget.scrollTop }} className="flex-1 overflow-y-auto relative">
 
       {/* Send confirm modal */}
       {sendModal && (
@@ -10772,6 +10806,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           const cprPct = 10
           const cprSaving = Math.round(drawerOrderVal * cprPct / 100); void cprSaving
           const drawerViewPO = drawerViewPOId ? (ALL_POS.find(p => p.id === drawerViewPOId) ?? null) : null
+          const drawerOpen = !!(drawerCardKey && drawerGroup && drawerSup)
           const drawerCurrentPill = drawerCardKey
             ? (selectedActionPill[drawerCardKey] ?? (
                 drawerGroup?.type === 'at_risk' ? 'approve_date' :
@@ -10896,6 +10931,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
 
           return (
           <>
+            {!drawerOpen && (<>
             {/* ── Stats strip ───────────────────────────────────────────── */}
             <div className="grid grid-cols-4 gap-3 mb-1">
               {[
@@ -11040,7 +11076,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                   return (
                     <div
                       key={ck}
-                      onClick={() => setDrawerCardKey(ck)}
+                      onClick={() => openActionCard(ck)}
                       className={`flex items-center gap-4 px-5 py-3 cursor-pointer transition-colors hover:bg-gray-50 ${snoozedCards.has(ck) ? 'opacity-50' : ''}`}
                     >
                       {/* Left: pills + identity + issue + POs */}
@@ -11093,12 +11129,12 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                         <div className="flex items-center gap-2 mt-0.5">
                           {/* Inline quick actions for low-stakes tiers */}
                           {!tier1 && g.type === 'overdue' && (
-                            <button onClick={e => { e.stopPropagation(); setDrawerCardKey(ck); /* handled in workspace */ }} className="h-7 px-2.5 text-[10px] font-semibold rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200">Send chase</button>
+                            <button onClick={e => { e.stopPropagation(); openActionCard(ck); /* handled in workspace */ }} className="h-7 px-2.5 text-[10px] font-semibold rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200">Send chase</button>
                           )}
                           {!tier1 && g.type === 'late_dc' && (sup?.onTimeRate ?? 100) > 85 && (
-                            <button onClick={e => { e.stopPropagation(); setDrawerCardKey(ck); }} className="h-7 px-2.5 text-[10px] font-semibold rounded-lg bg-green-600 text-white hover:bg-green-700">Approve &amp; send</button>
+                            <button onClick={e => { e.stopPropagation(); openActionCard(ck); }} className="h-7 px-2.5 text-[10px] font-semibold rounded-lg bg-green-600 text-white hover:bg-green-700">Approve &amp; send</button>
                           )}
-                          <button onClick={() => setDrawerCardKey(ck)} className="h-7 px-3 text-[10px] font-semibold rounded-lg border border-indigo-200 text-indigo-700 hover:bg-indigo-50 inline-flex items-center gap-1">
+                          <button onClick={() => openActionCard(ck)} className="h-7 px-3 text-[10px] font-semibold rounded-lg border border-indigo-200 text-indigo-700 hover:bg-indigo-50 inline-flex items-center gap-1">
                             Open <ArrowRight className="w-3 h-3" />
                           </button>
                           <span
@@ -11114,79 +11150,60 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
             </div>
 
             {/* ── Sheet overlay: action workspace (existing drawer body, right-anchored 780px) ── */}
-            {drawerCardKey && drawerGroup && drawerSup && (
-              <div className="fixed inset-0 z-50 flex">
-                <div className="flex-1 bg-black/30" onClick={() => setDrawerCardKey(null)} />
-                <div
-                  className="w-[780px] max-w-[95vw] bg-white h-full flex flex-col shadow-2xl overflow-hidden"
-                  onKeyDown={e => { if (e.key === 'Escape') { if (drawerView === 'po-detail') { setDrawerView('action'); setDrawerViewPOId(null) } else setDrawerCardKey(null) } }}
-                >
-                  {/* Drawer header */}
-                  <div className="px-6 pt-5 pb-4 border-b border-gray-100 shrink-0">
-                    {drawerView === 'action' ? (
-                      <>
-                        <div className="flex items-start justify-between gap-3 mb-3">
-                          <div className="min-w-0 flex-1">
-                            <div className="mb-0.5">
-                              <ActionCardPills group={drawerGroup} supplier={drawerSup} size="md" />
-                            </div>
-                            <div className="text-base font-bold text-gray-900">{drawerSup.name}</div>
-                            <div className="text-xs text-gray-400 mt-0.5">{SUPPLIER_EMAILS[drawerGroup.supplierId]} · {drawerGroup.pos.length} PO{drawerGroup.pos.length > 1 ? 's' : ''}</div>
-                          </div>
-                          <div className="flex items-center gap-1 shrink-0">
-                            <LogActivityButton
-                              onSave={(kind, text) => {
-                                if (!drawerGroup) return
-                                const prefix = kind === 'call' ? '[Call] ' : kind === 'action' ? '[Action] ' : ''
-                                drawerGroup.pos.forEach(p => addPOEvent(p.id, {
-                                  id:        `act-${Date.now()}-${p.id}`,
-                                  type:      'manual_note',
-                                  timestamp: new Date().toISOString(),
-                                  author:    'buyer',
-                                  body:      prefix + text,
-                                }))
-                              }}
-                            />
-                            <button onClick={() => setDrawerCardKey(null)} className="p-1 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${drawerSup.onTimeRate >= 80 ? 'bg-green-50 text-green-700 border-green-100' : drawerSup.onTimeRate >= 70 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'}`}>OTR {drawerSup.onTimeRate}%</span>
-                          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${drawerSup.avgDelayDays > 7 ? 'bg-red-50 text-red-700 border-red-100' : drawerSup.avgDelayDays > 3 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-gray-100 text-gray-600 border-gray-200'}`}>Avg delay {drawerSup.avgDelayDays}d</span>
-                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full border bg-gray-100 text-gray-600 border-gray-200">{drawerSup.openPOs} open POs</span>
-                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full border bg-indigo-50 text-indigo-700 border-indigo-100">Lead {drawerSup.contractualLeadTimeDays}d</span>
-                        </div>
-                        {/* Worst-case estimated delivery across action POs */}
-                        {(() => {
-                          const ranked = [...drawerGroup.pos].map(p => ({ p, est: getEstimatedDelivery(p) })).sort((a, b) => b.est.delayDays - a.est.delayDays)
-                          const worst = ranked[0]
-                          if (!worst) return null
-                          return (
-                            <div className="mt-2.5 flex items-center gap-2">
-                              <EstDeliveryPill po={worst.p} size="md" />
-                              {worst.est.gatingFactor && (
-                                <span className="text-[11px] text-gray-500 italic">{worst.est.gatingFactor}</span>
-                              )}
-                            </div>
-                          )
-                        })()}
-                      </>
-                    ) : (
-                      /* View 2 breadcrumb */
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => { setDrawerView('action'); setDrawerViewPOId(null) }}
-                          className="flex items-center gap-1 text-xs text-indigo-600 hover:text-indigo-800 font-semibold transition-colors"
-                        >
-                          <ChevronLeft className="w-3.5 h-3.5" />{drawerSup.name}
-                        </button>
-                        <span className="text-gray-300">/</span>
-                        <span className="text-xs text-gray-700 font-semibold">{drawerViewPOId}</span>
-                        <button onClick={() => setDrawerCardKey(null)} className="ml-auto p-1 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 shrink-0"><X className="w-4 h-4" /></button>
-                      </div>
-                    )}
-                  </div>
+            </>)}
 
+            {drawerOpen && drawerGroup && drawerSup && (
+              <DetailWorkspaceLayout
+                onBack={() => { if (drawerView === 'po-detail') { setDrawerView('action'); setDrawerViewPOId(null) } else setDrawerCardKey(null) }}
+                backLabel={drawerView === 'po-detail' ? drawerSup.name : 'Back to actions'}
+                breadcrumb={drawerView === 'po-detail' ? <span className="font-mono">{drawerViewPOId}</span> : <>PO Monitoring · Actions · {drawerSup.name}</>}
+                header={drawerView === 'action' ? (
+                  <div className="bg-white border border-gray-200 rounded-2xl px-5 py-4">
+                    <div className="flex items-start justify-between gap-3 mb-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="mb-0.5">
+                          <ActionCardPills group={drawerGroup} supplier={drawerSup} size="md" />
+                        </div>
+                        <div className="text-base font-bold text-gray-900">{drawerSup.name}</div>
+                        <div className="text-xs text-gray-400 mt-0.5">{SUPPLIER_EMAILS[drawerGroup.supplierId]} · {drawerGroup.pos.length} PO{drawerGroup.pos.length > 1 ? 's' : ''}</div>
+                      </div>
+                      <LogActivityButton
+                        onSave={(kind, text) => {
+                          if (!drawerGroup) return
+                          const prefix = kind === 'call' ? '[Call] ' : kind === 'action' ? '[Action] ' : ''
+                          drawerGroup.pos.forEach(p => addPOEvent(p.id, {
+                            id:        `act-${Date.now()}-${p.id}`,
+                            type:      'manual_note',
+                            timestamp: new Date().toISOString(),
+                            author:    'buyer',
+                            body:      prefix + text,
+                          }))
+                        }}
+                      />
+                    </div>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${drawerSup.onTimeRate >= 80 ? 'bg-green-50 text-green-700 border-green-100' : drawerSup.onTimeRate >= 70 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'}`}>OTR {drawerSup.onTimeRate}%</span>
+                      <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${drawerSup.avgDelayDays > 7 ? 'bg-red-50 text-red-700 border-red-100' : drawerSup.avgDelayDays > 3 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-gray-100 text-gray-600 border-gray-200'}`}>Avg delay {drawerSup.avgDelayDays}d</span>
+                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full border bg-gray-100 text-gray-600 border-gray-200">{drawerSup.openPOs} open POs</span>
+                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full border bg-indigo-50 text-indigo-700 border-indigo-100">Lead {drawerSup.contractualLeadTimeDays}d</span>
+                    </div>
+                    {(() => {
+                      const ranked = [...drawerGroup.pos].map(p => ({ p, est: getEstimatedDelivery(p) })).sort((a, b) => b.est.delayDays - a.est.delayDays)
+                      const worst = ranked[0]
+                      if (!worst) return null
+                      return (
+                        <div className="mt-2.5 flex items-center gap-2">
+                          <EstDeliveryPill po={worst.p} size="md" />
+                          {worst.est.gatingFactor && (
+                            <span className="text-[11px] text-gray-500 italic">{worst.est.gatingFactor}</span>
+                          )}
+                        </div>
+                      )
+                    })()}
+                  </div>
+                ) : null}
+              >
+                <div className="border border-gray-200 rounded-2xl bg-white overflow-hidden h-[calc(100vh-280px)] min-h-[560px] flex flex-col">
                   {/* Drawer body */}
                   <div className="flex-1 overflow-y-auto flex flex-col">
 
@@ -12277,8 +12294,8 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                       </div>
                     </div>
                   )}
-                </div>
-              </div>
+                </div>{/* end bounded card */}
+              </DetailWorkspaceLayout>
             )}
           </>
           )
