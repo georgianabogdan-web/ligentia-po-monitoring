@@ -5987,6 +5987,130 @@ function BulkNegotiationsView({
   )
 }
 
+// ── Reorder · By-supplier grouped view ───────────────────────────────────────
+// Same reorder lines as the Individual table, grouped under a supplier header
+// with the dense bulk tick-through pattern (the BulkNegotiationsView is the
+// basis): per-supplier select-all + "Apply recommended steps", per-row buy/
+// supplier chips, click a row to open its detail/conversation panel. Operates
+// on the already-filtered rows, so it honours the same status/category/search.
+const REORDER_REC_STEP: Record<PipelineStage, { label: string; actionable: boolean }> = {
+  draft:            { label: 'Send to manager',  actionable: true  },
+  pending_approval: { label: 'Awaiting approval', actionable: false },
+  approved:         { label: 'Push to Order App', actionable: true  },
+  pushed:           { label: 'Sent to Order App', actionable: false },
+  rejected:         { label: 'Review & resubmit', actionable: true  },
+}
+function ReorderBySupplier({
+  rows, selectedIds, onToggleRow, onToggleMany, effStatus, onOpenLine,
+}: {
+  rows:         ReorderRecommendation[]
+  selectedIds:  Set<string>
+  onToggleRow:  (id: string) => void
+  onToggleMany: (ids: string[], on: boolean) => void
+  effStatus:    (p: ReorderRecommendation) => ApprovalStatus
+  onOpenLine:   (p: ReorderRecommendation) => void
+}) {
+  const [applied, setApplied] = useState<Set<string>>(new Set())
+  const applyMany = (ids: string[]) => setApplied(prev => new Set([...prev, ...ids]))
+
+  // Group filtered rows by supplier name, suppliers sorted alphabetically.
+  const groups = new Map<string, ReorderRecommendation[]>()
+  rows.forEach(p => { const g = groups.get(p.supplier) ?? []; g.push(p); groups.set(p.supplier, g) })
+  const supplierNames = [...groups.keys()].sort((a, b) => a.localeCompare(b))
+
+  if (rows.length === 0) {
+    return <div className="bg-white border border-gray-100 rounded-xl shadow-sm py-16 text-center text-sm text-gray-400">No reorder lines match the current filters.</div>
+  }
+
+  return (
+    <div className="space-y-4">
+      {supplierNames.map(name => {
+        const lines       = groups.get(name)!
+        const supObj      = SUPPLIERS.find(s => s.name === name)
+        const pat         = supObj ? getRelationshipPattern(supObj) : null
+        const ids         = lines.map(l => l.id)
+        const allSel      = ids.every(id => selectedIds.has(id))
+        const totalValue  = lines.reduce((s, l) => s + l.totalCost, 0)
+        const actionable  = lines.filter(l => REORDER_REC_STEP[getPipelineStage(effStatus(l))].actionable && !applied.has(l.id)).map(l => l.id)
+
+        return (
+          <div key={name} className="bg-white border border-gray-200 rounded-2xl overflow-hidden">
+            {/* Supplier header */}
+            <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/50 flex items-center gap-3 flex-wrap">
+              <input type="checkbox" checked={allSel} onChange={() => onToggleMany(ids, !allSel)} className="w-3.5 h-3.5" title="Select all lines for this supplier" />
+              <span className="text-[13px] font-bold text-gray-900">{name}</span>
+              {pat === 'structural'    && <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-700 uppercase tracking-wide">Structural underperformer</span>}
+              {pat === 'concentration' && <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 uppercase tracking-wide">High concentration</span>}
+              {supObj && <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${supObj.onTimeRate >= 80 ? 'bg-green-50 text-green-700 border-green-100' : supObj.onTimeRate >= 70 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'}`}>OTR {supObj.onTimeRate}%</span>}
+              <span className="text-[10px] text-gray-400">{lines.length} line{lines.length === 1 ? '' : 's'} · £{Math.round(totalValue).toLocaleString('en-GB')}</span>
+              <button
+                disabled={actionable.length === 0}
+                onClick={() => applyMany(actionable)}
+                className="ml-auto text-[11px] font-semibold text-indigo-700 bg-white border border-indigo-200 hover:bg-indigo-50 disabled:text-gray-300 disabled:border-gray-200 px-3 py-1.5 rounded-lg transition-colors"
+              >
+                Apply recommended steps ({actionable.length})
+              </button>
+            </div>
+
+            {/* Dense lines table */}
+            <table className="w-full text-[11px]">
+              <thead className="bg-white border-b border-gray-100">
+                <tr>
+                  <th className="px-2 py-2 w-7"></th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Product</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Status</th>
+                  <th className="px-2 py-2 text-right text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Reorder qty</th>
+                  <th className="px-2 py-2 text-right text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Total cost</th>
+                  <th className="px-2 py-2 text-right text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Margin</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide w-[150px]">Recommended step</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lines.map(p => {
+                  const st          = effStatus(p)
+                  const rec         = REORDER_REC_STEP[getPipelineStage(st)]
+                  const isApplied   = applied.has(p.id)
+                  const grossMargin = Math.round((p.sellingPrice - p.costPrice) / p.sellingPrice * 100)
+                  return (
+                    <tr key={p.id} onClick={() => onOpenLine(p)} className="border-b border-gray-50 last:border-0 hover:bg-indigo-50/40 cursor-pointer transition-colors">
+                      <td className="px-2 py-2" onClick={e => e.stopPropagation()}>
+                        <input type="checkbox" checked={selectedIds.has(p.id)} onChange={() => onToggleRow(p.id)} className="w-3 h-3" />
+                      </td>
+                      <td className="px-2 py-2">
+                        <div className="flex items-center gap-2">
+                          <img src={p.imageUrl} className="w-7 h-7 rounded object-cover shrink-0" alt="" />
+                          <div className="min-w-0">
+                            <div className="font-semibold text-gray-900 truncate">{p.name}</div>
+                            <div className="text-[10px] text-gray-400">{p.sku} · {p.category}</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-2 py-2">
+                        <div className="flex flex-col gap-1 items-start">
+                          <BuyStatusChip status={buyStatusOf(st)} />
+                          <SupplierStatusChip status={p.supplierStatus} />
+                        </div>
+                      </td>
+                      <td className="px-2 py-2 text-right font-bold text-indigo-700">{p.recommendedReorderQty.toLocaleString()}</td>
+                      <td className="px-2 py-2 text-right font-semibold text-gray-700">£{p.totalCost.toLocaleString()}</td>
+                      <td className={`px-2 py-2 text-right font-semibold ${grossMargin > 25 ? 'text-green-700' : grossMargin >= 10 ? 'text-amber-700' : 'text-red-600'}`}>{grossMargin}%</td>
+                      <td className="px-2 py-2">
+                        {isApplied
+                          ? <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-green-700"><Check className="w-3 h-3" /> Applied</span>
+                          : <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold border ${rec.actionable ? 'bg-indigo-50 text-indigo-700 border-indigo-200' : 'bg-gray-50 text-gray-400 border-gray-200'}`}>{rec.label}</span>}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // ── Active Negotiations View (renders as Supplier Workspace two-pane layout) ──
 function ActiveNegotiationsView({
   negNeedsResponse, negAwaiting, negReady, inquiries, onOpenInquiry, cpRules,
@@ -6770,7 +6894,11 @@ function StockLevelsChart({ productId, timeRange }: { productId: string; timeRan
 function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquiry?: string | null; onNavigateToPO?: (poId: string) => void }) {
   const [search, setSearch]   = useState('')
   const [cat, setCat]         = useState('')
-  const [recoSubView, setRecoSubView] = useState<'recommendations' | 'negotiations'>('recommendations')
+  // Single Reorder working list. One global view toggle (the only one in the
+  // whole Reorder experience): per-line vs grouped-by-supplier. Negotiation is
+  // no longer a separate destination — it's a conversation attached to a line.
+  const [reorderView, setReorderView] = useState<'individual' | 'by_supplier'>('individual')
+  const [openLineId, setOpenLineId]   = useState<string | null>(null)
   const [filter, setFilter]   = useState<ReorderFilter>('All')
   const [selectedProduct, setSelectedProduct] = useState<typeof REORDER_RECOMMENDATIONS[0] | null>(null)
   const [chartTab, setChartTab] = useState<'stock' | 'availability' | 'size-curve'>('stock')
@@ -6784,20 +6912,18 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
   const [toast, setToast]                       = useState<string | null>(null)
   const [inquiries, setInquiries]               = useState<Record<string, InquiryThread>>(() => ({ ...SEEDED_THREADS }))
   const [supplierSessions, setSupplierSessions] = useState<SupplierSession[]>(() => [...SEEDED_SUPPLIER_SESSIONS])
-  void setSupplierSessions
-  const [openInquiryId, setOpenInquiryId]       = useState<string | null>(initialOpenInquiry ?? null)
   const [detailSheetRecId, setDetailSheetRecId] = useState<string | null>(null)
   const [globalCpRules, setGlobalCpRules]       = useState<CpRulesState>(DEFAULT_CP_RULES)
+  // Negotiation state (threads / supplier sessions / CP rules) is retained here:
+  // the line detail + conversation panel (built in the next step) reads and
+  // mutates it. Void the currently-unwired setters until that panel lands.
+  void setSupplierSessions; void setInquiries; void globalCpRules; void setGlobalCpRules; void onNavigateToPO
 
-  useEffect(() => { if (initialOpenInquiry) setOpenInquiryId(initialOpenInquiry) }, [initialOpenInquiry])
+  useEffect(() => { if (initialOpenInquiry) setOpenLineId(initialOpenInquiry) }, [initialOpenInquiry])
 
-  // Supplier Inquiry → route through Active Negotiations workspace (no more floating side panel).
-  // If a thread already exists for this rec we just navigate; otherwise the InquiryDrawer's
-  // own onMount effect will create the draft thread.
-  const openSupplierInquiry = (recId: string) => {
-    setRecoSubView('negotiations')
-    setOpenInquiryId(recId)
-  }
+  // Negotiation is no longer a place you navigate to — opening a supplier
+  // inquiry opens that line's detail/conversation panel in place.
+  const openSupplierInquiry = (recId: string) => setOpenLineId(recId)
   const [editQty, setEditQty]                   = useState(0)
   const [editExFactory, setEditExFactory]       = useState('')
   const [editCostPrice, setEditCostPrice]       = useState(0)
@@ -6821,11 +6947,10 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
 
   const rows = baseRows
 
-  const activeNegRows = REORDER_RECOMMENDATIONS.filter(p => {
-    const t = inquiries[p.id]
-    return t && !['idle', 'draft'].includes(t.status) &&
-      (!search || p.name.toLowerCase().includes(search.toLowerCase()) || p.sku.toLowerCase().includes(search.toLowerCase()))
-  })
+  // Shared selection helpers — used by both the Individual table and the
+  // By-supplier grouped view so a selection survives the toggle.
+  const toggleRowSel  = (id: string) => setSelectedIds(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
+  const toggleManySel = (ids: string[], on: boolean) => setSelectedIds(s => { const n = new Set(s); ids.forEach(id => on ? n.add(id) : n.delete(id)); return n })
 
   const draftEligible    = [...selectedIds].filter(id => effStatus(REORDER_RECOMMENDATIONS.find(r => r.id === id)!) === 'Draft').length
   const approvedEligible = [...selectedIds].filter(id => effStatus(REORDER_RECOMMENDATIONS.find(r => r.id === id)!) === 'Approved').length
@@ -7578,10 +7703,6 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
   const total      = REORDER_RECOMMENDATIONS.length
   const pct        = (n: number) => `${Math.round(n / total * 100)}%`
 
-  const negNeedsResponse = activeNegRows.filter(p => ['replied', 'escalated'].includes(inquiries[p.id]?.status ?? ''))
-  const negAwaiting      = activeNegRows.filter(p => ['sent', 'awaiting_reply'].includes(inquiries[p.id]?.status ?? ''))
-  const negReady         = activeNegRows.filter(p => inquiries[p.id]?.status === 'agreed')
-
   const FILTER_TABS: ReorderFilter[] = ['All', 'Draft', 'Pending Approval', 'Approved', 'Rejected', 'Sent']
   const filteredRows = filter === 'All'
     ? rows
@@ -7643,20 +7764,23 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
           ))}
         </div>
 
-        {/* Segmented control */}
+        {/* View toggle — the ONE global control for the whole Reorder list */}
         <div className="flex items-center bg-gray-100 rounded-xl p-1 mb-5 w-fit gap-0.5">
-          {(['recommendations', 'negotiations'] as const).map(sv => (
-            <button key={sv} onClick={() => setRecoSubView(sv)}
+          {([
+            { k: 'individual',  lbl: 'Individual',  hint: 'One row per SKU/line' },
+            { k: 'by_supplier', lbl: 'By supplier', hint: 'Lines grouped under each supplier' },
+          ] as const).map(opt => (
+            <button key={opt.k} onClick={() => setReorderView(opt.k)} title={opt.hint}
               className={`h-8 px-5 rounded-lg text-xs font-semibold transition-colors ${
-                recoSubView === sv ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'
+                reorderView === opt.k ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'
               }`}>
-              {sv === 'recommendations' ? 'Recommendations' : `Active Negotiations${activeNegRows.length > 0 ? ` (${activeNegRows.length})` : ''}`}
+              {opt.lbl}
             </button>
           ))}
         </div>
 
-        {/* Recommendations sub-view */}
-        {recoSubView === 'recommendations' && (
+        {/* Single working list — filters apply to both views */}
+        {(
           <>
 
 
@@ -7724,7 +7848,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                 }))
                 setSupplierSessions(prev => [...newSessions, ...prev])
                 setSelectedIds(new Set())
-                setRecoSubView('negotiations')
+                setReorderView('by_supplier')
                 showToast(`${newSessions.length} supplier session${newSessions.length === 1 ? '' : 's'} started across ${selectedRecs.length} line${selectedRecs.length === 1 ? '' : 's'}.`)
               }
               return (
@@ -7756,7 +7880,17 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
               )
             })()}
 
-            {/* Table */}
+            {/* List — Individual table OR By-supplier grouped view */}
+            {reorderView === 'by_supplier' ? (
+              <ReorderBySupplier
+                rows={filteredRows}
+                selectedIds={selectedIds}
+                onToggleRow={toggleRowSel}
+                onToggleMany={toggleManySel}
+                effStatus={effStatus}
+                onOpenLine={p => setOpenLineId(p.id)}
+              />
+            ) : (
             <div className="bg-white border border-gray-100 rounded-xl shadow-sm overflow-x-auto">
               <table className="text-xs" style={{ minWidth: 1560 }}>
                 <thead>
@@ -7807,7 +7941,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                     const fmtK = (v: number) => v >= 1000 ? `${(v/1000).toFixed(1)}K` : `${v}`
                     const stickyBg = i % 2 !== 0 ? '#f9fafb' : '#ffffff'
                     return (
-                      <tr key={p.id} onClick={() => { setEditQty(0); setEditExFactory(''); setEditCostPrice(0); setSelectedProduct(p) }}
+                      <tr key={p.id} onClick={() => setOpenLineId(p.id)}
                         className={`border-b border-gray-50 hover:bg-indigo-50/40 cursor-pointer transition-colors ${inquiries[p.id]?.status === 'escalated' ? 'bg-red-50/50' : i % 2 !== 0 ? 'bg-gray-50/20' : ''}`}>
                         <td className="sticky z-10 px-3 py-2 border-r border-gray-100" style={{ left: 0, backgroundColor: stickyBg }} onClick={e => e.stopPropagation()}>
                           <input type="checkbox" className="rounded"
@@ -7938,29 +8072,60 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                 </tbody>
               </table>
             </div>
+            )}
           </>
         )}
-
-        {/* Active Negotiations sub-view */}
-        {recoSubView === 'negotiations' && (
-          <ActiveNegotiationsView
-            negNeedsResponse={negNeedsResponse}
-            negAwaiting={negAwaiting}
-            negReady={negReady}
-            inquiries={inquiries}
-            onOpenInquiry={id => setOpenInquiryId(id)}
-            cpRules={globalCpRules}
-            onUpdateCpRules={setGlobalCpRules}
-            openInquiryId={openInquiryId}
-            onCloseInquiry={() => setOpenInquiryId(null)}
-            onUpdateInquiry={t => setInquiries(prev => ({ ...prev, [t.recId]: t }))}
-            onUpdateGlobalCpRules={setGlobalCpRules}
-            onNavigateToPO={onNavigateToPO}
-            onViewDetails={setDetailSheetRecId}
-            sessions={supplierSessions}
-          />
-        )}
       </div>
+
+      {/* Line detail + supplier conversation panel — PLACEHOLDER.
+          Opening a line no longer navigates away; the negotiation conversation
+          will live in this panel (built in the next step). */}
+      {openLineId && (() => {
+        const lp = REORDER_RECOMMENDATIONS.find(r => r.id === openLineId)
+        if (!lp) return null
+        const thread  = inquiries[lp.id]
+        const session = supplierSessions.find(s => s.threadIds.includes(lp.id))
+        return (
+          <div className="fixed inset-0 z-[55] flex">
+            <div className="flex-1 bg-black/30" onClick={() => setOpenLineId(null)} />
+            <div className="w-[640px] max-w-[95vw] bg-white h-full flex flex-col shadow-2xl overflow-hidden">
+              <div className="flex items-start justify-between px-5 py-4 border-b border-gray-100 shrink-0">
+                <div className="flex items-center gap-3 min-w-0">
+                  <img src={lp.imageUrl} className="w-11 h-11 rounded-lg object-cover shrink-0" alt="" />
+                  <div className="min-w-0">
+                    <div className="text-sm font-bold text-gray-900 truncate">{lp.name}</div>
+                    <div className="text-[11px] text-gray-400">{lp.sku} · {lp.supplier} · {lp.category}</div>
+                    <div className="flex gap-1.5 flex-wrap mt-1.5">
+                      <BuyStatusChip status={buyStatusOf(effStatus(lp))} />
+                      <SupplierStatusChip status={lp.supplierStatus} />
+                    </div>
+                  </div>
+                </div>
+                <button onClick={() => setOpenLineId(null)} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 shrink-0"><X className="w-4 h-4" /></button>
+              </div>
+              <div className="flex-1 overflow-y-auto px-5 py-5 space-y-4">
+                <div className="rounded-xl border border-dashed border-indigo-200 bg-indigo-50/40 px-4 py-6 text-center">
+                  <MessageSquare className="w-6 h-6 text-indigo-400 mx-auto mb-2" />
+                  <div className="text-sm font-semibold text-gray-700">Line detail &amp; supplier conversation</div>
+                  <div className="text-xs text-gray-500 mt-1 max-w-sm mx-auto">
+                    The full line detail and the negotiation thread with {lp.supplier} will open here — in place, without leaving the list. Coming in the next step.
+                  </div>
+                  <div className="text-[11px] text-gray-400 mt-3">
+                    {thread ? `Existing thread · status: ${thread.status}` : 'No negotiation thread yet'}
+                    {session ? ` · part of supplier session (${session.threadIds.length} lines)` : ''}
+                  </div>
+                </div>
+                <button
+                  onClick={() => { setOpenLineId(null); setEditQty(0); setEditExFactory(''); setEditCostPrice(0); setSelectedProduct(lp) }}
+                  className="w-full h-9 rounded-lg border border-gray-200 bg-white text-xs font-semibold text-gray-700 hover:bg-gray-50 transition-colors"
+                >
+                  Open full line detail →
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       {/* Product-detail Sheet — opened from the negotiation workspace via "View details →" */}
       {detailSheetRecId && (() => {
