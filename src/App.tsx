@@ -13,6 +13,11 @@ import { INVENTORY_PRODUCTS, REORDER_RECOMMENDATIONS } from './mockData'
 import type { SizeBand, StockStatus, ApprovalStatus, SizeCurveEntry, InventoryProduct, ReorderRecommendation, Category, FreightScenarioData } from './mockData'
 import { REPLEN_PRODUCTS } from './replenData'
 import type { ReplenProduct, DCStatus as ReplenDCStatus } from './replenData'
+import {
+  SUPPLIER_JOURNEY, STAGE_LABELS, STAGE_ORDER, HEALTH_TIER_CFG,
+  buildPrediction, RISK_BAND_CFG,
+} from './predict'
+import type { JourneyStageKey, StagePerf, PoPrediction } from './predict'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 type POStatus =
@@ -57,6 +62,7 @@ interface PO {
   orderValue: string
   freight: 'Sea' | 'Air'
   handledBy: 'agent' | 'human'
+  targetStockDate?: string  // ISO; when stock is needed to hit plan (drives missed-sales risk)
 }
 
 interface ActionItem {
@@ -318,6 +324,37 @@ function EstDeliveryPill({ po, size = 'sm' }: { po: { expectedDelivery: string; 
   )
 }
 
+// ── Predictive pills (forward-looking risk, from predict.ts) ──────────────────
+function RiskPill({ pred, size = 'sm' }: { pred: PoPrediction; size?: 'sm' | 'md' }) {
+  const cfg = RISK_BAND_CFG[pred.riskBand]
+  const cls = size === 'md' ? 'text-[11px] px-2 py-0.5' : 'text-[10px] px-1.5 py-0.5'
+  const topSignal = pred.signals[0]
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full border font-semibold ${cls} ${cfg.bg} ${cfg.text} ${cfg.border}`}
+      title={topSignal ? `Predicted risk ${pred.predictedRiskPct}% · ${topSignal}` : `Predicted risk ${pred.predictedRiskPct}%`}
+    >
+      <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />{pred.riskBand} · {pred.predictedRiskPct}%
+    </span>
+  )
+}
+
+// "Predicted to slip" — only for POs not yet flagged late by the system but
+// forecast to miss. Visually distinct from already-overdue POs (the core story).
+function isPredictedToSlip(po: { status: string }, pred: PoPrediction | undefined): boolean {
+  if (!pred) return false
+  const alreadyLate = po.status === 'Ex-factory delay' || po.status === 'Late DC booking' || po.status === 'Date change required'
+  return !alreadyLate && (pred.riskBand === 'Medium' || pred.riskBand === 'High' || pred.riskBand === 'Critical') && pred.landingGapDays > 2
+}
+function PredictedToSlipChip({ size = 'sm' }: { size?: 'sm' | 'md' }) {
+  const cls = size === 'md' ? 'text-[11px] px-2 py-0.5' : 'text-[9px] px-1.5 py-0.5'
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full font-bold bg-violet-100 text-violet-700 border border-violet-200 ${cls}`} title="Not yet late, but the agent forecasts this PO will slip">
+      <TrendingDown className="w-2.5 h-2.5" /> Predicted to slip
+    </span>
+  )
+}
+
 interface POEvent {
   id:        string
   type:      POEventType
@@ -478,243 +515,9 @@ const SUPPLIER_EMAILS: Record<string, string> = {
   'EL': 'orders@esteelauder.co.uk',
 }
 
-// ── Per-supplier journey-stage performance breakdown ──────────────────────────
-type JourneyStageKey = 'sample' | 'fit' | 'booking' | 'handover' | 'shipment' | 'in_transit' | 'customs' | 'dc_arrival'
-interface StagePerf {
-  onTime:    number   // 0-100
-  avgDelay:  number   // days; negative = early
-  trend:     'improving' | 'stable' | 'worsening'
-}
-interface SupplierJourneyData {
-  byStage: Record<JourneyStageKey, StagePerf>
-  summary: string                    // 1-sentence agent summary
-  tier:    'Excellent' | 'Good' | 'Watch' | 'At risk' | 'Critical'
-  history: { month: string; onTime: number; avgDelay: number; volume: number }[]
-}
-
-const STAGE_LABELS: Record<JourneyStageKey, string> = {
-  sample:      'Sample provided',
-  fit:         'First-fit approved',
-  booking:     'Booking',
-  handover:    'Handover',
-  shipment:    'Shipment departure',
-  in_transit:  'In-transit',
-  customs:     'Customs clearance',
-  dc_arrival:  'Arrival to DC',
-}
-const STAGE_ORDER: JourneyStageKey[] = ['sample', 'fit', 'booking', 'handover', 'shipment', 'in_transit', 'customs', 'dc_arrival']
-const PRE_BOOKING_STAGES: JourneyStageKey[] = ['sample', 'fit']
-
-// Seeded stage breakdown per supplier. The Unilever-style "94% overall but weak at one stage"
-// case is on UL (customs at 81%, worsening). EL is excellent across all stages.
-const SUPPLIER_JOURNEY: Record<string, SupplierJourneyData> = {
-  UL: {
-    tier:    'Good',
-    summary: '94% on-time overall, but customs clearance is a persistent weakness (-2.4d average) and trending worse over the last 90 days.',
-    byStage: {
-      sample:     { onTime: 95, avgDelay: 0.4, trend: 'stable' },
-      fit:        { onTime: 96, avgDelay: 0.3, trend: 'stable' },
-      booking:    { onTime: 97, avgDelay: 0.2, trend: 'stable' },
-      handover:   { onTime: 96, avgDelay: 0.5, trend: 'stable' },
-      shipment:   { onTime: 96, avgDelay: 0.3, trend: 'stable' },
-      in_transit: { onTime: 92, avgDelay: 1.8, trend: 'stable' },
-      customs:    { onTime: 81, avgDelay: 2.4, trend: 'worsening' },
-      dc_arrival: { onTime: 95, avgDelay: 0.7, trend: 'stable' },
-    },
-    history: [
-      { month: 'Dec', onTime: 96, avgDelay: 0.8, volume: 18 },
-      { month: 'Jan', onTime: 95, avgDelay: 1.0, volume: 22 },
-      { month: 'Feb', onTime: 94, avgDelay: 1.1, volume: 19 },
-      { month: 'Mar', onTime: 94, avgDelay: 1.2, volume: 24 },
-      { month: 'Apr', onTime: 93, avgDelay: 1.4, volume: 21 },
-      { month: 'May', onTime: 94, avgDelay: 1.1, volume: 16 },
-    ],
-  },
-  EL: {
-    tier:    'Excellent',
-    summary: 'Excellent across every stage of the journey. Sample provision is the strongest in the portfolio at 99%.',
-    byStage: {
-      sample:     { onTime: 99, avgDelay: -0.2, trend: 'stable' },
-      fit:        { onTime: 98, avgDelay: 0.1,  trend: 'stable' },
-      booking:    { onTime: 97, avgDelay: 0.3,  trend: 'stable' },
-      handover:   { onTime: 96, avgDelay: 0.5,  trend: 'stable' },
-      shipment:   { onTime: 97, avgDelay: 0.2,  trend: 'stable' },
-      in_transit: { onTime: 95, avgDelay: 0.8,  trend: 'stable' },
-      customs:    { onTime: 94, avgDelay: 1.1,  trend: 'stable' },
-      dc_arrival: { onTime: 96, avgDelay: 0.5,  trend: 'improving' },
-    },
-    history: [
-      { month: 'Dec', onTime: 95, avgDelay: 0.9, volume: 12 },
-      { month: 'Jan', onTime: 96, avgDelay: 0.8, volume: 14 },
-      { month: 'Feb', onTime: 96, avgDelay: 0.8, volume: 13 },
-      { month: 'Mar', onTime: 96, avgDelay: 0.7, volume: 16 },
-      { month: 'Apr', onTime: 97, avgDelay: 0.6, volume: 12 },
-      { month: 'May', onTime: 96, avgDelay: 0.8, volume: 11 },
-    ],
-  },
-  LL: {
-    tier:    'Good',
-    summary: '91% on-time overall, with first-fit approval consistently late (-3.1d) — sample stage strong but fit reviews slip.',
-    byStage: {
-      sample:     { onTime: 94, avgDelay: 0.6, trend: 'stable' },
-      fit:        { onTime: 72, avgDelay: 3.1, trend: 'stable' },
-      booking:    { onTime: 94, avgDelay: 0.8, trend: 'stable' },
-      handover:   { onTime: 92, avgDelay: 1.4, trend: 'stable' },
-      shipment:   { onTime: 95, avgDelay: 0.7, trend: 'stable' },
-      in_transit: { onTime: 93, avgDelay: 1.2, trend: 'stable' },
-      customs:    { onTime: 90, avgDelay: 1.6, trend: 'stable' },
-      dc_arrival: { onTime: 94, avgDelay: 0.9, trend: 'stable' },
-    },
-    history: [
-      { month: 'Dec', onTime: 90, avgDelay: 1.5, volume: 9 },
-      { month: 'Jan', onTime: 91, avgDelay: 1.4, volume: 11 },
-      { month: 'Feb', onTime: 91, avgDelay: 1.4, volume: 8  },
-      { month: 'Mar', onTime: 92, avgDelay: 1.3, volume: 10 },
-      { month: 'Apr', onTime: 91, avgDelay: 1.4, volume: 9  },
-      { month: 'May', onTime: 91, avgDelay: 1.4, volume: 9  },
-    ],
-  },
-  UF: {
-    tier:    'Watch',
-    summary: 'Improving trend over the last 90 days, with handover slipping in the last 30 (-1.9d average vs +0.3d the prior period).',
-    byStage: {
-      sample:     { onTime: 86, avgDelay: 1.4, trend: 'stable' },
-      fit:        { onTime: 83, avgDelay: 1.8, trend: 'stable' },
-      booking:    { onTime: 88, avgDelay: 1.1, trend: 'improving' },
-      handover:   { onTime: 79, avgDelay: 1.9, trend: 'worsening' },
-      shipment:   { onTime: 91, avgDelay: 0.9, trend: 'improving' },
-      in_transit: { onTime: 86, avgDelay: 1.6, trend: 'stable' },
-      customs:    { onTime: 84, avgDelay: 1.8, trend: 'stable' },
-      dc_arrival: { onTime: 88, avgDelay: 1.3, trend: 'improving' },
-    },
-    history: [
-      { month: 'Dec', onTime: 79, avgDelay: 3.1, volume: 16 },
-      { month: 'Jan', onTime: 81, avgDelay: 2.8, volume: 18 },
-      { month: 'Feb', onTime: 82, avgDelay: 2.5, volume: 17 },
-      { month: 'Mar', onTime: 84, avgDelay: 2.3, volume: 20 },
-      { month: 'Apr', onTime: 85, avgDelay: 2.1, volume: 19 },
-      { month: 'May', onTime: 85, avgDelay: 2.1, volume: 17 },
-    ],
-  },
-  TB: {
-    tier:    'Watch',
-    summary: 'Improving overall but recovering slowly — booking confirmations are still the weakest stage at 76% on-time.',
-    byStage: {
-      sample:     { onTime: 84, avgDelay: 1.8, trend: 'improving' },
-      fit:        { onTime: 82, avgDelay: 2.0, trend: 'improving' },
-      booking:    { onTime: 76, avgDelay: 2.6, trend: 'improving' },
-      handover:   { onTime: 83, avgDelay: 1.7, trend: 'improving' },
-      shipment:   { onTime: 88, avgDelay: 1.1, trend: 'stable' },
-      in_transit: { onTime: 84, avgDelay: 1.5, trend: 'stable' },
-      customs:    { onTime: 81, avgDelay: 1.9, trend: 'stable' },
-      dc_arrival: { onTime: 86, avgDelay: 1.2, trend: 'improving' },
-    },
-    history: [
-      { month: 'Dec', onTime: 76, avgDelay: 3.4, volume: 13 },
-      { month: 'Jan', onTime: 78, avgDelay: 3.1, volume: 15 },
-      { month: 'Feb', onTime: 80, avgDelay: 2.8, volume: 12 },
-      { month: 'Mar', onTime: 81, avgDelay: 2.7, volume: 14 },
-      { month: 'Apr', onTime: 82, avgDelay: 2.6, volume: 16 },
-      { month: 'May', onTime: 82, avgDelay: 2.6, volume: 13 },
-    ],
-  },
-  BA: {
-    tier:    'Watch',
-    summary: 'Stable middle-of-the-road performance — no single weak stage but no strengths either. Handover is the slowest at 75%.',
-    byStage: {
-      sample:     { onTime: 82, avgDelay: 1.9, trend: 'stable' },
-      fit:        { onTime: 79, avgDelay: 2.2, trend: 'stable' },
-      booking:    { onTime: 81, avgDelay: 1.8, trend: 'stable' },
-      handover:   { onTime: 75, avgDelay: 2.5, trend: 'stable' },
-      shipment:   { onTime: 83, avgDelay: 1.4, trend: 'stable' },
-      in_transit: { onTime: 80, avgDelay: 1.7, trend: 'stable' },
-      customs:    { onTime: 78, avgDelay: 1.9, trend: 'stable' },
-      dc_arrival: { onTime: 81, avgDelay: 1.5, trend: 'stable' },
-    },
-    history: [
-      { month: 'Dec', onTime: 77, avgDelay: 3.9, volume: 28 },
-      { month: 'Jan', onTime: 78, avgDelay: 3.8, volume: 33 },
-      { month: 'Feb', onTime: 78, avgDelay: 3.7, volume: 31 },
-      { month: 'Mar', onTime: 79, avgDelay: 3.6, volume: 30 },
-      { month: 'Apr', onTime: 78, avgDelay: 3.8, volume: 32 },
-      { month: 'May', onTime: 78, avgDelay: 3.8, volume: 31 },
-    ],
-  },
-  NK: {
-    tier:    'At risk',
-    summary: 'Declining across multiple stages. Sample and first-fit are now both below 70%, indicating a deeper sourcing problem.',
-    byStage: {
-      sample:     { onTime: 68, avgDelay: 4.2, trend: 'worsening' },
-      fit:        { onTime: 65, avgDelay: 4.8, trend: 'worsening' },
-      booking:    { onTime: 76, avgDelay: 2.4, trend: 'stable' },
-      handover:   { onTime: 72, avgDelay: 3.1, trend: 'worsening' },
-      shipment:   { onTime: 81, avgDelay: 1.6, trend: 'stable' },
-      in_transit: { onTime: 78, avgDelay: 2.0, trend: 'stable' },
-      customs:    { onTime: 75, avgDelay: 2.4, trend: 'stable' },
-      dc_arrival: { onTime: 80, avgDelay: 1.8, trend: 'stable' },
-    },
-    history: [
-      { month: 'Dec', onTime: 80, avgDelay: 4.6, volume: 11 },
-      { month: 'Jan', onTime: 78, avgDelay: 4.8, volume: 13 },
-      { month: 'Feb', onTime: 76, avgDelay: 5.0, volume: 10 },
-      { month: 'Mar', onTime: 75, avgDelay: 5.1, volume: 12 },
-      { month: 'Apr', onTime: 74, avgDelay: 5.1, volume: 11 },
-      { month: 'May', onTime: 74, avgDelay: 5.1, volume: 11 },
-    ],
-  },
-  SS: {
-    tier:    'At risk',
-    summary: 'Customs clearance is consistently slow (-5.4d) and handover trending worse. Concentration risk: 22 open POs.',
-    byStage: {
-      sample:     { onTime: 71, avgDelay: 3.4, trend: 'stable' },
-      fit:        { onTime: 68, avgDelay: 4.1, trend: 'stable' },
-      booking:    { onTime: 74, avgDelay: 2.9, trend: 'stable' },
-      handover:   { onTime: 62, avgDelay: 4.6, trend: 'worsening' },
-      shipment:   { onTime: 72, avgDelay: 3.2, trend: 'stable' },
-      in_transit: { onTime: 70, avgDelay: 3.6, trend: 'stable' },
-      customs:    { onTime: 54, avgDelay: 5.4, trend: 'worsening' },
-      dc_arrival: { onTime: 76, avgDelay: 2.4, trend: 'stable' },
-    },
-    history: [
-      { month: 'Dec', onTime: 72, avgDelay: 6.5, volume: 23 },
-      { month: 'Jan', onTime: 71, avgDelay: 6.8, volume: 26 },
-      { month: 'Feb', onTime: 70, avgDelay: 7.1, volume: 24 },
-      { month: 'Mar', onTime: 69, avgDelay: 7.2, volume: 22 },
-      { month: 'Apr', onTime: 68, avgDelay: 7.2, volume: 25 },
-      { month: 'May', onTime: 68, avgDelay: 7.2, volume: 22 },
-    ],
-  },
-  ET: {
-    tier:    'Critical',
-    summary: 'Structurally weak — every stage below 70% except sample provision. Customs clearance is failing (-15.2d). Replace or restructure.',
-    byStage: {
-      sample:     { onTime: 64, avgDelay: 6.8,  trend: 'worsening' },
-      fit:        { onTime: 52, avgDelay: 9.3,  trend: 'worsening' },
-      booking:    { onTime: 58, avgDelay: 7.4,  trend: 'worsening' },
-      handover:   { onTime: 48, avgDelay: 11.2, trend: 'worsening' },
-      shipment:   { onTime: 62, avgDelay: 5.8,  trend: 'stable' },
-      in_transit: { onTime: 56, avgDelay: 6.9,  trend: 'worsening' },
-      customs:    { onTime: 38, avgDelay: 15.2, trend: 'worsening' },
-      dc_arrival: { onTime: 60, avgDelay: 6.4,  trend: 'worsening' },
-    },
-    history: [
-      { month: 'Dec', onTime: 62, avgDelay: 10.8, volume: 16 },
-      { month: 'Jan', onTime: 60, avgDelay: 11.4, volume: 18 },
-      { month: 'Feb', onTime: 58, avgDelay: 11.9, volume: 17 },
-      { month: 'Mar', onTime: 56, avgDelay: 12.2, volume: 20 },
-      { month: 'Apr', onTime: 55, avgDelay: 12.3, volume: 19 },
-      { month: 'May', onTime: 54, avgDelay: 12.4, volume: 18 },
-    ],
-  },
-}
-
-const HEALTH_TIER_CFG: Record<SupplierJourneyData['tier'], { bg: string; text: string; border: string; ring: string }> = {
-  'Excellent': { bg: 'bg-green-100',  text: 'text-green-800',   border: 'border-green-200',   ring: 'ring-green-200' },
-  'Good':      { bg: 'bg-emerald-100',text: 'text-emerald-800', border: 'border-emerald-200', ring: 'ring-emerald-200' },
-  'Watch':     { bg: 'bg-amber-100',  text: 'text-amber-800',   border: 'border-amber-200',   ring: 'ring-amber-200' },
-  'At risk':   { bg: 'bg-orange-100', text: 'text-orange-800',  border: 'border-orange-200',  ring: 'ring-orange-200' },
-  'Critical':  { bg: 'bg-red-100',    text: 'text-red-800',     border: 'border-red-200',     ring: 'ring-red-200' },
-}
+// Supplier journey-stage data + the predictive risk model now live in ./predict.ts
+// (imported at the top of this file). Relocated there so computePoRisk /
+// computePredictedLanding are transparent, testable pure functions.
 
 const ALL_POS: PO[] = [
   // Ex-Factory Delays — human needed
@@ -758,7 +561,33 @@ const ALL_POS: PO[] = [
   { id: 'PO-3059', supplierId: 'BA', product: 'Linen Shorts',              category: "Men's Apparel",   createdOn: '28/03/26', expectedDelivery: '2026-06-10', status: 'On track',              priority: false, quantity: 960,  skus: 12, orderValue: '£14,400', freight: 'Sea', handledBy: 'agent' },
   // Negotiated PO — raised following CP negotiation with Unilever Ltd (REC-002)
   { id: 'PO-3060', supplierId: 'UL', product: 'Hyaluronic Acid Toner',    category: 'Beauty',          createdOn: '30/04/26', expectedDelivery: '2026-06-11', status: 'On track',              priority: false, quantity: 2840, skus: 1,  orderValue: '£25,475', freight: 'Air', handledBy: 'human' },
+
+  // ── PREDICTED-TO-SLIP (the repositioning) ────────────────────────────────────
+  // These are NOT yet late by the system — status is On track / Acknowledged /
+  // Sent to supplier — but the predictive model forecasts a slip from a weak
+  // UPCOMING supplier stage. targetStockDate is the merch deadline (tight, so the
+  // predicted landing breaches it). Two are "headline OTR looks fine, one weak
+  // upcoming stage" cases (UL customs, UF handover).
+  { id: 'PO-3070', supplierId: 'UL', product: 'Retinol Renewal Serum',    category: 'Beauty',          createdOn: '02/05/26', expectedDelivery: '2026-06-20', status: 'Acknowledged',          priority: true,  quantity: 2600, skus: 4,  orderValue: '£23,400', freight: 'Sea', handledBy: 'agent', targetStockDate: '2026-06-22' },
+  { id: 'PO-3071', supplierId: 'UF', product: 'Court Trainers',           category: 'Footwear',        createdOn: '04/05/26', expectedDelivery: '2026-06-25', status: 'Acknowledged',          priority: false, quantity: 900,  skus: 10, orderValue: '£27,000', freight: 'Sea', handledBy: 'agent', targetStockDate: '2026-06-26' },
+  { id: 'PO-3072', supplierId: 'SS', product: 'Broderie Blouse',          category: "Women's Apparel", createdOn: '01/05/26', expectedDelivery: '2026-06-12', status: 'On track',              priority: true,  quantity: 1100, skus: 9,  orderValue: '£26,400', freight: 'Sea', handledBy: 'agent', targetStockDate: '2026-06-05' },
+  { id: 'PO-3073', supplierId: 'NK', product: 'Lambswool Crew Knit',      category: 'Knitwear',        createdOn: '06/05/26', expectedDelivery: '2026-06-30', status: 'Sent to supplier',      priority: false, quantity: 540,  skus: 6,  orderValue: '£17,280', freight: 'Sea', handledBy: 'agent', targetStockDate: '2026-06-18' },
+  { id: 'PO-3074', supplierId: 'TB', product: 'Western Ankle Boots',      category: 'Footwear',        createdOn: '05/05/26', expectedDelivery: '2026-06-18', status: 'Acknowledged',          priority: false, quantity: 620,  skus: 8,  orderValue: '£21,700', freight: 'Sea', handledBy: 'agent', targetStockDate: '2026-06-20' },
 ]
+
+// Forward-looking prediction per open PO, derived once from the pure functions in
+// predict.ts. Keyed by PO id. Closed (Delivered) POs are skipped. Surfaced across
+// the All POs, Suppliers list, and Supplier detail views.
+const PO_PREDICTIONS: Record<string, PoPrediction> = (() => {
+  const out: Record<string, PoPrediction> = {}
+  for (const po of ALL_POS) {
+    if (po.status === 'Delivered') continue
+    const sup = SUPPLIERS.find(s => s.id === po.supplierId)
+    if (!sup) continue
+    out[po.id] = buildPrediction(po, sup)
+  }
+  return out
+})()
 
 // Links each PO to the nearest equivalent InventoryProduct or ReorderRecommendation.
 // Used to surface live stock/commercial context in the PO Line Drawer's Product tab.
@@ -2110,21 +1939,24 @@ function SupplierDetailView({
     return <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-gray-500"><Minus className="w-3 h-3" /> stable</span>
   }
 
-  const stageRow = (key: JourneyStageKey, perf: StagePerf, label: string, isPreBooking: boolean) => {
-    const otCls   = perf.onTime >= 95 ? 'text-green-700'  : perf.onTime >= 85 ? 'text-amber-700'  : perf.onTime >= 70 ? 'text-orange-700' : 'text-red-700'
-    const otBar   = perf.onTime >= 95 ? 'bg-green-500'    : perf.onTime >= 85 ? 'bg-amber-400'    : perf.onTime >= 70 ? 'bg-orange-500'   : 'bg-red-500'
-    const dlyCls  = perf.avgDelay < 0 ? 'text-green-600' : perf.avgDelay <= 2 ? 'text-gray-700' : perf.avgDelay <= 5 ? 'text-amber-700' : 'text-red-700'
+  const stageRow = (key: JourneyStageKey, perf: StagePerf, label: string) => {
+    // Non-instrumented (pre-booking) stages aren't tracked in production today —
+    // render them de-emphasised and tagged so the figures read as illustrative.
+    const tracked = perf.isInstrumented !== false
+    const otCls   = !tracked ? 'text-gray-400' : perf.onTime >= 95 ? 'text-green-700'  : perf.onTime >= 85 ? 'text-amber-700'  : perf.onTime >= 70 ? 'text-orange-700' : 'text-red-700'
+    const otBar   = !tracked ? 'bg-gray-300'   : perf.onTime >= 95 ? 'bg-green-500'    : perf.onTime >= 85 ? 'bg-amber-400'    : perf.onTime >= 70 ? 'bg-orange-500'   : 'bg-red-500'
+    const dlyCls  = !tracked ? 'text-gray-400' : perf.avgDelay < 0 ? 'text-green-600' : perf.avgDelay <= 2 ? 'text-gray-700' : perf.avgDelay <= 5 ? 'text-amber-700' : 'text-red-700'
     return (
-      <tr key={key} className="border-b border-gray-50 last:border-0">
+      <tr key={key} className={`border-b border-gray-50 last:border-0 ${!tracked ? 'bg-gray-50/40' : ''}`}>
         <td className="px-3 py-2.5">
           <div className="flex items-center gap-2">
-            <span className="text-[12px] font-medium text-gray-800">{label}</span>
-            {isPreBooking && <span className="text-[8px] font-bold px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 uppercase tracking-wider">Pre-booking</span>}
+            <span className={`text-[12px] font-medium ${tracked ? 'text-gray-800' : 'text-gray-400'}`}>{label}</span>
+            {!tracked && <span className="text-[8px] font-bold px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-400 uppercase tracking-wider" title="Pre-booking stage — not captured in production tracking; values are illustrative">Not yet tracked</span>}
           </div>
         </td>
-        <td className={`px-3 py-2.5 text-[12px] font-semibold ${otCls}`}>{perf.onTime}%</td>
+        <td className={`px-3 py-2.5 text-[12px] font-semibold ${otCls}`}>{perf.onTime}%{!tracked && <span className="text-gray-300">*</span>}</td>
         <td className={`px-3 py-2.5 text-[12px] font-medium ${dlyCls}`}>{perf.avgDelay >= 0 ? '+' : ''}{perf.avgDelay.toFixed(1)}d</td>
-        <td className="px-3 py-2.5">{trendBadge(perf.trend)}</td>
+        <td className={`px-3 py-2.5 ${!tracked ? 'opacity-50' : ''}`}>{trendBadge(perf.trend)}</td>
         <td className="px-3 py-2.5">
           <div className="w-24 h-1.5 rounded-full bg-gray-100 overflow-hidden">
             <div className={`h-full rounded-full ${otBar}`} style={{ width: `${perf.onTime}%` }} />
@@ -2211,7 +2043,7 @@ function SupplierDetailView({
                   </tr>
                 </thead>
                 <tbody>
-                  {STAGE_ORDER.map(stage => stageRow(stage, journey.byStage[stage], STAGE_LABELS[stage], PRE_BOOKING_STAGES.includes(stage)))}
+                  {STAGE_ORDER.map(stage => stageRow(stage, journey.byStage[stage], STAGE_LABELS[stage]))}
                   <tr className="bg-gray-50">
                     <td className="px-3 py-2.5 text-[12px] font-bold text-gray-900">Overall</td>
                     <td className={`px-3 py-2.5 text-[13px] font-bold ${supplier.onTimeRate >= 95 ? 'text-green-700' : supplier.onTimeRate >= 85 ? 'text-amber-700' : 'text-red-700'}`}>{supplier.onTimeRate}%</td>
@@ -2221,13 +2053,36 @@ function SupplierDetailView({
                   </tr>
                 </tbody>
               </table>
-              <div className="text-[10px] text-gray-400 italic mt-3">Pre-booking stages aren't tracked in production data today — these values are mocked for this prototype.</div>
+              <div className="text-[10px] text-gray-400 italic mt-3">* Stages tagged "not yet tracked" (Sample provided, First-fit approved) aren't captured in production data today — those figures are illustrative.</div>
             </>
           ) : (
             <div className="text-xs text-gray-400 italic py-4">Stage-level breakdown not yet available for this supplier.</div>
           )}
         </div>
       </div>
+
+      {/* Weakest upcoming stage — the forward-looking headline above the open-PO list */}
+      {journey && (() => {
+        const instrumented = STAGE_ORDER.filter(st => journey.byStage[st].isInstrumented !== false)
+        const weakestKey = instrumented.reduce((min, st) => journey.byStage[st].onTime < journey.byStage[min].onTime ? st : min, instrumented[0])
+        const weak = journey.byStage[weakestKey]
+        const openPreds = openPOsForSupplier.map(p => PO_PREDICTIONS[p.id]).filter(Boolean) as PoPrediction[]
+        const exposed = openPOsForSupplier.filter(p => { const pr = PO_PREDICTIONS[p.id]; return pr && pr.riskBand !== 'Low' })
+        const exposedValue = exposed.reduce((s, p) => s + (parseInt(p.orderValue.replace(/[^0-9]/g, '')) || 0), 0)
+        void openPreds
+        return (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 flex items-start gap-3">
+            <TrendingDown className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+            <div className="text-xs text-amber-800 leading-relaxed">
+              <span className="font-bold">Weakest upcoming stage: {STAGE_LABELS[weakestKey]}</span>
+              {' '}— {weak.onTime}% on-time, {weak.avgDelay >= 0 ? '+' : ''}{weak.avgDelay.toFixed(1)}d avg{weak.trend === 'worsening' ? ' and worsening' : ''}.
+              {exposed.length > 0
+                ? ` Puts £${exposedValue.toLocaleString('en-GB')} across ${exposed.length} open PO${exposed.length === 1 ? '' : 's'} at risk of slipping here.`
+                : ' No open POs currently exposed at this stage.'}
+            </div>
+          </div>
+        )
+      })()}
 
       {/* Section 4 — Open POs */}
       <div className="bg-white border border-gray-100 rounded-2xl shadow-sm">
@@ -2260,6 +2115,7 @@ function SupplierDetailView({
                 <th className="px-4 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">PO #</th>
                 <th className="px-4 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Product</th>
                 <th className="px-4 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Value</th>
+                <th className="px-4 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Risk</th>
                 <th className="px-4 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Current stage</th>
                 <th className="px-4 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Est. delivery</th>
               </tr>
@@ -2267,6 +2123,7 @@ function SupplierDetailView({
             <tbody className="divide-y divide-gray-50">
               {filteredPOs.map(po => {
                 const est = getEstimatedDelivery(po)
+                const pred = PO_PREDICTIONS[po.id]
                 const currentStage =
                   po.status === 'Ex-factory delay'     ? 'Ex-factory'         :
                   po.status === 'Date change required' ? 'Awaiting confirmation' :
@@ -2280,8 +2137,14 @@ function SupplierDetailView({
                     className="hover:bg-gray-50 cursor-pointer"
                   >
                     <td className="px-4 py-2.5 font-semibold text-indigo-700">{po.id}</td>
-                    <td className="px-4 py-2.5 text-gray-700">{po.product}</td>
+                    <td className="px-4 py-2.5 text-gray-700">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {po.product}
+                        {isPredictedToSlip(po, pred) && <PredictedToSlipChip />}
+                      </div>
+                    </td>
                     <td className="px-4 py-2.5 text-gray-700 font-medium">{po.orderValue}</td>
+                    <td className="px-4 py-2.5">{pred ? <RiskPill pred={pred} /> : <span className="text-[10px] text-gray-300">—</span>}</td>
                     <td className="px-4 py-2.5 text-gray-600">{currentStage}</td>
                     <td className="px-4 py-2.5">
                       <div className="flex items-center gap-2">
@@ -2293,7 +2156,7 @@ function SupplierDetailView({
                 )
               })}
               {filteredPOs.length === 0 && (
-                <tr><td colSpan={5} className="px-4 py-8 text-center text-[11px] text-gray-400">No POs match the selected filter.</td></tr>
+                <tr><td colSpan={6} className="px-4 py-8 text-center text-[11px] text-gray-400">No POs match the selected filter.</td></tr>
               )}
             </tbody>
           </table>
@@ -9263,6 +9126,8 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
   const [chaseHistoryOpen, setChaseHistoryOpen] = useState(false); void chaseHistoryOpen; void setChaseHistoryOpen
   const [poStatusFilter,   setPoStatusFilter]   = useState('all')
   const [poSupFilter,      setPoSupFilter]      = useState('all')
+  const [poRiskFilter,     setPoRiskFilter]     = useState('all')
+  const [poRiskSort,       setPoRiskSort]       = useState(false)
   const [settingsAccordion, setSettingsAccordion] = useState<string | null>(null)
   // Actions queue state
   const [drawerCardKey,    setDrawerCardKey]    = useState<string | null>(initialOpenAction ?? null)
@@ -11266,13 +11131,24 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
 
         {/* ── ALL POs ── */}
         {subTab === 'allpos' && (() => {
+          const RISK_RANK: Record<string, number> = { Critical: 0, High: 1, Medium: 2, Low: 3 }
           const filtered = ALL_POS.filter(po => {
             const cl = classifyPO(po)
             const statusOk   = poStatusFilter === 'all' || cl === poStatusFilter
             const supplierOk = poSupFilter     === 'all' || po.supplierId === poSupFilter
             const searchOk   = !poSearch || po.id.toLowerCase().includes(poSearch.toLowerCase()) || po.product.toLowerCase().includes(poSearch.toLowerCase())
-            return statusOk && supplierOk && searchOk
+            const pred       = PO_PREDICTIONS[po.id]
+            const riskOk     = poRiskFilter === 'all' || (pred && pred.riskBand === poRiskFilter)
+            return statusOk && supplierOk && searchOk && riskOk
           })
+          const ordered = poRiskSort
+            ? [...filtered].sort((a, b) => {
+                const pa = PO_PREDICTIONS[a.id], pb = PO_PREDICTIONS[b.id]
+                const ra = pa ? RISK_RANK[pa.riskBand] : 99, rb = pb ? RISK_RANK[pb.riskBand] : 99
+                if (ra !== rb) return ra - rb
+                return (pb?.predictedRiskPct ?? -1) - (pa?.predictedRiskPct ?? -1)
+              })
+            : filtered
           return (
             <div className="space-y-4">
               <div className="flex items-center gap-3 flex-wrap">
@@ -11291,6 +11167,19 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                   <option value="all">All Suppliers</option>
                   {SUPPLIERS.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
+                <select value={poRiskFilter} onChange={e => setPoRiskFilter(e.target.value)} className="h-8 border border-gray-200 rounded-lg text-xs px-2 focus:outline-none">
+                  <option value="all">All Risk</option>
+                  <option value="Critical">Critical risk</option>
+                  <option value="High">High risk</option>
+                  <option value="Medium">Medium risk</option>
+                  <option value="Low">Low risk</option>
+                </select>
+                <button
+                  onClick={() => setPoRiskSort(s => !s)}
+                  className={`h-8 px-3 rounded-lg border text-xs font-semibold flex items-center gap-1.5 transition-colors ${poRiskSort ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}
+                >
+                  <TrendingDown className="w-3.5 h-3.5" /> {poRiskSort ? 'Sorted by risk' : 'Sort by risk'}
+                </button>
                 <button className="ml-auto h-8 px-3 rounded-lg border border-gray-200 text-xs font-semibold text-gray-600 hover:bg-gray-50 flex items-center gap-1.5">
                   <Download className="w-3.5 h-3.5" /> Export Excel
                 </button>
@@ -11298,25 +11187,43 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
               <div className="bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden">
                 <table className="w-full text-xs">
                   <thead className="bg-gray-50 border-b border-gray-100">
-                    <tr>{['PO Number','Supplier','Product','Status','Delivery','Est. delivery','Value','Freight'].map(h => <th key={h} className="px-4 py-3 text-left font-semibold text-gray-500 whitespace-nowrap">{h}</th>)}</tr>
+                    <tr>{['PO Number','Supplier','Product','Status','Risk','Delivery','Predicted landing','Value','Freight'].map(h => <th key={h} className="px-4 py-3 text-left font-semibold text-gray-500 whitespace-nowrap">{h}</th>)}</tr>
                   </thead>
                   <tbody className="divide-y divide-gray-50">
-                    {filtered.map(po => {
+                    {ordered.map(po => {
                       const sup = getSupplier(po.supplierId)
+                      const pred = PO_PREDICTIONS[po.id]
                       const diffDays = Math.ceil((new Date(po.expectedDelivery).getTime() - today.getTime()) / 86400000)
                       const relLabel = diffDays < 0 ? `${Math.abs(diffDays)} days overdue` : diffDays === 0 ? 'Due today' : `due in ${diffDays}d`
+                      const gap = pred?.landingGapDays ?? 0
+                      const gapCls = gap >= 14 ? 'text-red-600' : gap >= 4 ? 'text-amber-600' : 'text-gray-400'
                       return (
                         <tr key={po.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => setSelectedPOId(po.id)}>
                           <td className="px-4 py-3 font-semibold text-indigo-700">{po.id}</td>
                           <td className="px-4 py-3 text-gray-700">{sup?.name ?? po.supplierId}</td>
                           <td className="px-4 py-3 text-gray-600 max-w-[160px] truncate">{po.product}</td>
-                          <td className="px-4 py-3">{(() => { const sc = STATUS_CONFIG[po.status]; return <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-semibold text-[10px] border ${sc.bg} ${sc.text} ${sc.border}`}><span className={`w-1.5 h-1.5 rounded-full ${sc.dot}`} />{po.status}</span> })()}</td>
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {(() => { const sc = STATUS_CONFIG[po.status]; return <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-semibold text-[10px] border ${sc.bg} ${sc.text} ${sc.border}`}><span className={`w-1.5 h-1.5 rounded-full ${sc.dot}`} />{po.status}</span> })()}
+                              {isPredictedToSlip(po, pred) && <PredictedToSlipChip />}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3">{pred ? <RiskPill pred={pred} /> : <span className="text-[10px] text-gray-300">—</span>}</td>
                           <td className="px-4 py-3">
                             <div className="font-medium text-gray-800">{formatDate(po.expectedDelivery)}</div>
                             <div className={`text-[10px] mt-0.5 ${diffDays < 0 ? 'text-red-500' : diffDays <= 7 ? 'text-amber-500' : 'text-gray-400'}`}>{relLabel}</div>
                             {po.revisedDelivery && <div className="text-[10px] text-orange-500 mt-0.5">→ {formatDate(po.revisedDelivery)}</div>}
                           </td>
-                          <td className="px-4 py-3"><EstDeliveryPill po={po} /></td>
+                          <td className="px-4 py-3">
+                            {pred ? (
+                              <>
+                                <div className="font-medium text-gray-800">{formatDate(pred.predictedLandingDate)}</div>
+                                {gap > 2
+                                  ? <div className={`text-[10px] mt-0.5 font-semibold ${gapCls}`}>{gap}d later than plan</div>
+                                  : <div className="text-[10px] mt-0.5 text-green-600">On plan</div>}
+                              </>
+                            ) : <span className="text-[10px] text-gray-300">—</span>}
+                          </td>
                           <td className="px-4 py-3 text-gray-700 font-medium">{po.orderValue}</td>
                           <td className="px-4 py-3"><span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${po.freight === 'Air' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>{po.freight}</span></td>
                         </tr>
@@ -11324,7 +11231,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                     })}
                   </tbody>
                 </table>
-                {filtered.length === 0 && <div className="text-center text-xs text-gray-400 py-10">No POs match the selected filters</div>}
+                {ordered.length === 0 && <div className="text-center text-xs text-gray-400 py-10">No POs match the selected filters</div>}
               </div>
             </div>
           )
@@ -11367,11 +11274,16 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
               <div className="bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden">
                 <table className="w-full text-xs">
                   <thead className="bg-gray-50 border-b border-gray-100">
-                    <tr>{['Supplier','Category','On-Time Rate','Avg Delay','Open POs','Lead Time','Trend','Status'].map(h => <th key={h} className="px-4 py-3 text-left font-semibold text-gray-500 whitespace-nowrap">{h}</th>)}</tr>
+                    <tr>{['Supplier','Category','On-Time Rate','Open PO risk','Avg Delay','Open POs','Lead Time','Trend','Status'].map(h => <th key={h} className="px-4 py-3 text-left font-semibold text-gray-500 whitespace-nowrap">{h}</th>)}</tr>
                   </thead>
                   <tbody className="divide-y divide-gray-50">
                     {SUPPLIERS.map(s => {
                       const atRisk = s.onTimeRate < 75 || s.trend === 'deteriorating'
+                      // Forward-looking: how many of this supplier's OPEN POs the model predicts at risk.
+                      const openPreds = ALL_POS.filter(p => p.supplierId === s.id).map(p => PO_PREDICTIONS[p.id]).filter(Boolean) as PoPrediction[]
+                      const atRiskOpen = openPreds.filter(p => p.riskBand !== 'Low').length
+                      const riskShare = openPreds.length > 0 ? atRiskOpen / openPreds.length : 0
+                      const riskCls = riskShare >= 0.5 ? 'text-red-700' : riskShare >= 0.25 ? 'text-amber-700' : 'text-gray-500'
                       return (
                         <tr key={s.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => setSelectedSupplierId(s.id)}>
                           <td className="px-4 py-3 font-semibold text-indigo-700 hover:text-indigo-900">{s.name}</td>
@@ -11381,6 +11293,13 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                               <div className="w-16 h-1.5 rounded-full bg-gray-100 overflow-hidden"><div className={`h-full rounded-full ${s.onTimeRate >= 85 ? 'bg-green-500' : s.onTimeRate >= 75 ? 'bg-amber-400' : 'bg-red-500'}`} style={{ width: `${s.onTimeRate}%` }} /></div>
                               <span className={`font-semibold ${s.onTimeRate >= 85 ? 'text-green-700' : s.onTimeRate >= 75 ? 'text-amber-700' : 'text-red-700'}`}>{s.onTimeRate}%</span>
                             </div>
+                          </td>
+                          <td className="px-4 py-3">
+                            {openPreds.length > 0 ? (
+                              <span className={`font-semibold ${riskCls}`} title="Forward-looking: open POs the model predicts will slip (distinct from historic OTR)">
+                                {atRiskOpen} of {openPreds.length} at risk
+                              </span>
+                            ) : <span className="text-gray-300">—</span>}
                           </td>
                           <td className="px-4 py-3 text-gray-600">{s.avgDelayDays}d</td>
                           <td className="px-4 py-3 text-gray-600">{s.openPOs}</td>
