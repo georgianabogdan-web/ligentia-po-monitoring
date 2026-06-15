@@ -63,6 +63,44 @@ interface PO {
   freight: 'Sea' | 'Air'
   handledBy: 'agent' | 'human'
   targetStockDate?: string  // ISO; when stock is needed to hit plan (drives missed-sales risk)
+  dateChanges?: DateChangeRecord[]  // who caused each date move + why (governs CPR legitimacy)
+}
+
+// ── Date-change fault attribution ─────────────────────────────────────────────
+// Who caused a date move governs whether a cost-price-reduction (CPR) claim
+// against the supplier is legitimate. This is buyer-entered judgement, not a
+// verified fact — see the data-quality caveat surfaced in the UI.
+type ChangeCausedBy = 'supplier' | 'buyer' | 'unknown'
+type DateChangeReasonCode =
+  | 'capacity' | 'raw_material' | 'customs'          // supplier-side
+  | 'no_fit_model' | 'late_sample_signoff' | 'spec_change'  // buyer-side
+  | 'other'
+const REASON_CODES: Record<ChangeCausedBy, { code: DateChangeReasonCode; label: string }[]> = {
+  supplier: [
+    { code: 'capacity',     label: 'Factory capacity constraint' },
+    { code: 'raw_material', label: 'Raw-material / yarn shortage' },
+    { code: 'customs',      label: 'Customs / clearance delay' },
+    { code: 'other',        label: 'Other (supplier-side)' },
+  ],
+  buyer: [
+    { code: 'no_fit_model',       label: 'No fit model available' },
+    { code: 'late_sample_signoff',label: 'Late sample sign-off' },
+    { code: 'spec_change',        label: 'Spec change requested' },
+    { code: 'other',              label: 'Other (buyer-side)' },
+  ],
+  unknown: [
+    { code: 'other', label: 'Reason not yet recorded' },
+  ],
+}
+interface DateChangeRecord {
+  id:         string
+  fromDate:   string   // ISO
+  toDate:     string   // ISO
+  days:       number   // slip in days (positive = later)
+  causedBy:   ChangeCausedBy
+  reasonCode: DateChangeReasonCode
+  reason:     string   // free text
+  at:         string   // ISO timestamp the change was logged
 }
 
 interface ActionItem {
@@ -319,6 +357,53 @@ const DELIVERY_STATUS_CFG: Record<DeliveryStatus, { bg: string; text: string; bo
   critical: { bg: 'bg-red-50',    text: 'text-red-700',    border: 'border-red-200',    label: d => `${d}d late` },
 }
 
+// Sum a PO's date-slip by who caused it. `override` lets the demo dropdown reassign
+// causedBy/reason for a given change id without mutating the seed data.
+interface SlipAttribution {
+  supplierDays: number
+  buyerDays:    number
+  unknownDays:  number
+  totalDays:    number
+  dominant:     ChangeCausedBy | null
+  buyerCaused:  boolean   // buyer-caused days strictly exceed supplier-caused
+  changes:      DateChangeRecord[]
+}
+type AttributionOverride = Record<string, { causedBy: ChangeCausedBy; reasonCode: DateChangeReasonCode }>
+function slipAttribution(po: { dateChanges?: DateChangeRecord[] }, override?: AttributionOverride): SlipAttribution {
+  const changes = (po.dateChanges ?? []).map(c => {
+    const o = override?.[c.id]
+    return o ? { ...c, causedBy: o.causedBy, reasonCode: o.reasonCode } : c
+  })
+  let supplierDays = 0, buyerDays = 0, unknownDays = 0
+  for (const c of changes) {
+    if (c.causedBy === 'supplier') supplierDays += c.days
+    else if (c.causedBy === 'buyer') buyerDays += c.days
+    else unknownDays += c.days
+  }
+  const totalDays = supplierDays + buyerDays + unknownDays
+  const dominant: ChangeCausedBy | null = totalDays === 0 ? null
+    : (buyerDays > supplierDays && buyerDays >= unknownDays) ? 'buyer'
+    : (supplierDays >= buyerDays && supplierDays >= unknownDays) ? 'supplier'
+    : 'unknown'
+  return { supplierDays, buyerDays, unknownDays, totalDays, dominant, buyerCaused: buyerDays > supplierDays, changes }
+}
+// Aggregate attribution across a group of POs.
+function groupSlipAttribution(pos: { dateChanges?: DateChangeRecord[] }[], override?: AttributionOverride): SlipAttribution {
+  const merged = pos.flatMap(p => slipAttribution(p, override).changes)
+  let supplierDays = 0, buyerDays = 0, unknownDays = 0
+  for (const c of merged) {
+    if (c.causedBy === 'supplier') supplierDays += c.days
+    else if (c.causedBy === 'buyer') buyerDays += c.days
+    else unknownDays += c.days
+  }
+  const totalDays = supplierDays + buyerDays + unknownDays
+  const dominant: ChangeCausedBy | null = totalDays === 0 ? null
+    : (buyerDays > supplierDays && buyerDays >= unknownDays) ? 'buyer'
+    : (supplierDays >= buyerDays && supplierDays >= unknownDays) ? 'supplier'
+    : 'unknown'
+  return { supplierDays, buyerDays, unknownDays, totalDays, dominant, buyerCaused: buyerDays > supplierDays, changes: merged }
+}
+
 function EstDeliveryPill({ po, size = 'sm' }: { po: { expectedDelivery: string; revisedDelivery?: string; status: string }; size?: 'sm' | 'md' }) {
   const est = getEstimatedDelivery(po)
   const cfg = DELIVERY_STATUS_CFG[est.status]
@@ -531,12 +616,30 @@ const SUPPLIER_EMAILS: Record<string, string> = {
 
 const ALL_POS: PO[] = [
   // Ex-Factory Delays — human needed
-  { id: 'PO-2756', supplierId: 'ET', product: 'Beach Shorts Collection',   category: "Women's Apparel", createdOn: '01/12/25', expectedDelivery: '2026-04-08', status: 'Ex-factory delay',      priority: true,  quantity: 1200, skus: 14, orderValue: '£12,400', freight: 'Sea', handledBy: 'human' },
-  { id: 'PO-2834', supplierId: 'ET', product: 'Linen Summer Dresses',      category: "Women's Apparel", createdOn: '15/12/25', expectedDelivery: '2026-04-14', status: 'Ex-factory delay',      priority: false, quantity: 800,  skus: 8,  orderValue: '£18,200', freight: 'Sea', handledBy: 'human' },
-  { id: 'PO-2891', supplierId: 'SS', product: 'Floral Maxi Dress',         category: "Women's Apparel", createdOn: '05/01/26', expectedDelivery: '2026-04-19', status: 'Ex-factory delay',      priority: true,  quantity: 950,  skus: 6,  orderValue: '£22,800', freight: 'Sea', handledBy: 'human' },
+  { id: 'PO-2756', supplierId: 'ET', product: 'Beach Shorts Collection',   category: "Women's Apparel", createdOn: '01/12/25', expectedDelivery: '2026-04-08', status: 'Ex-factory delay',      priority: true,  quantity: 1200, skus: 14, orderValue: '£12,400', freight: 'Sea', handledBy: 'human',
+    dateChanges: [
+      { id: 'dc-2756-1', fromDate: '2026-03-19', toDate: '2026-03-25', days: 6,  causedBy: 'supplier', reasonCode: 'capacity',     reason: 'Factory line shared with another retailer order.', at: '2026-03-12T09:00:00Z' },
+      { id: 'dc-2756-2', fromDate: '2026-03-25', toDate: '2026-04-08', days: 14, causedBy: 'buyer',    reasonCode: 'spec_change',   reason: 'Buyer requested a colourway change after sealing — production reset.', at: '2026-03-26T14:00:00Z' },
+    ] },
+  { id: 'PO-2834', supplierId: 'ET', product: 'Linen Summer Dresses',      category: "Women's Apparel", createdOn: '15/12/25', expectedDelivery: '2026-04-14', status: 'Ex-factory delay',      priority: false, quantity: 800,  skus: 8,  orderValue: '£18,200', freight: 'Sea', handledBy: 'human',
+    dateChanges: [
+      { id: 'dc-2834-1', fromDate: '2026-04-01', toDate: '2026-04-05', days: 4, causedBy: 'supplier', reasonCode: 'raw_material',        reason: 'Linen base cloth arrived late from mill.', at: '2026-03-28T10:00:00Z' },
+      { id: 'dc-2834-2', fromDate: '2026-04-05', toDate: '2026-04-14', days: 9, causedBy: 'buyer',    reasonCode: 'late_sample_signoff', reason: 'Fit sample sat with buying team 9 days before sign-off.', at: '2026-04-02T16:00:00Z' },
+    ] },
+  { id: 'PO-2891', supplierId: 'SS', product: 'Floral Maxi Dress',         category: "Women's Apparel", createdOn: '05/01/26', expectedDelivery: '2026-04-19', status: 'Ex-factory delay',      priority: true,  quantity: 950,  skus: 6,  orderValue: '£22,800', freight: 'Sea', handledBy: 'human',
+    dateChanges: [
+      { id: 'dc-2891-1', fromDate: '2026-04-05', toDate: '2026-04-19', days: 14, causedBy: 'supplier', reasonCode: 'raw_material', reason: 'Dye-lot QC failure — replacement lot re-sourced (40% of batch).', at: '2026-04-10T16:00:00Z' },
+    ] },
   // Date Change Requests — human needed
-  { id: 'PO-2901', supplierId: 'NK', product: 'Cotton Knit Jumpers',       category: 'Knitwear',        createdOn: '20/12/25', expectedDelivery: '2026-04-20', revisedDelivery: '2026-04-27', status: 'Date change required', priority: false, quantity: 600,  skus: 10, orderValue: '£14,400', freight: 'Sea', handledBy: 'human' },
-  { id: 'PO-2845', supplierId: 'TB', product: 'Ankle Strap Heels',         category: 'Footwear',        createdOn: '10/01/26', expectedDelivery: '2026-04-22', revisedDelivery: '2026-05-09', status: 'Date change required', priority: false, quantity: 600,  skus: 8,  orderValue: '£21,000', freight: 'Sea', handledBy: 'human' },
+  { id: 'PO-2901', supplierId: 'NK', product: 'Cotton Knit Jumpers',       category: 'Knitwear',        createdOn: '20/12/25', expectedDelivery: '2026-04-20', revisedDelivery: '2026-04-27', status: 'Date change required', priority: false, quantity: 600,  skus: 10, orderValue: '£14,400', freight: 'Sea', handledBy: 'human',
+    dateChanges: [
+      { id: 'dc-2901-1', fromDate: '2026-04-20', toDate: '2026-04-27', days: 7, causedBy: 'supplier', reasonCode: 'raw_material', reason: 'Yarn mill mechanical failure — yarn receipt delayed 10 days.', at: '2026-04-03T14:22:00Z' },
+    ] },
+  { id: 'PO-2845', supplierId: 'TB', product: 'Ankle Strap Heels',         category: 'Footwear',        createdOn: '10/01/26', expectedDelivery: '2026-04-22', revisedDelivery: '2026-05-09', status: 'Date change required', priority: false, quantity: 600,  skus: 8,  orderValue: '£21,000', freight: 'Sea', handledBy: 'human',
+    dateChanges: [
+      { id: 'dc-2845-1', fromDate: '2026-04-22', toDate: '2026-04-30', days: 8, causedBy: 'supplier', reasonCode: 'capacity',            reason: 'Portugal line gave priority to another retailer’s spring order.', at: '2026-04-05T09:47:00Z' },
+      { id: 'dc-2845-2', fromDate: '2026-04-30', toDate: '2026-05-09', days: 9, causedBy: 'buyer',    reasonCode: 'late_sample_signoff', reason: 'Heel-height resealed late by buying — 9-day sign-off gap.', at: '2026-04-12T11:00:00Z' },
+    ] },
   // Pre-Dispatch Chases — agent handling
   { id: 'PO-2976', supplierId: 'UF', product: 'Canvas Lo-Top Trainers',    category: 'Footwear',        createdOn: '14/02/26', expectedDelivery: '2026-04-30', status: 'Late DC booking',    priority: true,  quantity: 1500, skus: 18, orderValue: '£37,500', freight: 'Sea', handledBy: 'agent' },
   { id: 'PO-2988', supplierId: 'LL', product: 'Mini Crossbody Bags',       category: 'Accessories',     createdOn: '20/02/26', expectedDelivery: '2026-04-28', status: 'Late DC booking',    priority: false, quantity: 320,  skus: 4,  orderValue: '£28,800', freight: 'Air', handledBy: 'agent' },
@@ -1444,12 +1547,86 @@ function ActionCardPills({ group, supplier, size = 'sm' }: {
 
 // ── Shared ActionRecommendationRow — horizontal row of action cards (recommended on left + alternatives) ──
 type ActionOption = {
-  key:         string
-  label:       string
-  consequence: string
-  why?:        string
-  onClick:     () => void
+  key:            string
+  label:          string
+  consequence:    string
+  why?:           string
+  onClick:        () => void
+  notRecommended?: string   // if set, card is marked "Not recommended" + this rationale, but stays clickable
 }
+// Date-change attribution: per-PO history (who/why), running tally, editable
+// causedBy/reason dropdowns (demo), and an honest data-quality caveat.
+function DateChangeAttribution({ pos, override, onChange }: {
+  pos:      PO[]
+  override: AttributionOverride
+  onChange: (changeId: string, causedBy: ChangeCausedBy, reasonCode: DateChangeReasonCode) => void
+}) {
+  const withChanges = pos.filter(p => (p.dateChanges?.length ?? 0) > 0)
+  if (withChanges.length === 0) return null
+  const agg = groupSlipAttribution(withChanges, override)
+  const causedByCls = (c: ChangeCausedBy) =>
+    c === 'supplier' ? 'bg-red-100 text-red-700' : c === 'buyer' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-500'
+  return (
+    <div className="border border-gray-200 rounded-xl bg-white mb-3">
+      <div className="px-3.5 py-2.5 border-b border-gray-100 flex items-center justify-between">
+        <span className="text-[11px] font-bold text-gray-700 uppercase tracking-wide">Date-change history</span>
+        <span className="inline-flex items-center gap-1 text-[10px] text-gray-400" title="Attribution is buyer-entered judgement, not a verified fact. Users sometimes pick the first reason in the list — treat fault as a claim to check, not proof. The system cannot verify who was at fault on its own.">
+          <Info className="w-3 h-3" /> only as reliable as the reason entered
+        </span>
+      </div>
+      {/* Running tally */}
+      <div className="px-3.5 py-2 flex items-center gap-3 flex-wrap border-b border-gray-50 bg-gray-50/40">
+        <span className="text-[11px] font-semibold text-red-700">Supplier-caused slip: {agg.supplierDays}d</span>
+        <span className="text-[11px] font-semibold text-indigo-700">Buyer-caused: {agg.buyerDays}d</span>
+        {agg.unknownDays > 0 && <span className="text-[11px] font-semibold text-gray-500">Unattributed: {agg.unknownDays}d</span>}
+        {agg.dominant && (
+          <span className={`ml-auto text-[10px] font-bold px-2 py-0.5 rounded-full ${causedByCls(agg.dominant)}`}>
+            {agg.dominant === 'buyer' ? 'Net buyer-caused' : agg.dominant === 'supplier' ? 'Net supplier-caused' : 'Unattributed'}
+          </span>
+        )}
+      </div>
+      <div className="divide-y divide-gray-50">
+        {withChanges.flatMap(po => (po.dateChanges ?? []).map(dc => {
+          const eff = override[dc.id] ?? { causedBy: dc.causedBy, reasonCode: dc.reasonCode }
+          return (
+            <div key={dc.id} className="px-3.5 py-2.5">
+              <div className="flex items-center gap-2 mb-1 flex-wrap">
+                <span className="font-mono text-[10px] text-gray-500">{po.id}</span>
+                <span className="text-[11px] text-gray-700">{formatDate(dc.fromDate)} → {formatDate(dc.toDate)}</span>
+                <span className="text-[10px] font-bold text-gray-800">+{dc.days}d</span>
+                <div className="ml-auto flex items-center gap-1.5">
+                  {/* causedBy dropdown */}
+                  <select
+                    value={eff.causedBy}
+                    onChange={e => {
+                      const cb = e.target.value as ChangeCausedBy
+                      onChange(dc.id, cb, REASON_CODES[cb][0].code)
+                    }}
+                    className={`h-6 rounded text-[10px] font-semibold px-1.5 border-0 focus:outline-none focus:ring-1 focus:ring-indigo-400 ${causedByCls(eff.causedBy)}`}
+                  >
+                    <option value="supplier">Supplier</option>
+                    <option value="buyer">Buyer</option>
+                    <option value="unknown">Unknown</option>
+                  </select>
+                  {/* reasonCode dropdown */}
+                  <select
+                    value={eff.reasonCode}
+                    onChange={e => onChange(dc.id, eff.causedBy, e.target.value as DateChangeReasonCode)}
+                    className="h-6 rounded text-[10px] text-gray-600 px-1.5 border border-gray-200 focus:outline-none focus:ring-1 focus:ring-indigo-400 max-w-[180px]"
+                  >
+                    {REASON_CODES[eff.causedBy].map(r => <option key={r.code} value={r.code}>{r.label}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div className="text-[10px] text-gray-400 italic leading-snug">{dc.reason}</div>
+            </div>
+          )
+        }))}
+      </div>
+    </div>
+  )
+}
+
 function ActionRecommendationRow({
   options,
   recommendedKey,
@@ -1476,13 +1653,16 @@ function ActionRecommendationRow({
         style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}
       >
         {options.map(opt => {
-          const isRecommended = opt.key === recommendedKey
+          const blocked       = !!opt.notRecommended
+          const isRecommended = opt.key === recommendedKey && !blocked
           const isSelected    = selectedKey === opt.key
           // Accent-only treatment: recommended uses green border + badge + check (no fill).
-          // Selected (whether recommended or alternative) overlays a subtle indigo ring + tint.
-          const baseCls = 'bg-white text-gray-800 hover:bg-gray-50'
+          // Selected overlays a subtle indigo ring. "Not recommended" cards are muted +
+          // tagged but remain clickable (the user keeps the freedom to override).
+          const baseCls = blocked ? 'bg-gray-50 text-gray-500 hover:bg-gray-100' : 'bg-white text-gray-800 hover:bg-gray-50'
           const borderCls = isRecommended
             ? 'border-green-500 border-[1.5px]'
+            : blocked ? 'border-gray-200 border border-dashed'
             : 'border-gray-200 border'
           const selectedCls = isSelected ? 'ring-2 ring-indigo-300 ring-offset-1 bg-indigo-50/40' : ''
           return (
@@ -1496,13 +1676,21 @@ function ActionRecommendationRow({
                   Recommended
                 </span>
               )}
-              <div className={`flex items-center gap-1 ${isRecommended ? 'pr-16' : ''}`}>
+              {blocked && (
+                <span className="absolute top-2 right-2 inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-gray-200 text-gray-500">
+                  Not recommended
+                </span>
+              )}
+              <div className={`flex items-center gap-1 ${(isRecommended || blocked) ? 'pr-20' : ''}`}>
                 {isRecommended && <Check className="w-3 h-3 text-green-600 shrink-0" />}
-                <span className={`text-[12px] leading-tight ${isRecommended ? 'font-semibold text-gray-900' : 'font-medium text-gray-800'}`}>{opt.label}</span>
+                <span className={`text-[12px] leading-tight ${isRecommended ? 'font-semibold text-gray-900' : blocked ? 'font-medium text-gray-500' : 'font-medium text-gray-800'}`}>{opt.label}</span>
               </div>
-              <div className="text-[10px] mt-1.5 leading-snug text-gray-500">{opt.consequence}</div>
+              <div className={`text-[10px] mt-1.5 leading-snug ${blocked ? 'text-gray-400' : 'text-gray-500'}`}>{opt.consequence}</div>
               {isRecommended && opt.why && (
                 <div className="text-[10px] italic mt-2 leading-snug text-gray-500">{opt.why}</div>
+              )}
+              {blocked && (
+                <div className="text-[10px] italic mt-2 leading-snug text-gray-400">{opt.notRecommended}</div>
               )}
             </button>
           )
@@ -8949,7 +9137,8 @@ function getPORecommendation(
   sup: Supplier,
   maxDaysOverdue: number,
   orderVal: number,
-  cprPct: number
+  cprPct: number,
+  buyerCausedSlip: boolean = false  // when the recorded slip is buyer-caused, CPR is not appropriate
 ): PORecommendation {
   const coverWeeks = SUPPLIER_COVER_WEEKS[sup.id] ?? 6
   const cprSaving  = Math.round(orderVal * cprPct / 100)
@@ -8983,13 +9172,25 @@ function getPORecommendation(
     }
   }
 
-  if (coverWeeks < 4 && sup.onTimeRate >= 70) {
+  if (coverWeeks < 4 && sup.onTimeRate >= 70 && !buyerCausedSlip) {
     return {
       action: 'cpr',
       primaryLabel: 'Request CPR ' + cprPct + '% (+£' + cprSaving.toLocaleString() + ' margin)',
       primaryForecast: 'Margin recovered: +£' + cprSaving.toLocaleString() + ' · ' + sup.name + ' relationship manageable',
       rationale: 'Cover is low at ' + coverWeeks + ' weeks -- you need this stock, but the ' + maxDaysOverdue + 'd delay warrants a commercial concession. A ' + cprPct + '% CPR recovers £' + cprSaving.toLocaleString() + ' and is proportionate given ' + sup.name + '\'s ' + sup.onTimeRate + '% OTR.',
       altOptions: ALL_OPTS.filter(o => o.key !== 'cpr'),
+    }
+  }
+
+  // Buyer-caused slip with low cover: we still need the stock, but a CPR claim isn't
+  // legitimate when the delay was our own fault — recommend chasing/expediting instead.
+  if (coverWeeks < 4 && sup.onTimeRate >= 70 && buyerCausedSlip) {
+    return {
+      action: 'chase',
+      primaryLabel: 'Chase / expedite (24h deadline)',
+      primaryForecast: 'Supplier notified · Recover lead time without a CPR claim',
+      rationale: 'Cover is low at ' + coverWeeks + ' weeks, but the recorded slip is buyer-caused — a CPR claim against ' + sup.name + ' is not appropriate. Chase to expedite and protect the relationship.',
+      altOptions: ALL_OPTS.filter(o => o.key !== 'chase'),
     }
   }
 
@@ -9371,6 +9572,9 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
   const [urgencyFilter,    setUrgencyFilter]    = useState('all')
   const [sortMode,         setSortMode]         = useState<'missed_sales' | 'value' | 'overdue'>('missed_sales')
   const [drawerDecision,   setDrawerDecision]   = useState<Record<string, 'cancel' | 'cpr' | 'accept_late'>>({})
+  // Demo: lets the user reassign who caused a date change (by change id) → re-derives
+  // attribution and flips the CPR recommendation live.
+  const [dateChangeOverrides, setDateChangeOverrides] = useState<AttributionOverride>({})
   const [proposedMutations,setProposedMutations]= useState<Record<string, Array<{poId:string;field:string;oldVal:string;newVal:string}>>>({})
   const [selectedActionPill,setSelectedActionPill]= useState<Record<string,string>>({})
   const [drawerView,        setDrawerView]        = useState<'action' | 'po-detail'>('action')
@@ -10522,7 +10726,9 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                 </>
                               )
                             })() : drawerGroup.type === 'overdue' ? (() => {
-                              const poRec = getPORecommendation(drawerGroup, drawerSup, drawerMaxOverdue, drawerOrderVal, cprPct)
+                              const slipAttr = groupSlipAttribution(drawerGroup.pos, dateChangeOverrides)
+                              const buyerCaused = slipAttr.buyerCaused
+                              const poRec = getPORecommendation(drawerGroup, drawerSup, drawerMaxOverdue, drawerOrderVal, cprPct, buyerCaused)
                               const pattern = getRelationshipPattern(drawerSup)
                               const recBg = pattern === 'structural' ? 'bg-red-50 border-red-200' : pattern === 'concentration' ? 'bg-amber-50 border-amber-200' : 'bg-indigo-50 border-indigo-100'
                               const recHd = pattern === 'structural' ? 'text-red-800' : pattern === 'concentration' ? 'text-amber-800' : 'text-indigo-800'
@@ -10560,6 +10766,10 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                       return fallback
                                     }
 
+                                    // Fault attribution feeds the written rationale (req 4).
+                                    const attrNote = slipAttr.totalDays > 0
+                                      ? ` Recorded slip: ${slipAttr.supplierDays}d supplier-caused, ${slipAttr.buyerDays}d buyer-caused${buyerCaused ? ' — net buyer-caused, so a CPR claim is not appropriate here' : ''}.`
+                                      : ''
                                     const allOpts = [
                                       { key: poRec.action, label: poRec.primaryLabel, consequence: refinedConsequence(poRec.action, poRec.primaryForecast), why: undefined as string | undefined },
                                       ...poRec.altOptions.map(o => ({ key: o.key, label: o.label, consequence: refinedConsequence(o.key, o.forecast), why: undefined as string | undefined })),
@@ -10576,13 +10786,22 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                     const selectedKey = drawerCurrentPill === 'chase' ? 'chase' : drawerDecChoice
                                     return (
                                       <>
+                                        <DateChangeAttribution
+                                          pos={drawerGroup.pos}
+                                          override={dateChangeOverrides}
+                                          onChange={(id, causedBy, reasonCode) => setDateChangeOverrides(prev => ({ ...prev, [id]: { causedBy, reasonCode } }))}
+                                        />
                                         <div className="mb-3">
                                           <div className="text-[13px] font-semibold text-gray-900">Next step</div>
                                           <div className="text-[11px] text-gray-500 mt-0.5">Recommended: {recLbl}</div>
-                                          <p className="text-[12px] text-gray-700 leading-relaxed mt-2">{rationale}</p>
+                                          <p className="text-[12px] text-gray-700 leading-relaxed mt-2">{rationale}{attrNote}</p>
                                         </div>
                                         <ActionRecommendationRow
-                                          options={allOpts.map(o => ({ key: o.key, label: o.label, consequence: o.consequence, why: o.why, onClick: () => pickOverdue(o.key) }))}
+                                          options={allOpts.map(o => ({
+                                            key: o.key, label: o.label, consequence: o.consequence, why: o.why,
+                                            onClick: () => pickOverdue(o.key),
+                                            notRecommended: (o.key === 'cpr' && buyerCaused) ? 'Delay was buyer-caused — CPR not appropriate. You can still send it.' : undefined,
+                                          }))}
                                           recommendedKey={poRec.action}
                                           selectedKey={selectedKey}
                                         />
@@ -10688,12 +10907,21 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                         if (!drawerCardKey) return
                                         setSelectedActionPill(prev => ({ ...prev, [drawerCardKey]: k }))
                                       }
+                                      const atRiskAttr = groupSlipAttribution(drawerGroup.pos, dateChangeOverrides)
+                                      const atRiskAttrNote = atRiskAttr.totalDays > 0
+                                        ? ` Recorded slip: ${atRiskAttr.supplierDays}d supplier-caused, ${atRiskAttr.buyerDays}d buyer-caused.`
+                                        : ''
                                       return (
                                         <>
+                                          <DateChangeAttribution
+                                            pos={drawerGroup.pos}
+                                            override={dateChangeOverrides}
+                                            onChange={(id, causedBy, reasonCode) => setDateChangeOverrides(prev => ({ ...prev, [id]: { causedBy, reasonCode } }))}
+                                          />
                                           <div className="mb-3">
                                             <div className="text-[13px] font-semibold text-gray-900">Next step</div>
                                             <div className="text-[11px] text-gray-500 mt-0.5">Recommended: {recLbl}</div>
-                                            <p className="text-[12px] text-gray-700 leading-relaxed mt-2">{rationale}</p>
+                                            <p className="text-[12px] text-gray-700 leading-relaxed mt-2">{rationale}{atRiskAttrNote}</p>
                                           </div>
                                           <ActionRecommendationRow
                                             options={allOpts.map(o => ({ key: o.key, label: o.label, consequence: o.consequence, why: o.why, onClick: () => pickAtRisk(o.key) }))}
