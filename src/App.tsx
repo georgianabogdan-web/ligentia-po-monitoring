@@ -3563,8 +3563,8 @@ const SUPPLIER_STATUS_CFG: Record<SupplierStatus, { label: string; bg: string; t
 function BuyStatusChip({ status, className = '' }: { status: BuyStatus; className?: string }) {
   const c = BUY_STATUS_CFG[status]
   return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold border ${c.bg} ${c.text} ${c.border} ${className}`}>
-      <Building2 className="w-2.5 h-2.5" />
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold border whitespace-nowrap ${c.bg} ${c.text} ${c.border} ${className}`}>
+      <Building2 className="w-2.5 h-2.5 shrink-0" />
       <span className="font-bold opacity-60">Buy:</span> {c.label}
     </span>
   )
@@ -3573,8 +3573,8 @@ function BuyStatusChip({ status, className = '' }: { status: BuyStatus; classNam
 function SupplierStatusChip({ status, className = '' }: { status: SupplierStatus; className?: string }) {
   const c = SUPPLIER_STATUS_CFG[status]
   return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border ${c.bg} ${c.text} ${c.border} ${className}`}>
-      <Mail className="w-2.5 h-2.5" />
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border whitespace-nowrap ${c.bg} ${c.text} ${c.border} ${className}`}>
+      <Mail className="w-2.5 h-2.5 shrink-0" />
       <span className="font-bold opacity-60">Supplier:</span> {c.label}
     </span>
   )
@@ -8073,6 +8073,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                     <th className="sticky z-20 bg-gray-50 text-left px-3 py-3 font-semibold text-gray-500 whitespace-nowrap" style={{ left: 236, minWidth: 104 }}>Category</th>
                     <th className="sticky z-20 bg-indigo-50 text-right px-3 py-3 font-bold text-indigo-700 whitespace-nowrap border-l border-indigo-100" style={{ left: 340, minWidth: 100 }}>Reorder qty</th>
                     <th className="sticky z-20 bg-indigo-50 text-right px-3 py-3 font-bold text-indigo-700 whitespace-nowrap border-x border-indigo-100" style={{ left: 440, minWidth: 130, boxShadow: '2px 0 4px -1px rgba(0,0,0,0.06)' }}>Total reorder cost</th>
+                    <th className="text-left px-3 py-3 font-semibold text-gray-500 whitespace-nowrap" style={{ minWidth: 150 }}>Status</th>
                     <th className="text-left px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Freight</th>
                     <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Selling Price</th>
                     <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Cost Price</th>
@@ -8119,10 +8120,6 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                             <div>
                               <div className="font-semibold text-gray-900 whitespace-nowrap">{p.name}</div>
                               <div className="text-[10px] text-gray-400">{p.sku}</div>
-                              <div className="flex gap-1 flex-wrap mt-1">
-                                <BuyStatusChip status={buyStatusOf(curSt)} />
-                                <SupplierStatusChip status={p.supplierStatus} />
-                              </div>
                             </div>
                           </div>
                         </td>
@@ -8132,6 +8129,12 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                         </td>
                         <td className="sticky z-10 px-3 py-2 text-right font-bold text-indigo-700 text-sm" style={{ left: 440, backgroundColor: stickyBg, boxShadow: '2px 0 4px -1px rgba(0,0,0,0.06)' }}>
                           £{p.totalCost.toLocaleString()}
+                        </td>
+                        <td className="px-3 py-2">
+                          <div className="flex flex-col gap-1 items-start">
+                            <BuyStatusChip status={buyStatusOf(curSt)} />
+                            <SupplierStatusChip status={p.supplierStatus} />
+                          </div>
                         </td>
                         <td className="px-3 py-2">
                           <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border whitespace-nowrap ${
@@ -8235,7 +8238,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                   })}
                   {filteredRows.length === 0 && (
                     <tr>
-                      <td colSpan={20} className="px-3 py-12 text-center">
+                      <td colSpan={22} className="px-3 py-12 text-center">
                         <div className="text-sm text-gray-500">No reorder lines match the current filters.</div>
                         <div className="text-[11px] text-gray-400 mt-1.5">Each line tracks two things in parallel: Buy status (internal approval) and Supplier status (negotiation).</div>
                       </td>
