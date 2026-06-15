@@ -1700,36 +1700,44 @@ function ActionRecommendationRow({
   )
 }
 
-// ── Supplier session workspace — bulk negotiation across multiple SKUs ──────
-function SupplierSessionWorkspace({
-  session,
-  onClose,
-  onOpenThread,
-  onViewSupplierHistory,
-  onUpdateSession,
-  onLogActivity,
-}: {
-  session:                SupplierSession
-  onClose:                () => void
-  onOpenThread:           (threadId: string) => void
-  onViewSupplierHistory?: () => void
-  onUpdateSession?:       (s: SupplierSession) => void
-  onLogActivity?:         (kind: ActivityKind, text: string) => void
-}) {
-  const supplierName = session.supplierId
-  const supplierObj  = SUPPLIERS.find(s => s.name === supplierName)
-  const threads      = session.threadIds.map(id => REORDER_RECOMMENDATIONS.find(r => r.id === id)).filter(Boolean) as typeof REORDER_RECOMMENDATIONS
-  const totalValue   = threads.reduce((s, t) => s + (t.recommendedReorderQty * t.costPrice), 0)
+// ── Shared session derivation — one source of truth for line status + agent
+// recommendation, consumed by BOTH the detailed SupplierSessionWorkspace and the
+// dense BulkNegotiationsView. The bulk view is a presentation layer over this,
+// never a fork of the logic. ──────────────────────────────────────────────────
+type NegRecAction = 'Apply' | 'Counter' | 'Escalate' | '—'
+interface SessionLineView {
+  rec:        ReorderRecommendation
+  response:   SessionRoundResponse | undefined
+  statusLbl:  string
+  statusCls:  string
+  cpDisplay:  string
+  recAction:  NegRecAction
+  outcome:    string
+}
+interface DerivedSession {
+  session:       SupplierSession
+  supplierName:  string
+  supplierObj:   Supplier | undefined
+  supplierEmail: string
+  threads:       ReorderRecommendation[]
+  totalValue:    number
+  latestRound:   SessionRound | undefined
+  latestInbound: SessionRound['inbound']
+  lines:         SessionLineView[]
+}
+function deriveSession(session: SupplierSession): DerivedSession {
+  const supplierName  = session.supplierId
+  const supplierObj   = SUPPLIERS.find(s => s.name === supplierName)
+  const threads       = session.threadIds.map(id => REORDER_RECOMMENDATIONS.find(r => r.id === id)).filter(Boolean) as ReorderRecommendation[]
+  const totalValue    = threads.reduce((s, t) => s + (t.recommendedReorderQty * t.costPrice), 0)
   const supplierEmail = SUPPLIER_EMAILS[supplierObj?.id ?? ''] ?? `orders@${supplierName.toLowerCase().replace(/[^a-z]/g, '')}.co.uk`
 
-  // Latest round + inbound per-thread responses for status display
-  const latestRound      = session.rounds[session.rounds.length - 1]
-  const latestInbound    = [...session.rounds].reverse().find(r => r.inbound)?.inbound ?? null
+  const latestRound   = session.rounds[session.rounds.length - 1]
+  const latestInbound = [...session.rounds].reverse().find(r => r.inbound)?.inbound ?? null
   const responsesByThread = new Map<string, SessionRoundResponse>()
   latestInbound?.perThreadResponses.forEach(r => responsesByThread.set(r.threadId, r))
 
-  // Line-table data per SKU
-  const lines = threads.map(t => {
+  const lines: SessionLineView[] = threads.map(t => {
     const resp = responsesByThread.get(t.id)
     let statusLbl = 'Draft'
     let statusCls = 'bg-gray-100 text-gray-600'
@@ -1743,8 +1751,7 @@ function SupplierSessionWorkspace({
     const cpDisplay = offeredCp !== undefined
       ? `£${t.costPrice.toFixed(2)} → £${offeredCp.toFixed(2)}`
       : `£${t.costPrice.toFixed(2)} → —`
-    // Recommended action: simple heuristic from response status
-    let recAction = '—'
+    let recAction: NegRecAction = '—'
     let outcome   = '—'
     if (resp?.status === 'accepted' && offeredCp !== undefined) {
       const margin = +((t.sellingPrice - t.costPrice) / t.sellingPrice * 100 - (t.sellingPrice - offeredCp) / t.sellingPrice * 100).toFixed(1)
@@ -1762,6 +1769,39 @@ function SupplierSessionWorkspace({
     }
     return { rec: t, response: resp, statusLbl, statusCls, cpDisplay, recAction, outcome }
   })
+
+  return { session, supplierName, supplierObj, supplierEmail, threads, totalValue, latestRound, latestInbound, lines }
+}
+
+// Agent-recommended next-step chip — shared across detailed + bulk views.
+const NEG_REC_CHIP: Record<NegRecAction, { label: string; cls: string }> = {
+  Apply:    { label: 'Apply',    cls: 'bg-green-50 text-green-700 border-green-200' },
+  Counter:  { label: 'Counter',  cls: 'bg-amber-50 text-amber-700 border-amber-200' },
+  Escalate: { label: 'Escalate', cls: 'bg-red-50 text-red-700 border-red-200' },
+  '—':      { label: '—',        cls: 'bg-gray-50 text-gray-400 border-gray-200' },
+}
+function NegRecChip({ action }: { action: NegRecAction }) {
+  const c = NEG_REC_CHIP[action]
+  return <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold border ${c.cls}`}>{c.label}</span>
+}
+
+// ── Supplier session workspace — bulk negotiation across multiple SKUs ──────
+function SupplierSessionWorkspace({
+  session,
+  onClose,
+  onOpenThread,
+  onViewSupplierHistory,
+  onUpdateSession,
+  onLogActivity,
+}: {
+  session:                SupplierSession
+  onClose:                () => void
+  onOpenThread:           (threadId: string) => void
+  onViewSupplierHistory?: () => void
+  onUpdateSession?:       (s: SupplierSession) => void
+  onLogActivity?:         (kind: ActivityKind, text: string) => void
+}) {
+  const { supplierName, supplierObj, supplierEmail, threads, totalValue, latestRound, latestInbound, lines } = deriveSession(session)
 
   // Filtering + selection state
   const [filter, setFilter]       = useState<'all' | 'awaiting' | 'reply' | 'draft' | 'rec-accept' | 'rec-counter'>('all')
@@ -5723,6 +5763,175 @@ function ReplyBlock({ reply, rec, cpDeltaColor, cpDeltaLabel, currentMarginPct, 
   )
 }
 
+// ── Bulk Negotiations View — dense, one table per supplier across ALL sessions ──
+// Presentation layer over deriveSession(); for handling 200+ rebuys/week without
+// opening each line one at a time. Tick-through per row, select-all + bulk-approve
+// per supplier, click any row to open the detailed thread.
+function BulkNegotiationsView({
+  sessions, filterText, onOpenThread, onOpenSession,
+}: {
+  sessions:      SupplierSession[]
+  filterText:    string
+  onOpenThread:  (threadId: string) => void
+  onOpenSession: (sessionId: string) => void
+}) {
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [approved, setApproved] = useState<Set<string>>(new Set())
+
+  const q = filterText.trim().toLowerCase()
+  const derived = sessions.map(deriveSession).filter(d =>
+    !q ||
+    d.supplierName.toLowerCase().includes(q) ||
+    d.lines.some(l => l.rec.name.toLowerCase().includes(q) || l.rec.sku.toLowerCase().includes(q) || l.rec.id.toLowerCase().includes(q))
+  )
+
+  const toggleRow = (id: string) => setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
+  const setMany   = (ids: string[], on: boolean) => setSelected(prev => {
+    const n = new Set(prev); ids.forEach(id => on ? n.add(id) : n.delete(id)); return n
+  })
+  const approveMany = (ids: string[]) => { setApproved(prev => new Set([...prev, ...ids])); setSelected(prev => { const n = new Set(prev); ids.forEach(id => n.delete(id)); return n }) }
+
+  const isActionable = (l: SessionLineView) => l.recAction !== '—' && !approved.has(l.rec.id)
+
+  // Global summary
+  const allLines        = derived.flatMap(d => d.lines)
+  const acceptedCount   = allLines.filter(l => l.response?.status === 'accepted').length
+  const counteredCount  = allLines.filter(l => l.response?.status === 'countered' || l.response?.status === 'rejected').length
+  const awaitingCount   = allLines.filter(l => l.recAction === '—').length
+  const actionableAll   = allLines.filter(isActionable).map(l => l.rec.id)
+
+  if (derived.length === 0) {
+    return <div className="border border-gray-200 rounded-2xl bg-white py-16 text-center text-sm text-gray-400">No active negotiations match your filter.</div>
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Global summary + approve-all bar */}
+      <div className="border border-gray-200 rounded-2xl bg-white px-4 py-3 flex items-center gap-3 flex-wrap">
+        <span className="text-[12px] font-bold text-gray-900">{derived.length} supplier{derived.length === 1 ? '' : 's'} · {allLines.length} line{allLines.length === 1 ? '' : 's'}</span>
+        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full border bg-green-50 text-green-700 border-green-200">{acceptedCount} accepted</span>
+        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full border bg-amber-50 text-amber-700 border-amber-200">{counteredCount} countered/rejected</span>
+        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full border bg-blue-50 text-blue-700 border-blue-200">{awaitingCount} awaiting</span>
+        <button
+          disabled={actionableAll.length === 0}
+          onClick={() => approveMany(actionableAll)}
+          className="ml-auto text-[11px] font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-200 disabled:text-gray-400 px-3 py-1.5 rounded-lg transition-colors"
+        >
+          Approve all recommended ({actionableAll.length})
+        </button>
+      </div>
+
+      {/* One table per supplier */}
+      {derived.map(d => {
+        const supLineIds   = d.lines.map(l => l.rec.id)
+        const allSelected  = supLineIds.length > 0 && supLineIds.every(id => selected.has(id))
+        const supSelected  = d.lines.filter(l => selected.has(l.rec.id))
+        const supActionable= d.lines.filter(isActionable).map(l => l.rec.id)
+        // If every selected line shares one recommended action, label the button with it.
+        const selActions   = new Set(supSelected.filter(isActionable).map(l => l.recAction))
+        const uniformAction= selActions.size === 1 ? [...selActions][0] : null
+        const selActionable= supSelected.filter(isActionable).map(l => l.rec.id)
+        const pat          = d.supplierObj ? getRelationshipPattern(d.supplierObj) : null
+        const supAccepted  = d.lines.filter(l => l.response?.status === 'accepted').length
+        const supCountered = d.lines.filter(l => l.response?.status === 'countered' || l.response?.status === 'rejected').length
+        const supAwaiting  = d.lines.filter(l => l.recAction === '—').length
+
+        return (
+          <div key={d.session.id} className="border border-gray-200 rounded-2xl bg-white overflow-hidden">
+            {/* Supplier header */}
+            <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/50 flex items-center gap-3 flex-wrap">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                onChange={() => setMany(supLineIds, !allSelected)}
+                className="w-3.5 h-3.5"
+                title="Select all lines for this supplier"
+              />
+              <button onClick={() => onOpenSession(d.session.id)} className="text-[13px] font-bold text-gray-900 hover:text-indigo-700 transition-colors">{d.supplierName}</button>
+              {pat === 'structural'    && <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-700 uppercase tracking-wide">Structural underperformer</span>}
+              {pat === 'concentration' && <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 uppercase tracking-wide">High concentration</span>}
+              {d.supplierObj && <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${d.supplierObj.onTimeRate >= 80 ? 'bg-green-50 text-green-700 border-green-100' : d.supplierObj.onTimeRate >= 70 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'}`}>OTR {d.supplierObj.onTimeRate}%</span>}
+              <span className="text-[10px] text-gray-400">{d.lines.length} lines · {supAccepted} accepted · {supCountered} countered · {supAwaiting} awaiting · £{Math.round(d.totalValue).toLocaleString('en-GB')}</span>
+              <div className="ml-auto flex items-center gap-2">
+                {supSelected.length > 0 ? (
+                  <button
+                    disabled={selActionable.length === 0}
+                    onClick={() => approveMany(selActionable)}
+                    className="text-[11px] font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-200 disabled:text-gray-400 px-3 py-1.5 rounded-lg transition-colors"
+                  >
+                    {uniformAction ? `Approve recommended: ${uniformAction} ×${selActionable.length}` : `Approve recommended (${selActionable.length} selected)`}
+                  </button>
+                ) : (
+                  <button
+                    disabled={supActionable.length === 0}
+                    onClick={() => approveMany(supActionable)}
+                    className="text-[11px] font-semibold text-indigo-700 bg-white border border-indigo-200 hover:bg-indigo-50 disabled:text-gray-300 disabled:border-gray-200 px-3 py-1.5 rounded-lg transition-colors"
+                  >
+                    Approve all recommended ({supActionable.length})
+                  </button>
+                )}
+                <button onClick={() => onOpenSession(d.session.id)} className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-800">Open full session →</button>
+              </div>
+            </div>
+
+            {/* Dense lines table */}
+            <table className="w-full text-[11px]">
+              <thead className="bg-white border-b border-gray-100">
+                <tr>
+                  <th className="px-2 py-2 w-7"></th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">SKU</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Product</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Ask → Response</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Accepted?</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Recommended step</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Outcome</th>
+                  <th className="px-2 py-2 text-right text-[10px] font-semibold text-gray-500 uppercase tracking-wide w-[120px]">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {d.lines.map(l => {
+                  const isApproved = approved.has(l.rec.id)
+                  return (
+                    <tr
+                      key={l.rec.id}
+                      onClick={() => onOpenThread(l.rec.id)}
+                      className={`border-b border-gray-50 last:border-0 hover:bg-gray-50 cursor-pointer transition-colors ${isApproved ? 'bg-green-50/40' : ''}`}
+                    >
+                      <td className="px-2 py-2" onClick={e => e.stopPropagation()}>
+                        <input type="checkbox" checked={selected.has(l.rec.id)} onChange={() => toggleRow(l.rec.id)} className="w-3 h-3" />
+                      </td>
+                      <td className="px-2 py-2 font-mono text-[10px] text-gray-500">{l.rec.id}</td>
+                      <td className="px-2 py-2 text-gray-800 font-medium">{l.rec.name}</td>
+                      <td className="px-2 py-2 text-gray-700 font-mono text-[10px]">{l.cpDisplay}</td>
+                      <td className="px-2 py-2"><span className={`inline-flex px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${l.statusCls}`}>{l.statusLbl}</span></td>
+                      <td className="px-2 py-2"><NegRecChip action={l.recAction} /></td>
+                      <td className="px-2 py-2 text-gray-500">{l.outcome}</td>
+                      <td className="px-2 py-2 text-right" onClick={e => e.stopPropagation()}>
+                        {isApproved ? (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-green-700"><Check className="w-3 h-3" /> Approved</span>
+                        ) : l.recAction === '—' ? (
+                          <span className="text-[10px] text-gray-300">—</span>
+                        ) : (
+                          <button
+                            onClick={() => approveMany([l.rec.id])}
+                            className="text-[10px] font-semibold text-white bg-indigo-600 hover:bg-indigo-700 px-2.5 py-1 rounded-md transition-colors"
+                          >
+                            {l.recAction}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // ── Active Negotiations View (renders as Supplier Workspace two-pane layout) ──
 function ActiveNegotiationsView({
   negNeedsResponse, negAwaiting, negReady, inquiries, onOpenInquiry, cpRules,
@@ -5752,6 +5961,7 @@ function ActiveNegotiationsView({
   // Supplier-grouped rail state — selecting a rail item opens a supplier session in the right pane.
   // Clicking a row in the lines table drills into that SKU as a Sheet overlay (openInquiryId).
   const [openSessionId, setOpenSessionId] = useState<string | null>(null)
+  const [negViewMode, setNegViewMode] = useState<'detailed' | 'bulk'>('detailed')
   const supplierSessions = sessions ?? []
 
   // Combine the three buckets into a single flat list with section ids preserved.
@@ -5954,6 +6164,30 @@ function ActiveNegotiationsView({
     </div>
   ) : null
 
+  // Bulk-mode drill-in: clicking a row in BulkNegotiationsView opens the same
+  // detailed InquiryDrawer as a Sheet overlay (bulk for speed, detail on demand).
+  const bulkDrillSheet = (negViewMode === 'bulk' && selectedRec) ? (
+    <div className="fixed inset-0 z-[55] flex">
+      <div className="flex-1 bg-black/30" onClick={onCloseInquiry} />
+      <div className="w-[720px] max-w-[95vw] bg-white h-full flex flex-col shadow-2xl overflow-hidden">
+        <InquiryDrawer
+          embed
+          rec={selectedRec}
+          thread={inquiries[selectedRec.id]}
+          onClose={onCloseInquiry}
+          onUpdate={onUpdateInquiry}
+          isManager={isManager}
+          onApprove={onApprove}
+          onReject={onReject}
+          globalCpRules={cpRules}
+          onUpdateGlobalCpRules={onUpdateGlobalCpRules}
+          onNavigateToPO={onNavigateToPO}
+          onViewDetails={onViewDetails}
+        />
+      </div>
+    </div>
+  ) : null
+
   // Start-inquiry dialog
   const [startInquiryOpen, setStartInquiryOpen] = useState(false)
   const [startInquiryQuery, setStartInquiryQuery] = useState('')
@@ -5981,8 +6215,50 @@ function ActiveNegotiationsView({
     </button>
   )
 
+  const viewToggle = (
+    <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+      <div className="inline-flex items-center rounded-lg border border-gray-200 bg-gray-50 p-0.5">
+        {([
+          { k: 'detailed', lbl: 'Detailed', hint: 'One supplier at a time' },
+          { k: 'bulk',     lbl: 'Bulk',     hint: 'All suppliers · dense table' },
+        ] as const).map(opt => (
+          <button
+            key={opt.k}
+            onClick={() => setNegViewMode(opt.k)}
+            title={opt.hint}
+            className={`px-3 py-1.5 rounded-md text-[12px] font-semibold transition-colors ${negViewMode === opt.k ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+          >
+            {opt.lbl}
+          </button>
+        ))}
+      </div>
+      {negViewMode === 'bulk' && (
+        <div className="flex items-center gap-2 flex-1 min-w-[200px] max-w-[420px]">
+          <div className="relative flex-1">
+            <Search className="w-3 h-3 text-gray-400 absolute top-1/2 -translate-y-1/2 left-2.5" />
+            <input
+              type="text"
+              value={filterText}
+              onChange={e => setFilterText(e.target.value)}
+              placeholder="Filter by supplier, product, SKU…"
+              className="w-full h-8 pl-7 pr-2 rounded-md border border-gray-200 bg-white text-[11px] text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-300 placeholder:text-gray-400"
+            />
+          </div>
+          <button
+            onClick={() => { setStartInquiryQuery(''); setStartInquiryOpen(true) }}
+            className="h-8 inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 text-[11px] font-semibold text-gray-700 hover:bg-gray-50 transition-colors shrink-0"
+          >
+            <PlusCircle className="w-3 h-3" /> Start inquiry
+          </button>
+        </div>
+      )}
+    </div>
+  )
+
   return (
     <>
+    {viewToggle}
+    {negViewMode === 'detailed' ? (
     <SupplierWorkspaceLayout
       title="Active Negotiations"
       count={supplierSessions.length + orphanItems.length}
@@ -5998,7 +6274,16 @@ function ActiveNegotiationsView({
       briefing={briefing}
       headerExtra={headerExtra}
     />
+    ) : (
+    <BulkNegotiationsView
+      sessions={supplierSessions}
+      filterText={filterText}
+      onOpenThread={id => { setOpenSessionId(null); onOpenInquiry(id) }}
+      onOpenSession={sid => { onCloseInquiry(); setOpenSessionId(sid); setNegViewMode('detailed') }}
+    />
+    )}
     {skuDrillSheet}
+    {bulkDrillSheet}
     {startInquiryOpen && (
       <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
         <div className="bg-white rounded-2xl shadow-2xl w-[520px] max-h-[80vh] flex flex-col overflow-hidden">
