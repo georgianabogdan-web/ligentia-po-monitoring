@@ -7821,6 +7821,10 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                             <div>
                               <div className="font-semibold text-gray-900 whitespace-nowrap">{p.name}</div>
                               <div className="text-[10px] text-gray-400">{p.sku}</div>
+                              <div className="flex gap-1 flex-wrap mt-1">
+                                <BuyStatusChip status={buyStatusOf(curSt)} />
+                                <SupplierStatusChip status={p.supplierStatus} />
+                              </div>
                             </div>
                           </div>
                         </td>
@@ -8700,6 +8704,10 @@ function ManagerReorderView() {
                               )}
                             </div>
                             <div className="text-[10px] text-gray-400">{p.sku}</div>
+                            <div className="flex gap-1 flex-wrap mt-1">
+                              <BuyStatusChip status={buyStatusOf(status)} />
+                              <SupplierStatusChip status={p.supplierStatus} />
+                            </div>
                           </div>
                         </div>
                       </td>
