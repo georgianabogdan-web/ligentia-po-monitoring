@@ -125,7 +125,7 @@ interface TriggerMessage {
   agentSummary?: string
   priorMessages?: { sender: string; timestamp: string; body: string; direction: 'inbound' | 'outbound' }[]
 }
-interface ActionGroup { supplierId: string; type: 'overdue' | 'at_risk' | 'late_dc'; pos: PO[]; triggerMessage?: TriggerMessage }
+interface ActionGroup { supplierId: string; type: 'overdue' | 'at_risk' | 'late_dc' | 'predicted'; pos: PO[]; triggerMessage?: TriggerMessage }
 
 // ── Shared action-card primitives (used by PO Monitoring rail + Home overview) ──
 type ActionCardState = 'agent-drafted' | 'decision-needed' | 'awaiting-reply' | 'reply-received' | 'no-reply-overdue' | 'snoozed'
@@ -177,6 +177,12 @@ void actionAgentRec
 
 // Rail-card copy: issue title (verb-led) + impact subtitle (£ + scope + context).
 function actionIssueTitle(g: ActionGroup, today: Date): string {
+  if (g.type === 'predicted') {
+    // Not late yet — forward-looking. Name the gating stage from the prediction.
+    const gates = g.pos.map(p => PO_PREDICTIONS[p.id]?.gatingStageLabel).filter(Boolean) as string[]
+    const gate = gates[0]
+    return gate ? `Predicted to slip at ${gate.toLowerCase()} — not yet late` : 'Predicted to slip — not yet late'
+  }
   if (g.type === 'overdue') {
     const maxDays = Math.max(...g.pos.map(p => daysOverdueAt(p, today)))
     const ctx = g.pos.some(p => p.revisedDelivery) ? 'revised date pending' : 'no revised date'
@@ -199,6 +205,10 @@ function actionImpactSubtitle(g: ActionGroup, sup: Supplier | null): string {
   const valStr = totalVal > 0 ? `£${totalVal.toLocaleString()}` : '—'
   const poCount = g.pos.length
   const poClause = poCount > 1 ? `${valStr} at risk across ${poCount} POs` : `${valStr} at risk · ${poCount} PO`
+  if (g.type === 'predicted') {
+    const lost = g.pos.reduce((s, p) => s + (PO_PREDICTIONS[p.id]?.missedSalesRisk.estimatedLostRevenue ?? 0), 0)
+    return lost > 0 ? `${poClause} · £${lost.toLocaleString()} sales at risk if it slips` : `${poClause} · pre-empt before it's late`
+  }
   if (g.type === 'overdue') {
     if (sup && sup.openPOs >= 20 && sup.onTimeRate < 80) return `${poClause} · High concentration supplier`
     return `${poClause} · ${SUPPLIER_COVER_WEEKS[sup?.id ?? ''] ?? 6}w cover affected`
@@ -1413,6 +1423,7 @@ function deriveCardPills(group: ActionGroup, sup: Supplier | null): { status: Ca
     return                     { status: 'agent-will-handle', actionTypeLabel: 'Routine chase' }
   }
   if (group.type === 'at_risk') return { status: 'agent-drafted', actionTypeLabel: 'Approve date change' }
+  if (group.type === 'predicted') return { status: 'agent-drafted', actionTypeLabel: 'Pre-empt slip' }
   return                                { status: 'agent-drafted', actionTypeLabel: 'Confirm DC booking' }
 }
 
@@ -9358,7 +9369,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
   const [selectedSupplierId, setSelectedSupplierId] = useState<string | null>(null)
   const [actTypeFilter,    setActTypeFilter]    = useState('all')
   const [urgencyFilter,    setUrgencyFilter]    = useState('all')
-  const [sortMode,         setSortMode]         = useState<'urgency_value' | 'alpha'>('urgency_value')
+  const [sortMode,         setSortMode]         = useState<'missed_sales' | 'value' | 'overdue'>('missed_sales')
   const [drawerDecision,   setDrawerDecision]   = useState<Record<string, 'cancel' | 'cpr' | 'accept_late'>>({})
   const [proposedMutations,setProposedMutations]= useState<Record<string, Array<{poId:string;field:string;oldVal:string;newVal:string}>>>({})
   const [selectedActionPill,setSelectedActionPill]= useState<Record<string,string>>({})
@@ -9441,10 +9452,19 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
       agentSummary: 'PO-2891 delayed by fabric QC failure — dye lot inconsistency in ~40% of batch. Affected fabric quarantined, replacement being sourced. Minimum 14-day impact. Revised ex-factory date due end of this week. No dispatch imminent.',
     },
   }
+  // Forward-looking: open POs not yet flagged late (on_track) but predicted at high
+  // risk of slipping. These make the Actions list proactive, not purely retrospective.
+  const predictedPOs = onTrackPOs.filter(po => {
+    if (po.status === 'Delivered') return false
+    const pr = PO_PREDICTIONS[po.id]
+    return pr && (pr.riskBand === 'High' || pr.riskBand === 'Critical' || pr.missedSalesRisk.willMissSales) && pr.landingGapDays > 2
+  })
+
   const actionGroups: ActionGroup[] = [
     ...makeGroups(overduePOs, 'overdue'),
     ...makeGroups(atRiskPOs, 'at_risk'),
     ...makeGroups(preDispatchPOs, 'late_dc'),
+    ...makeGroups(predictedPOs, 'predicted'),
   ].map(g => ({ ...g, triggerMessage: TRIGGER_MESSAGES[`${g.supplierId}-${g.type}`] }))
 
   // Consolidate by supplier: one entry per supplier across all issue types
@@ -9476,6 +9496,11 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
     return 'agent-drafted'
   }
   const cardScore = (g: ActionGroup) => urgWt(g) * g.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0)
+  // Commercial impact is the PRIMARY sort signal: predicted missed sales (£) across the group.
+  const groupMissedSales = (g: ActionGroup) => g.pos.reduce((s, p) => s + (PO_PREDICTIONS[p.id]?.missedSalesRisk.estimatedLostRevenue ?? 0), 0)
+  const groupMissedUnits = (g: ActionGroup) => g.pos.reduce((s, p) => s + (PO_PREDICTIONS[p.id]?.missedSalesRisk.willMissSales ? PO_PREDICTIONS[p.id]!.missedSalesRisk.estimatedLostUnits : 0), 0)
+  const groupMaxOverdue  = (g: ActionGroup) => Math.max(0, ...g.pos.map(p => daysOverdue(p)))
+  const groupValue       = (g: ActionGroup) => g.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0)
 
   // Auto-select-on-mount removed: the workspace is now a Sheet overlay, so opening it
   // unprompted is jarring. Users land on the action list; clicking a row opens the Sheet.
@@ -9905,11 +9930,13 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
             if (urgencyFilter  === 'routine'    && g.type !== 'late_dc')  return false
             return true
           })
-          const sorted = [...filtered].sort((a, b) =>
-            sortMode === 'alpha'
-              ? (getSupplier(a.supplierId)?.name ?? '').localeCompare(getSupplier(b.supplierId)?.name ?? '')
-              : cardScore(b) - cardScore(a)
-          )
+          const sorted = [...filtered].sort((a, b) => {
+            if (sortMode === 'value')   return groupValue(b) - groupValue(a)
+            if (sortMode === 'overdue') return groupMaxOverdue(b) - groupMaxOverdue(a)
+            // Default 'missed_sales': commercial impact is primary, lateness is the tiebreak.
+            const ms = groupMissedSales(b) - groupMissedSales(a)
+            return ms !== 0 ? ms : groupMaxOverdue(b) - groupMaxOverdue(a)
+          })
           const withHeaders = sorted.map((g, i) => ({ g, showHeader: i === 0 || sorted[i-1].supplierId !== g.supplierId }))
 
           // ── Drawer data ──────────────────────────────────────────────────
@@ -10110,10 +10137,16 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
               ))}
               <div className="ml-auto flex items-center gap-1.5">
                 <span className="text-[10px] text-gray-400 font-medium">Sort:</span>
-                <button onClick={() => setSortMode(m => m === 'urgency_value' ? 'alpha' : 'urgency_value')}
-                  className="px-3 py-1 rounded-lg text-xs font-semibold bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors">
-                  {sortMode === 'urgency_value' ? '↓ Value at risk' : 'A–Z Supplier'}
-                </button>
+                {([
+                  { v: 'missed_sales', label: '↓ Sales at risk' },
+                  { v: 'value',        label: 'Value at risk' },
+                  { v: 'overdue',      label: 'Most overdue' },
+                ] as const).map(opt => (
+                  <button key={opt.v} onClick={() => setSortMode(opt.v)}
+                    className={`px-3 py-1 rounded-lg text-xs font-semibold transition-colors ${sortMode === opt.v ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                    {opt.label}
+                  </button>
+                ))}
               </div>
             </div>
 
@@ -10183,6 +10216,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                     if (g.type === 'late_dc') {
                       return (sup?.onTimeRate ?? 100) > 85 ? 'Confirm booking' : 'Investigate root cause'
                     }
+                    if (g.type === 'predicted') return 'Pre-empt with supplier'
                     return 'Chase supplier'
                   })()
                   // Worst-case est delivery across the action's POs
@@ -10210,6 +10244,22 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                           <span className="text-[12px] font-medium text-gray-800">{issueTitle}</span>
                         </div>
                         <div className="text-[11px] text-gray-500 mb-0.5">{impactSubtitle}</div>
+                        {/* Commercial consequence — a delay only matters if it costs sales.
+                            Loud when sales are at risk; quiet when late but no sales impact. */}
+                        {(() => {
+                          const lostRev = groupMissedSales(g)
+                          const lostUnits = groupMissedUnits(g)
+                          const anyLate = g.pos.some(p => daysOverdue(p) > 0)
+                          if (lostRev > 0) return (
+                            <div className="text-[11px] font-semibold text-red-600 mb-0.5">
+                              Predicted to miss sales: ~£{lostRev.toLocaleString()} / ~{lostUnits.toLocaleString()} units
+                            </div>
+                          )
+                          if (anyLate) return (
+                            <div className="text-[11px] text-gray-400 mb-0.5">Late · no sales impact predicted — CPR / hold-to-contract still available</div>
+                          )
+                          return null
+                        })()}
                         <div className="text-[10px] text-gray-400">
                           {g.pos.length <= 2
                             ? g.pos.map(p => p.id).join(', ')
@@ -10426,7 +10476,52 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                       <div className="border-b border-gray-100 px-6 py-4 shrink-0">
                         {true ? (
                           <>
-                            {drawerGroup.type === 'overdue' ? (() => {
+                            {drawerGroup.type === 'predicted' ? (() => {
+                              // Forward-looking pre-empt: PO isn't late yet but is predicted to slip.
+                              // Pre-empt is the recommended path; CPR / hold-to-contract stays
+                              // available regardless of sales impact (supplier broke contract).
+                              const worst = drawerGroup.pos
+                                .map(p => PO_PREDICTIONS[p.id]).filter(Boolean)
+                                .sort((a, b) => (b!.missedSalesRisk.estimatedLostRevenue) - (a!.missedSalesRisk.estimatedLostRevenue))[0]
+                              const lostRev = drawerGroup.pos.reduce((s, p) => s + (PO_PREDICTIONS[p.id]?.missedSalesRisk.estimatedLostRevenue ?? 0), 0)
+                              const gate = worst?.gatingStageLabel ?? 'an upcoming stage'
+                              const rationale = lostRev > 0
+                                ? `Not late yet, but predicted to slip at ${gate.toLowerCase()} — putting ~£${lostRev.toLocaleString()} of sales at risk. Pre-empting now (firm dates / expedite) is cheaper than reacting once it's overdue; CPR remains available if ${drawerSup.name} misses the revised commitment.`
+                                : `Predicted to slip at ${gate.toLowerCase()}. Pre-empting with ${drawerSup.name} now locks firmer dates before it becomes a live delay.`
+                              const pickPred = (k: string) => {
+                                if (!drawerCardKey) return
+                                if (k === 'chase') setSelectedActionPill(prev => ({ ...prev, [drawerCardKey]: 'chase' }))
+                                else { setSelectedActionPill(prev => ({ ...prev, [drawerCardKey]: 'decision' })); setDrawerDecision(prev => ({ ...prev, [drawerCardKey]: 'cpr' })) }
+                              }
+                              const selectedKey = drawerCurrentPill === 'chase' ? 'chase' : drawerDecChoice === 'cpr' ? 'cpr' : 'chase'
+                              return (
+                                <>
+                                  <div className="mb-3">
+                                    <div className="text-[13px] font-semibold text-gray-900">Next step</div>
+                                    <div className="text-[11px] text-gray-500 mt-0.5">Recommended: Pre-empt with supplier</div>
+                                    <p className="text-[12px] text-gray-700 leading-relaxed mt-2">{rationale}</p>
+                                  </div>
+                                  <ActionRecommendationRow
+                                    recommendedKey="chase"
+                                    selectedKey={selectedKey}
+                                    options={[
+                                      { key: 'chase', label: 'Pre-empt with supplier', consequence: 'Request firm dates / expedite before it slips', onClick: () => pickPred('chase') },
+                                      { key: 'cpr',   label: `Request CPR / hold to contract`, consequence: 'Net back the broken commitment — valid even with no sales impact', onClick: () => pickPred('cpr') },
+                                    ]}
+                                  />
+                                  <div className="flex items-center gap-3 mt-3">
+                                    {isSnoozeConfirm ? (
+                                      <span className="text-[11px] text-gray-600">Reappear in 3 days?
+                                        <button onClick={() => { setSnoozedCards(prev => { const n = new Set(prev); n.add(drawerCardKey!); return n }); setDrawerCardKey(null) }} className="ml-1.5 font-semibold text-indigo-600 hover:text-indigo-800">Confirm</button>
+                                        <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: false }))} className="ml-1.5 text-gray-400 hover:text-gray-600">Cancel</button>
+                                      </span>
+                                    ) : (
+                                      <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors">Snooze 3 days</button>
+                                    )}
+                                  </div>
+                                </>
+                              )
+                            })() : drawerGroup.type === 'overdue' ? (() => {
                               const poRec = getPORecommendation(drawerGroup, drawerSup, drawerMaxOverdue, drawerOrderVal, cprPct)
                               const pattern = getRelationshipPattern(drawerSup)
                               const recBg = pattern === 'structural' ? 'bg-red-50 border-red-200' : pattern === 'concentration' ? 'bg-amber-50 border-amber-200' : 'bg-indigo-50 border-indigo-100'
