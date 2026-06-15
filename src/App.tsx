@@ -15,7 +15,7 @@ import { REPLEN_PRODUCTS } from './replenData'
 import type { ReplenProduct, DCStatus as ReplenDCStatus } from './replenData'
 import {
   SUPPLIER_JOURNEY, STAGE_LABELS, STAGE_ORDER, HEALTH_TIER_CFG,
-  buildPrediction, RISK_BAND_CFG,
+  buildPrediction, RISK_BAND_CFG, DEMO_TODAY,
 } from './predict'
 import type { JourneyStageKey, StagePerf, PoPrediction } from './predict'
 
@@ -9108,9 +9108,226 @@ function getDCBookingRecommendation(g: ActionGroup, sup: Supplier): DCBookingRec
   }
 }
 
+// New vs Rebuy classification for intake. There's no production flag for this in
+// the mock data, so this is a deterministic, illustrative split keyed off the PO
+// id (stable across renders). Not a real signal — labelled as such in the UI.
+function poIntakeKind(poId: string): 'New' | 'Rebuy' {
+  const h = poId.split('').reduce((a, c) => a + c.charCodeAt(0), 0)
+  return (h % 5) < 2 ? 'New' : 'Rebuy'   // ~40% New / ~60% Rebuy
+}
+
+// ── Intake Forecast View ──────────────────────────────────────────────────────
+// Forward-looking: what is predicted to LAND in the business, and when — built on
+// predictedLandingDate (NOT stated dates).
+//
+// Design principle: "summary that surfaces exceptions, not summary that smooths
+// them." A naive roll-up where on-time lines mask late ones is the explicit
+// failure mode. So every week breaks out its AT-RISK portion (never just a net
+// total), and an always-visible exception strip ranks the worst lines by
+// missed-sales (commercial) impact regardless of how the aggregate looks.
+function IntakeForecastView({ onOpenPO }: { onOpenPO: (poId: string) => void }) {
+  const WEEKS = 12
+  const [catFilter, setCatFilter] = useState('all')
+  const [openWeek, setOpenWeek] = useState<number | null>(null)
+
+  const weekStart0 = (() => {
+    // Monday of DEMO_TODAY's week.
+    const d = new Date(DEMO_TODAY)
+    const day = (d.getDay() + 6) % 7 // 0 = Monday
+    d.setDate(d.getDate() - day)
+    d.setHours(0, 0, 0, 0)
+    return d
+  })()
+  const weekStartFor = (i: number) => { const d = new Date(weekStart0); d.setDate(d.getDate() + i * 7); return d }
+  const fmtWk = (d: Date) => `w/c ${d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}`
+
+  const categories = Array.from(new Set(ALL_POS.map(p => p.category))).sort()
+
+  // Each open PO → its predicted landing week index (overdue/past → week 0).
+  type Row = { po: PO; pred: PoPrediction; kind: 'New' | 'Rebuy'; weekIdx: number; atRisk: boolean }
+  const rows: Row[] = ALL_POS
+    .filter(po => po.status !== 'Delivered')
+    .filter(po => catFilter === 'all' || po.category === catFilter)
+    .map(po => {
+      const pred = PO_PREDICTIONS[po.id]
+      if (!pred) return null
+      const landing = new Date(pred.predictedLandingDate + 'T00:00:00')
+      const idx = Math.max(0, Math.floor((landing.getTime() - weekStart0.getTime()) / (7 * 86400000)))
+      const atRisk = pred.missedSalesRisk.willMissSales || pred.riskBand === 'High' || pred.riskBand === 'Critical'
+      return { po, pred, kind: poIntakeKind(po.id), weekIdx: idx, atRisk }
+    })
+    .filter((r): r is Row => r !== null)
+
+  // Per-week aggregation. Anything landing beyond the window collapses into a
+  // final "12+" bucket so far-out slippage is still visible, never dropped.
+  const weeks = Array.from({ length: WEEKS }, (_, i) => {
+    const inWeek = rows.filter(r => (i === WEEKS - 1 ? r.weekIdx >= i : r.weekIdx === i))
+    const onPlan = inWeek.filter(r => !r.atRisk)
+    const atRisk = inWeek.filter(r => r.atRisk)
+    const units = (rs: Row[]) => rs.reduce((s, r) => s + r.po.quantity, 0)
+    return {
+      idx: i,
+      label: fmtWk(weekStartFor(i)) + (i === WEEKS - 1 ? '+' : ''),
+      rows: inWeek,
+      styles: inWeek.reduce((s, r) => s + r.po.skus, 0),
+      newUnits: units(inWeek.filter(r => r.kind === 'New')),
+      rebuyUnits: units(inWeek.filter(r => r.kind === 'Rebuy')),
+      onPlanUnits: units(onPlan),
+      atRiskUnits: units(atRisk),
+      totalUnits: units(inWeek),
+    }
+  })
+  const maxUnits = Math.max(1, ...weeks.map(w => w.totalUnits))
+
+  // Exception strip — worst lines by missed-sales £, ALWAYS shown.
+  const exceptions = rows
+    .filter(r => r.pred.missedSalesRisk.willMissSales)
+    .sort((a, b) => b.pred.missedSalesRisk.estimatedLostRevenue - a.pred.missedSalesRisk.estimatedLostRevenue)
+    .slice(0, 5)
+
+  const totalAtRisk = rows.filter(r => r.atRisk).length
+  const totalLostRev = rows.reduce((s, r) => s + r.pred.missedSalesRisk.estimatedLostRevenue, 0)
+  const weeksLateFor = (r: Row) => Math.max(0, Math.round((new Date(r.pred.predictedLandingDate).getTime() - new Date(r.pred.targetStockDate).getTime()) / (7 * 86400000)))
+
+  return (
+    <div className="space-y-4">
+      {/* Summary header — net totals, but immediately paired with the at-risk count */}
+      <div className="flex items-end justify-between flex-wrap gap-3">
+        <div>
+          <div className="text-sm font-bold text-gray-900">Intake forecast — next {WEEKS} weeks</div>
+          <div className="text-[11px] text-gray-500 mt-0.5">
+            Predicted landings (not stated dates). {rows.length} open POs ·{' '}
+            <span className="font-semibold text-red-600">{totalAtRisk} at risk</span> ·{' '}
+            <span className="font-semibold text-red-600">£{totalLostRev.toLocaleString('en-GB')}</span> sales at risk
+          </div>
+        </div>
+        <select value={catFilter} onChange={e => { setCatFilter(e.target.value); setOpenWeek(null) }} className="h-8 border border-gray-200 rounded-lg text-xs px-2 focus:outline-none">
+          <option value="all">All categories</option>
+          {categories.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+      </div>
+
+      {/* Exception strip — worst lines by missed-sales impact, ALWAYS visible.
+          This is the anti-smoothing guardrail: the worst lines surface even when
+          weekly totals look healthy. */}
+      <div className="bg-red-50 border border-red-200 rounded-2xl p-3">
+        <div className="flex items-center gap-1.5 mb-2 px-1">
+          <AlertTriangle className="w-3.5 h-3.5 text-red-500" />
+          <span className="text-[11px] font-bold text-red-700 uppercase tracking-wide">Biggest exceptions — by sales at risk</span>
+        </div>
+        {exceptions.length === 0 ? (
+          <div className="text-[11px] text-gray-500 px-1 py-2">No lines predicted to miss their stock date in this view.</div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+            {exceptions.map(r => (
+              <button
+                key={r.po.id}
+                onClick={() => onOpenPO(r.po.id)}
+                className="text-left bg-white border border-red-200 rounded-xl px-3 py-2 hover:bg-red-50/60 transition-colors"
+              >
+                <div className="flex items-center gap-1.5 mb-0.5">
+                  <span className="font-semibold text-indigo-700 text-xs">{r.po.id}</span>
+                  <RiskPill pred={r.pred} />
+                </div>
+                <div className="text-[11px] text-gray-600 truncate">{r.po.product}</div>
+                <div className="text-[11px] font-semibold text-red-700 mt-0.5">
+                  {weeksLateFor(r)} {weeksLateFor(r) === 1 ? 'week' : 'weeks'} late · £{r.pred.missedSalesRisk.estimatedLostRevenue.toLocaleString('en-GB')} sales at risk
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* By-week timeline — each week shows on-plan vs at-risk, never just a net. */}
+      <div className="bg-white border border-gray-100 rounded-2xl shadow-sm p-4">
+        <div className="flex items-center justify-between mb-3">
+          <span className="text-xs font-bold text-gray-800">Predicted intake by week</span>
+          <div className="flex items-center gap-3 text-[10px] text-gray-500">
+            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-emerald-400 inline-block" />On plan</span>
+            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-red-400 inline-block" />At risk</span>
+            <span className="text-gray-400">· click a week for line detail</span>
+          </div>
+        </div>
+        <div className="flex items-end gap-1.5 overflow-x-auto pb-2" style={{ minHeight: 200 }}>
+          {weeks.map(w => {
+            const barH = 150
+            const onPlanH = Math.round((w.onPlanUnits / maxUnits) * barH)
+            const atRiskH = Math.round((w.atRiskUnits / maxUnits) * barH)
+            const isOpen = openWeek === w.idx
+            return (
+              <button
+                key={w.idx}
+                onClick={() => setOpenWeek(isOpen ? null : w.idx)}
+                className={`flex-1 min-w-[64px] flex flex-col items-center group rounded-lg px-1 pt-1 pb-1.5 transition-colors ${isOpen ? 'bg-indigo-50 ring-1 ring-indigo-200' : 'hover:bg-gray-50'}`}
+              >
+                {/* numbers above bar */}
+                <div className="text-[10px] font-bold text-gray-800 leading-tight">{w.totalUnits.toLocaleString('en-GB')}</div>
+                <div className="text-[9px] text-gray-400 leading-tight mb-1">{w.styles} styles</div>
+                {/* stacked bar */}
+                <div className="flex flex-col-reverse w-7" style={{ height: barH }}>
+                  <div className="w-full bg-emerald-400 rounded-b-sm" style={{ height: onPlanH }} title={`${w.onPlanUnits.toLocaleString('en-GB')} units on plan`} />
+                  {w.atRiskUnits > 0 && <div className="w-full bg-red-400 rounded-t-sm" style={{ height: Math.max(3, atRiskH) }} title={`${w.atRiskUnits.toLocaleString('en-GB')} units at risk`} />}
+                </div>
+                {/* at-risk callout — always shown when present, so a healthy net never hides slippage */}
+                {w.atRiskUnits > 0 && (
+                  <div className="text-[9px] font-bold text-red-600 leading-tight mt-1">{w.atRiskUnits.toLocaleString('en-GB')} at risk</div>
+                )}
+                <div className="text-[9px] text-gray-500 mt-1 leading-tight">{w.label}</div>
+                <div className="text-[8px] text-gray-400 leading-tight">{w.newUnits.toLocaleString('en-GB')}N · {w.rebuyUnits.toLocaleString('en-GB')}R</div>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* Week drill-down — line-level detail behind the selected week, sorted by
+          missed-sales impact (commercial), not raw days-late. */}
+      {openWeek !== null && (() => {
+        const w = weeks[openWeek]
+        const detail = [...w.rows].sort((a, b) => b.pred.missedSalesRisk.estimatedLostRevenue - a.pred.missedSalesRisk.estimatedLostRevenue)
+        return (
+          <div className="bg-white border border-indigo-200 rounded-2xl shadow-sm overflow-hidden">
+            <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between bg-indigo-50/40">
+              <div>
+                <span className="text-sm font-bold text-gray-900">{w.label} — line detail</span>
+                <span className="text-[11px] text-gray-500 ml-2">{w.rows.length} POs · {w.totalUnits.toLocaleString('en-GB')} units · <span className="text-red-600 font-semibold">{w.atRiskUnits.toLocaleString('en-GB')} at risk</span></span>
+              </div>
+              <button onClick={() => setOpenWeek(null)} className="p-1 rounded-lg hover:bg-gray-100 text-gray-400"><X className="w-4 h-4" /></button>
+            </div>
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50/40 border-b border-gray-100">
+                <tr>{['PO #','Product','Type','Units','Risk','Predicted landing','Sales at risk'].map(h => <th key={h} className="px-4 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">{h}</th>)}</tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {detail.map(r => (
+                  <tr key={r.po.id} onClick={() => onOpenPO(r.po.id)} className="hover:bg-gray-50 cursor-pointer">
+                    <td className="px-4 py-2.5 font-semibold text-indigo-700">{r.po.id}</td>
+                    <td className="px-4 py-2.5 text-gray-700">
+                      <div className="flex items-center gap-2 flex-wrap">{r.po.product}{isPredictedToSlip(r.po, r.pred) && <PredictedToSlipChip />}</div>
+                    </td>
+                    <td className="px-4 py-2.5"><span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${r.kind === 'New' ? 'bg-violet-100 text-violet-700' : 'bg-gray-100 text-gray-600'}`}>{r.kind}</span></td>
+                    <td className="px-4 py-2.5 text-gray-700">{r.po.quantity.toLocaleString('en-GB')}</td>
+                    <td className="px-4 py-2.5"><RiskPill pred={r.pred} /></td>
+                    <td className="px-4 py-2.5 text-gray-700">{formatDate(r.pred.predictedLandingDate)}{r.pred.landingGapDays > 2 && <span className="text-[10px] text-amber-600 ml-1">+{r.pred.landingGapDays}d</span>}</td>
+                    <td className="px-4 py-2.5 font-semibold text-gray-800">{r.pred.missedSalesRisk.willMissSales ? `£${r.pred.missedSalesRisk.estimatedLostRevenue.toLocaleString('en-GB')}` : <span className="text-green-600 text-[11px]">On plan</span>}</td>
+                  </tr>
+                ))}
+                {detail.length === 0 && <tr><td colSpan={7} className="px-4 py-6 text-center text-[11px] text-gray-400">Nothing predicted to land this week.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        )
+      })()}
+
+      <div className="text-[10px] text-gray-400 italic px-1">Forecast uses the agent's predicted landing dates — deterministic over supplier journey-stage history, not a trained model. New vs Rebuy split is illustrative.</div>
+    </div>
+  )
+}
+
 // ── PO Monitoring View ────────────────────────────────────────────────────────
 function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _onNavigateToNeg }: { initialOpenPO?: string | null; initialOpenAction?: string | null; onNavigateToNeg?: (recId: string) => void }) {
-  const [subTab,           setSubTab]           = useState<'actions' | 'allpos' | 'suppliers' | 'agentlog'>('actions')
+  const [subTab,           setSubTab]           = useState<'intake' | 'actions' | 'allpos' | 'suppliers' | 'agentlog'>('intake')
   const [poEventsMap,      setPoEventsMap]      = useState<Map<string, POEvent[]>>(new Map(Object.entries(SEED_PO_EVENTS)))
   const [lastChasedMap] = useState<Map<string, string>>(new Map()); void lastChasedMap
   const [selectedPOId,     setSelectedPOId]     = useState<string | null>(initialOpenPO ?? null)
@@ -9658,7 +9875,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
         {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center bg-gray-100 rounded-xl p-1 gap-0.5">
-            {([['actions','Actions'],['allpos','All POs'],['suppliers','Suppliers'],['agentlog','Agent Log']] as const).map(([t, label]) => (
+            {([['intake','Intake'],['actions','Actions'],['allpos','All POs'],['suppliers','Suppliers'],['agentlog','Agent Log']] as const).map(([t, label]) => (
               <button key={t} onClick={() => setSubTab(t)} className={`h-8 px-4 rounded-lg text-xs font-semibold transition-colors ${subTab === t ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>{label}</button>
             ))}
           </div>
@@ -9666,6 +9883,9 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
             <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
           </button>
         </div>
+
+        {/* ── INTAKE FORECAST ── */}
+        {subTab === 'intake' && <IntakeForecastView onOpenPO={poId => setSelectedPOId(poId)} />}
 
         {/* ── ACTIONS ── */}
         {subTab === 'actions' && (() => {
