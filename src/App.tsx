@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react'
 import {
   AlertTriangle, TrendingDown, TrendingUp,
   Minus, Package, Sparkles, Home, BookOpen, HelpCircle, Ghost,
@@ -6891,6 +6891,127 @@ function StockLevelsChart({ productId, timeRange }: { productId: string; timeRan
   )
 }
 
+// ── Shared full-page detail workspace shell ──────────────────────────────────
+// ONE detail-page concept for the whole app (reorder line today, PO Monitoring
+// next): a sticky back bar + breadcrumb, a header slot for identity/status, and
+// a centered body. No list behind it — the user is focused on this one decision.
+function DetailWorkspaceLayout({
+  onBack, backLabel, breadcrumb, header, children,
+}: {
+  onBack:      () => void
+  backLabel:   string
+  breadcrumb?: React.ReactNode
+  header:      React.ReactNode
+  children:    React.ReactNode
+}) {
+  return (
+    <div className="flex-1 overflow-y-auto bg-gray-50">
+      <div className="sticky top-0 z-20 bg-white/95 backdrop-blur border-b border-gray-100 px-6 py-2.5 flex items-center gap-2">
+        <button onClick={onBack} className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-gray-600 hover:text-indigo-700 transition-colors">
+          <ChevronLeft className="w-4 h-4" /> {backLabel}
+        </button>
+        {breadcrumb && <><span className="text-gray-300">/</span><span className="text-[12px] text-gray-400">{breadcrumb}</span></>}
+      </div>
+      <div className="max-w-[1180px] mx-auto px-6 py-6 space-y-5">
+        {header}
+        {children}
+      </div>
+    </div>
+  )
+}
+
+// ── Reorder line workspace — full-page negotiation + management approval ──────
+// Reorganisation of existing features (no new logic): the InquiryDrawer body
+// (deal facts / rules / draft email / rounds / Apply·Counter·Escalate·Propose
+// alternative·Walk away / Log activity) is reused verbatim as the supplier
+// conversation, with management approval split into its own bounded section so
+// the two parallel tracks are independently usable.
+function ReorderLineWorkspace({
+  rec, thread, buyStatus, rejectionReason, onBack, onUpdateThread, onNavigateToPO,
+  globalCpRules, onUpdateGlobalCpRules, onViewDetails,
+  onSubmitForApproval, onPushToOrderApp, onResubmit,
+}: {
+  rec:                    ReorderRecommendation
+  thread:                 InquiryThread | undefined
+  buyStatus:              BuyStatus
+  rejectionReason?:       string
+  onBack:                 () => void
+  onUpdateThread:         (t: InquiryThread) => void
+  onNavigateToPO?:        (poId: string) => void
+  globalCpRules:          CpRulesState
+  onUpdateGlobalCpRules?: (r: CpRulesState) => void
+  onViewDetails?:         (recId: string) => void
+  onSubmitForApproval:    () => void
+  onPushToOrderApp:       () => void
+  onResubmit:             () => void
+}) {
+  const header = (
+    <div className="bg-white border border-gray-200 rounded-2xl px-5 py-4 flex items-center gap-4">
+      <img src={rec.imageUrl} className="w-14 h-14 rounded-lg object-cover shrink-0" alt="" />
+      <div className="min-w-0 flex-1">
+        <div className="text-base font-bold text-gray-900 leading-snug truncate">{rec.name}</div>
+        <div className="text-xs text-gray-400">{rec.sku} · {rec.supplier} · {rec.category}</div>
+        <div className="flex gap-1.5 flex-wrap mt-2">
+          <BuyStatusChip status={buyStatus} />
+          <SupplierStatusChip status={rec.supplierStatus} />
+        </div>
+      </div>
+    </div>
+  )
+
+  // Management approval — buyer-side gate controls, reflecting buyStatus.
+  const approval = (() => {
+    if (buyStatus === 'draft')            return { tone: 'gray',  msg: 'Not yet submitted to management.', action: <button onClick={onSubmitForApproval} className="h-8 px-4 rounded-lg text-xs font-semibold bg-indigo-600 text-white hover:bg-indigo-700 transition-colors">Send for management approval</button> }
+    if (buyStatus === 'pending_approval') return { tone: 'amber', msg: 'Awaiting management approval — a manager actions this in the Reorder · Manager view.', action: null }
+    if (buyStatus === 'approved')         return { tone: 'green', msg: 'Approved by management. Ready to push to the Order App.', action: <button onClick={onPushToOrderApp} className="h-8 px-4 rounded-lg text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors">Push to Order App</button> }
+    if (buyStatus === 'rejected')         return { tone: 'red',   msg: `Rejected by management.${rejectionReason ? ` Reason: ${rejectionReason}` : ''}`, action: <button onClick={onResubmit} className="h-8 px-4 rounded-lg text-xs font-semibold bg-red-600 text-white hover:bg-red-700 transition-colors">Review &amp; resubmit</button> }
+    return { tone: 'indigo', msg: 'Pushed to the Order App.', action: null }
+  })()
+
+  return (
+    <DetailWorkspaceLayout
+      onBack={onBack}
+      backLabel="Back to reorders"
+      breadcrumb={<>Reorder · {rec.supplier}</>}
+      header={header}
+    >
+      {/* Section: supplier conversation (deal facts / rules / email / rounds /
+          recommended action + alternatives / log activity) — existing InquiryDrawer */}
+      <section>
+        <div className="text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-2">Supplier conversation</div>
+        <div className="border border-gray-200 rounded-2xl bg-white overflow-hidden h-[calc(100vh-360px)] min-h-[560px] flex flex-col">
+          <InquiryDrawer
+            embed
+            rec={rec}
+            thread={thread}
+            onClose={onBack}
+            onUpdate={onUpdateThread}
+            globalCpRules={globalCpRules}
+            onUpdateGlobalCpRules={onUpdateGlobalCpRules}
+            onNavigateToPO={onNavigateToPO}
+            onViewDetails={onViewDetails}
+          />
+        </div>
+      </section>
+
+      {/* Section: management approval — separate, clearly bounded, parallel track */}
+      <section>
+        <div className="text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-2">Management approval</div>
+        <div className="border border-gray-200 rounded-2xl bg-white px-5 py-4">
+          <div className="flex items-center gap-3 flex-wrap">
+            <BuyStatusChip status={buyStatus} />
+            <span className="text-[12px] text-gray-600">{approval.msg}</span>
+            {approval.action && <span className="ml-auto">{approval.action}</span>}
+          </div>
+          <div className="text-[11px] text-gray-400 mt-2">
+            Internal buy gate — runs in parallel with the supplier negotiation above. The two tracks are independent.
+          </div>
+        </div>
+      </section>
+    </DetailWorkspaceLayout>
+  )
+}
+
 function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquiry?: string | null; onNavigateToPO?: (poId: string) => void }) {
   const [search, setSearch]   = useState('')
   const [cat, setCat]         = useState('')
@@ -6914,16 +7035,26 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
   const [supplierSessions, setSupplierSessions] = useState<SupplierSession[]>(() => [...SEEDED_SUPPLIER_SESSIONS])
   const [detailSheetRecId, setDetailSheetRecId] = useState<string | null>(null)
   const [globalCpRules, setGlobalCpRules]       = useState<CpRulesState>(DEFAULT_CP_RULES)
-  // Negotiation state (threads / supplier sessions / CP rules) is retained here:
-  // the line detail + conversation panel (built in the next step) reads and
-  // mutates it. Void the currently-unwired setters until that panel lands.
-  void setSupplierSessions; void setInquiries; void globalCpRules; void setGlobalCpRules; void onNavigateToPO
+  // Retained for the bulk supplier-session surface; created via setSupplierSessions.
+  void supplierSessions
 
   useEffect(() => { if (initialOpenInquiry) setOpenLineId(initialOpenInquiry) }, [initialOpenInquiry])
 
+  // ── Full-page line workspace: routing + list-state preservation ──────────────
+  // The list lives in listScrollRef's container. Opening a line saves its scroll
+  // offset; returning restores it so the merchandiser lands exactly where they
+  // left (the Individual/By-supplier toggle, filters and search are component
+  // state and survive the round-trip on their own).
+  const listScrollRef = useRef<HTMLDivElement>(null)
+  const savedScroll   = useRef(0)
+  const openLine = (id: string) => { savedScroll.current = listScrollRef.current?.scrollTop ?? 0; setOpenLineId(id) }
+  useLayoutEffect(() => {
+    if (!openLineId && listScrollRef.current) listScrollRef.current.scrollTop = savedScroll.current
+  }, [openLineId])
+
   // Negotiation is no longer a place you navigate to — opening a supplier
-  // inquiry opens that line's detail/conversation panel in place.
-  const openSupplierInquiry = (recId: string) => setOpenLineId(recId)
+  // inquiry opens that line's full-page detail/conversation workspace in place.
+  const openSupplierInquiry = (recId: string) => openLine(recId)
   const [editQty, setEditQty]                   = useState(0)
   const [editExFactory, setEditExFactory]       = useState('')
   const [editCostPrice, setEditCostPrice]       = useState(0)
@@ -7727,8 +7858,30 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
   }
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="p-6">
+    <>
+      {openLineId ? (() => {
+        const lp = REORDER_RECOMMENDATIONS.find(r => r.id === openLineId)
+        if (!lp) return null
+        return (
+          <ReorderLineWorkspace
+            rec={lp}
+            thread={inquiries[lp.id]}
+            buyStatus={buyStatusOf(effStatus(lp))}
+            rejectionReason={lp.rejectionReason}
+            onBack={() => setOpenLineId(null)}
+            onUpdateThread={t => setInquiries(prev => ({ ...prev, [t.recId]: t }))}
+            onNavigateToPO={onNavigateToPO}
+            globalCpRules={globalCpRules}
+            onUpdateGlobalCpRules={setGlobalCpRules}
+            onViewDetails={setDetailSheetRecId}
+            onSubmitForApproval={() => setSendMgrModalIds([lp.id])}
+            onPushToOrderApp={() => setPushModalIds([lp.id])}
+            onResubmit={() => { setStatusOverrides(o => ({ ...o, [lp.id]: 'Pending Approval' })); showToast(`${lp.name} resubmitted for management approval.`) }}
+          />
+        )
+      })() : (
+      <div ref={listScrollRef} className="flex-1 overflow-y-auto">
+        <div className="p-6">
 
         {/* KPI cards */}
         <div className="grid grid-cols-5 gap-4 mb-5">
@@ -7888,7 +8041,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                 onToggleRow={toggleRowSel}
                 onToggleMany={toggleManySel}
                 effStatus={effStatus}
-                onOpenLine={p => setOpenLineId(p.id)}
+                onOpenLine={p => openLine(p.id)}
               />
             ) : (
             <div className="bg-white border border-gray-100 rounded-xl shadow-sm overflow-x-auto">
@@ -7941,7 +8094,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                     const fmtK = (v: number) => v >= 1000 ? `${(v/1000).toFixed(1)}K` : `${v}`
                     const stickyBg = i % 2 !== 0 ? '#f9fafb' : '#ffffff'
                     return (
-                      <tr key={p.id} onClick={() => setOpenLineId(p.id)}
+                      <tr key={p.id} onClick={() => openLine(p.id)}
                         className={`border-b border-gray-50 hover:bg-indigo-50/40 cursor-pointer transition-colors ${inquiries[p.id]?.status === 'escalated' ? 'bg-red-50/50' : i % 2 !== 0 ? 'bg-gray-50/20' : ''}`}>
                         <td className="sticky z-10 px-3 py-2 border-r border-gray-100" style={{ left: 0, backgroundColor: stickyBg }} onClick={e => e.stopPropagation()}>
                           <input type="checkbox" className="rounded"
@@ -8076,56 +8229,8 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
           </>
         )}
       </div>
-
-      {/* Line detail + supplier conversation panel — PLACEHOLDER.
-          Opening a line no longer navigates away; the negotiation conversation
-          will live in this panel (built in the next step). */}
-      {openLineId && (() => {
-        const lp = REORDER_RECOMMENDATIONS.find(r => r.id === openLineId)
-        if (!lp) return null
-        const thread  = inquiries[lp.id]
-        const session = supplierSessions.find(s => s.threadIds.includes(lp.id))
-        return (
-          <div className="fixed inset-0 z-[55] flex">
-            <div className="flex-1 bg-black/30" onClick={() => setOpenLineId(null)} />
-            <div className="w-[640px] max-w-[95vw] bg-white h-full flex flex-col shadow-2xl overflow-hidden">
-              <div className="flex items-start justify-between px-5 py-4 border-b border-gray-100 shrink-0">
-                <div className="flex items-center gap-3 min-w-0">
-                  <img src={lp.imageUrl} className="w-11 h-11 rounded-lg object-cover shrink-0" alt="" />
-                  <div className="min-w-0">
-                    <div className="text-sm font-bold text-gray-900 truncate">{lp.name}</div>
-                    <div className="text-[11px] text-gray-400">{lp.sku} · {lp.supplier} · {lp.category}</div>
-                    <div className="flex gap-1.5 flex-wrap mt-1.5">
-                      <BuyStatusChip status={buyStatusOf(effStatus(lp))} />
-                      <SupplierStatusChip status={lp.supplierStatus} />
-                    </div>
-                  </div>
-                </div>
-                <button onClick={() => setOpenLineId(null)} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 shrink-0"><X className="w-4 h-4" /></button>
-              </div>
-              <div className="flex-1 overflow-y-auto px-5 py-5 space-y-4">
-                <div className="rounded-xl border border-dashed border-indigo-200 bg-indigo-50/40 px-4 py-6 text-center">
-                  <MessageSquare className="w-6 h-6 text-indigo-400 mx-auto mb-2" />
-                  <div className="text-sm font-semibold text-gray-700">Line detail &amp; supplier conversation</div>
-                  <div className="text-xs text-gray-500 mt-1 max-w-sm mx-auto">
-                    The full line detail and the negotiation thread with {lp.supplier} will open here — in place, without leaving the list. Coming in the next step.
-                  </div>
-                  <div className="text-[11px] text-gray-400 mt-3">
-                    {thread ? `Existing thread · status: ${thread.status}` : 'No negotiation thread yet'}
-                    {session ? ` · part of supplier session (${session.threadIds.length} lines)` : ''}
-                  </div>
-                </div>
-                <button
-                  onClick={() => { setOpenLineId(null); setEditQty(0); setEditExFactory(''); setEditCostPrice(0); setSelectedProduct(lp) }}
-                  className="w-full h-9 rounded-lg border border-gray-200 bg-white text-xs font-semibold text-gray-700 hover:bg-gray-50 transition-colors"
-                >
-                  Open full line detail →
-                </button>
-              </div>
-            </div>
-          </div>
-        )
-      })()}
+      </div>
+      )}
 
       {/* Product-detail Sheet — opened from the negotiation workspace via "View details →" */}
       {detailSheetRecId && (() => {
@@ -8259,7 +8364,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
 
       {/* Toast */}
       {toast && <Toast message={toast} onDone={() => setToast(null)} />}
-    </div>
+    </>
   )
 }
 
