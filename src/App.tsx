@@ -16,8 +16,9 @@ import type { ReplenProduct, DCStatus as ReplenDCStatus } from './replenData'
 import {
   SUPPLIER_JOURNEY, STAGE_LABELS, STAGE_ORDER, HEALTH_TIER_CFG,
   buildPrediction, RISK_BAND_CFG, DEMO_TODAY,
+  computeFillRisk, supplierFillHistory, computeFillOutcome, fillConsistency,
 } from './predict'
-import type { JourneyStageKey, StagePerf, PoPrediction } from './predict'
+import type { JourneyStageKey, StagePerf, PoPrediction, FillPrediction } from './predict'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 type POStatus =
@@ -163,7 +164,7 @@ interface TriggerMessage {
   agentSummary?: string
   priorMessages?: { sender: string; timestamp: string; body: string; direction: 'inbound' | 'outbound' }[]
 }
-interface ActionGroup { supplierId: string; type: 'overdue' | 'at_risk' | 'late_dc' | 'predicted'; pos: PO[]; triggerMessage?: TriggerMessage }
+interface ActionGroup { supplierId: string; type: 'overdue' | 'at_risk' | 'late_dc' | 'predicted' | 'fill_risk'; pos: PO[]; triggerMessage?: TriggerMessage }
 
 // ── Shared action-card primitives (used by PO Monitoring rail + Home overview) ──
 type ActionCardState = 'agent-drafted' | 'decision-needed' | 'awaiting-reply' | 'reply-received' | 'no-reply-overdue' | 'snoozed'
@@ -215,6 +216,10 @@ void actionAgentRec
 
 // Rail-card copy: issue title (verb-led) + impact subtitle (£ + scope + context).
 function actionIssueTitle(g: ActionGroup, today: Date): string {
+  if (g.type === 'fill_risk') {
+    const worst = g.pos.map(p => FILL_PREDICTIONS[p.id]).filter(Boolean).sort((a, b) => a!.predictedFillRatePct - b!.predictedFillRatePct)[0]
+    return worst ? `Predicted under-fulfilment · ~${worst.predictedFillRatePct}% fill` : 'Predicted under-fulfilment'
+  }
   if (g.type === 'predicted') {
     // Not late yet — forward-looking. Name the gating stage from the prediction.
     const gates = g.pos.map(p => PO_PREDICTIONS[p.id]?.gatingStageLabel).filter(Boolean) as string[]
@@ -243,6 +248,10 @@ function actionImpactSubtitle(g: ActionGroup, sup: Supplier | null): string {
   const valStr = totalVal > 0 ? `£${totalVal.toLocaleString()}` : '—'
   const poCount = g.pos.length
   const poClause = poCount > 1 ? `${valStr} at risk across ${poCount} POs` : `${valStr} at risk · ${poCount} PO`
+  if (g.type === 'fill_risk') {
+    const short = g.pos.reduce((s, p) => s + (FILL_PREDICTIONS[p.id]?.predictedShortfallUnits ?? 0), 0)
+    return short > 0 ? `${poClause} · ~${short.toLocaleString()} units short if it under-fills` : `${poClause} · pre-empt to confirm full quantity`
+  }
   if (g.type === 'predicted') {
     const lost = g.pos.reduce((s, p) => s + (PO_PREDICTIONS[p.id]?.missedSalesRisk.estimatedLostRevenue ?? 0), 0)
     return lost > 0 ? `${poClause} · £${lost.toLocaleString()} sales at risk if it slips` : `${poClause} · pre-empt before it's late`
@@ -698,6 +707,19 @@ const PO_PREDICTIONS: Record<string, PoPrediction> = (() => {
     const sup = SUPPLIERS.find(s => s.id === po.supplierId)
     if (!sup) continue
     out[po.id] = buildPrediction(po, sup)
+  }
+  return out
+})()
+
+// Per-PO fill-rate (order-completeness) prediction — the second, independent
+// supplier-risk dimension. Inferred from history, never supplier-confirmed.
+const FILL_PREDICTIONS: Record<string, FillPrediction> = (() => {
+  const out: Record<string, FillPrediction> = {}
+  for (const po of ALL_POS) {
+    if (po.status === 'Delivered') continue
+    const sup = SUPPLIERS.find(s => s.id === po.supplierId)
+    if (!sup) continue
+    out[po.id] = computeFillRisk(po, sup)
   }
   return out
 })()
@@ -1527,6 +1549,7 @@ function deriveCardPills(group: ActionGroup, sup: Supplier | null): { status: Ca
   }
   if (group.type === 'at_risk') return { status: 'agent-drafted', actionTypeLabel: 'Approve date change' }
   if (group.type === 'predicted') return { status: 'agent-drafted', actionTypeLabel: 'Pre-empt slip' }
+  if (group.type === 'fill_risk') return { status: 'agent-drafted', actionTypeLabel: 'Pre-empt under-fulfilment' }
   return                                { status: 'agent-drafted', actionTypeLabel: 'Confirm DC booking' }
 }
 
@@ -2310,6 +2333,47 @@ function SupplierDetailView({
           )}
         </div>
       </div>
+
+      {/* Order completeness (fill rate) — a SECOND, independent risk dimension.
+          A supplier can be good on lateness but poor on fill, so this reads on
+          its own. Predicted figures inferred from history, not supplier-confirmed. */}
+      {(() => {
+        const fh = supplierFillHistory(supplier.id)
+        const closed = pos.filter(p => p.supplierId === supplier.id && p.status === 'Delivered').map(p => computeFillOutcome(p, supplier))
+        const cons = fillConsistency(fh.fillVolatilityPts)
+        const fillCls = (v: number) => v >= 95 ? 'text-green-700' : v >= 85 ? 'text-amber-700' : 'text-red-700'
+        return (
+          <div className="bg-white border border-gray-200 rounded-2xl overflow-hidden">
+            <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+              <span className="text-sm font-bold text-gray-900">Order completeness (fill rate)</span>
+              <span className="text-[10px] text-gray-400 italic">Inferred from history — not supplier-confirmed</span>
+            </div>
+            <div className="px-5 py-4">
+              <div className="grid grid-cols-3 gap-3 mb-4">
+                <div><div className="text-[10px] text-gray-400 uppercase tracking-wide">Average fill rate</div><div className={`text-lg font-bold ${fillCls(fh.avgFillRatePct)}`}>{fh.avgFillRatePct}%</div><div className="text-[10px] text-gray-400">over {fh.posObserved} POs</div></div>
+                <div><div className="text-[10px] text-gray-400 uppercase tracking-wide">Consistency</div><div className="text-lg font-bold text-gray-800 capitalize">{cons}</div><div className="text-[10px] text-gray-400">±{fh.fillVolatilityPts}pts spread</div></div>
+                <div><div className="text-[10px] text-gray-400 uppercase tracking-wide">Trend</div><div className="mt-0.5">{trendBadge(fh.trend)}</div><div className="text-[10px] text-gray-400 mt-0.5">worst recent {fh.worstRecentPct}%</div></div>
+              </div>
+              {closed.length > 0 ? (
+                <>
+                  <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wide mb-1">Recent closed POs — ordered vs received</div>
+                  <table className="w-full text-xs">
+                    <thead className="border-b border-gray-100"><tr>{['PO','Ordered','Received','Fill rate'].map(h => <th key={h} className="px-2 py-1.5 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">{h}</th>)}</tr></thead>
+                    <tbody>{closed.map(o => (
+                      <tr key={o.poId} className="border-b border-gray-50 last:border-0">
+                        <td className="px-2 py-1.5 font-mono text-gray-500">{o.poId}</td>
+                        <td className="px-2 py-1.5 text-gray-700 tabular-nums">{o.orderedUnits.toLocaleString('en-GB')}</td>
+                        <td className="px-2 py-1.5 text-gray-700 tabular-nums">{o.receivedUnits.toLocaleString('en-GB')}{o.shortfallUnits > 0 && <span className="text-red-500 text-[10px]"> (−{o.shortfallUnits.toLocaleString('en-GB')})</span>}</td>
+                        <td className={`px-2 py-1.5 font-semibold tabular-nums ${fillCls(o.fillRatePct)}`}>{o.fillRatePct}%</td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </>
+              ) : <div className="text-[11px] text-gray-400 italic">No closed POs yet for this supplier — figures above are pattern-based.</div>}
+            </div>
+          </div>
+        )
+      })()}
 
       {/* Weakest upcoming stage — the forward-looking headline above the open-PO list */}
       {journey && (() => {
@@ -7733,6 +7797,35 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
             )
           })()}
 
+          {/* Supplier order-completeness (fill rate) — buy-case context. Informational
+              only: it does NOT adjust the reorder quantity or suggest a gross-up.
+              Inferred from history, not supplier-confirmed. */}
+          {(() => {
+            const supId = SUPPLIERS.find(su => su.name === p.supplier)?.id
+            const fh = supId ? supplierFillHistory(supId) : null
+            if (!fh) return null
+            const cons = fillConsistency(fh.fillVolatilityPts)
+            const cls = fh.avgFillRatePct >= 95 ? 'text-green-700' : fh.avgFillRatePct >= 85 ? 'text-amber-700' : 'text-red-700'
+            return (
+              <div className="bg-white border border-gray-100 rounded-xl px-5 py-3 shadow-sm flex items-center gap-5 flex-wrap">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">Order completeness</span>
+                  <span className="text-[9px] text-gray-400 italic">· inferred from history, not supplier-confirmed</span>
+                </div>
+                <div className="flex items-center gap-1.5"><span className="text-[10px] text-gray-400">Avg fill</span><span className={`text-sm font-bold ${cls}`}>{fh.avgFillRatePct}%</span></div>
+                <div className="flex items-center gap-1.5"><span className="text-[10px] text-gray-400">Consistency</span><span className="text-xs font-semibold text-gray-700 capitalize">{cons} (±{fh.fillVolatilityPts}pts)</span></div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-gray-400">Trend</span>
+                  {fh.trend === 'improving' && <TrendingUp className="w-3.5 h-3.5 text-green-500" />}
+                  {fh.trend === 'stable'    && <Minus className="w-3.5 h-3.5 text-gray-400" />}
+                  {fh.trend === 'worsening' && <TrendingDown className="w-3.5 h-3.5 text-red-500" />}
+                  <span className="text-xs font-medium text-gray-600 capitalize">{fh.trend}</span>
+                </div>
+                {fh.avgFillRatePct < 85 && <span className="text-[10px] text-amber-600 ml-auto">Under-fulfilment risk — confirm full quantity with the supplier (order qty unchanged)</span>}
+              </div>
+            )
+          })()}
+
           {/* Editable fields */}
           <div className="bg-white border border-gray-100 rounded-xl px-5 py-4 shadow-sm space-y-2">
             <div className="text-[9px] font-semibold text-indigo-500 uppercase tracking-wide flex items-center gap-1">
@@ -10887,12 +10980,22 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
     const pr = PO_PREDICTIONS[po.id]
     return pr && (pr.riskBand === 'High' || pr.riskBand === 'Critical' || pr.missedSalesRisk.willMissSales) && pr.landingGapDays > 2
   })
+  // Fill-rate risk: open POs predicted to under-fill (High/Critical). A separate,
+  // pre-emptive action — independent of lateness (a supplier can be on-time yet
+  // under-deliver). PREDICTION ONLY: prompts a confirm-quantity conversation,
+  // never a reorder-quantity gross-up.
+  const fillRiskPOs = ALL_POS.filter(po => {
+    if (po.status === 'Delivered') return false
+    const fr = FILL_PREDICTIONS[po.id]
+    return fr && (fr.fillRiskBand === 'High' || fr.fillRiskBand === 'Critical')
+  })
 
   const actionGroups: ActionGroup[] = [
     ...makeGroups(overduePOs, 'overdue'),
     ...makeGroups(atRiskPOs, 'at_risk'),
     ...makeGroups(preDispatchPOs, 'late_dc'),
     ...makeGroups(predictedPOs, 'predicted'),
+    ...makeGroups(fillRiskPOs, 'fill_risk'),
   ].map(g => ({ ...g, triggerMessage: TRIGGER_MESSAGES[`${g.supplierId}-${g.type}`] }))
 
   // Consolidate by supplier: one entry per supplier across all issue types
@@ -11348,8 +11451,10 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           // ── Queue data ───────────────────────────────────────────────────
           // Mode scopes the whole tab: reactive (now) = everything that is
           // already late/at-risk; pre-emptive (predicted) = not-yet-late slips.
+          // Predicted = forecasts (slip + fill-rate); Live issues = everything else.
+          const isPredictiveType = (t: ActionGroup['type']) => t === 'predicted' || t === 'fill_risk'
           const modeGroups = actionGroups.filter(g =>
-            actionMode === 'all' ? true : actionMode === 'predicted' ? g.type === 'predicted' : g.type !== 'predicted'
+            actionMode === 'all' ? true : actionMode === 'predicted' ? isPredictiveType(g.type) : !isPredictiveType(g.type)
           )
           const awaitingUser   = modeGroups.filter(g => ['agent-drafted','decision-needed','reply-received'].includes(getCardState(g))).length
           const valueAtRisk    = modeGroups.reduce((s, g) => s + g.pos.reduce((ss, p) => ss + parseOrderVal(p.orderValue), 0), 0)
@@ -11362,6 +11467,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
             if (actTypeFilter === 'chase'       && g.type !== 'overdue')  return false
             if (actTypeFilter === 'date_change' && g.type !== 'at_risk')  return false
             if (actTypeFilter === 'dc_booking'  && g.type !== 'late_dc')  return false
+            if (actTypeFilter === 'fill_risk'   && g.type !== 'fill_risk') return false
             if (actTypeFilter === 'decision'    && getCardState(g) !== 'decision-needed') return false
             if (urgencyFilter  === 'overdue'    && g.type !== 'overdue')  return false
             if (urgencyFilter  === 'at_risk'    && g.type !== 'at_risk')  return false
@@ -11389,11 +11495,18 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
             const ck         = cardKey(g)
             const issueTitle = actionIssueTitle(g, today)
             const valAtRisk  = g.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0)
-            const lostRev    = groupMissedSales(g)
-            const lostUnits  = groupMissedUnits(g)
             const maxOver    = groupMaxOverdue(g)
-            const isPredictive = g.type === 'predicted'
+            const isFill     = g.type === 'fill_risk'
+            const isPredictive = isPredictiveType(g.type)   // toned/potential styling for forecasts
+            // Slip rows use missed-sales; fill rows use predicted shortfall (units × unit cost).
+            const lostRev = isFill
+              ? g.pos.reduce((s, p) => { const fr = FILL_PREDICTIONS[p.id]; const unit = p.quantity > 0 ? parseOrderVal(p.orderValue) / p.quantity : 0; return s + (fr ? Math.round(fr.predictedShortfallUnits * unit) : 0) }, 0)
+              : groupMissedSales(g)
+            const lostUnits = isFill
+              ? g.pos.reduce((s, p) => s + (FILL_PREDICTIONS[p.id]?.predictedShortfallUnits ?? 0), 0)
+              : groupMissedUnits(g)
             const recPreview = (() => {
+              if (g.type === 'fill_risk') return 'Pre-empt: confirm full quantity'
               if (g.type === 'overdue' && sup)  { const mo = Math.max(...g.pos.map(p => daysOverdue(p))); const ov = g.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0); return getPORecommendation(g, sup, mo, ov, 10).primaryLabel.split('(')[0].trim().replace(/\+$/, '').trim() }
               if (g.type === 'at_risk' && sup)  { const dp = Math.max(...g.pos.map(p => p.revisedDelivery ? Math.round((new Date(p.revisedDelivery).getTime() - new Date(p.expectedDelivery).getTime()) / 86400000) : 0)); return getDateChangeRecommendation(g, sup, dp, isSubstantiveReason(g.triggerMessage), g.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0)).primaryLabel.split('(')[0].trim().replace(/\+$/, '').trim() }
               if (g.type === 'late_dc')   return (sup?.onTimeRate ?? 100) > 85 ? 'Confirm booking' : 'Investigate root cause'
@@ -11402,11 +11515,15 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
             })()
             const worstPO = [...g.pos].sort((a, b) => getEstimatedDelivery(b).delayDays - getEstimatedDelivery(a).delayDays)[0]
             // Urgency indicator: red overdue/decision · amber at-risk · violet predictive · grey routine
-            const urg = (state === 'decision-needed' || g.type === 'overdue') ? 'red' : g.type === 'at_risk' ? 'amber' : g.type === 'predicted' ? 'violet' : 'grey'
+            const urg = (state === 'decision-needed' || g.type === 'overdue') ? 'red' : g.type === 'at_risk' ? 'amber' : isPredictive ? 'violet' : 'grey'
             const urgBorder = { red: 'border-l-red-500', amber: 'border-l-amber-500', violet: 'border-l-violet-400', grey: 'border-l-gray-300' }[urg]
             // Problem chip: what's wrong + how bad. Loud for real (Live issues),
             // toned violet for predicted slips — matching the real-vs-potential treatment.
             const problem = (() => {
+              if (g.type === 'fill_risk') {
+                const worst = g.pos.map(p => FILL_PREDICTIONS[p.id]).filter(Boolean).sort((a, b) => a!.predictedFillRatePct - b!.predictedFillRatePct)[0]
+                return { label: `Predicted under-fulfilment · ~${worst?.predictedFillRatePct ?? 0}% fill`, cls: 'bg-violet-50 text-violet-700 border-violet-200' }
+              }
               if (g.type === 'predicted') {
                 const reason = PO_PREDICTIONS[worstPO?.id ?? '']?.gatingStageLabel
                 return { label: `Predicted slip${reason ? ` · ${reason}` : ''}`, cls: 'bg-violet-50 text-violet-700 border-violet-200' }
@@ -11428,7 +11545,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
             const tier1Decision = g.type === 'overdue' && (state === 'decision-needed' || (sup?.onTimeRate ?? 100) < 70)
             const lowOtrBooking = g.type === 'late_dc' && (sup?.onTimeRate ?? 100) <= 85   // needs root-cause look
             const isJudgment = tier1Decision || lowOtrBooking || state === 'decision-needed' || state === 'reply-received' || g.type === 'at_risk'
-            const inlineLabel = g.type === 'late_dc' ? 'Confirm booking' : g.type === 'predicted' ? 'Send pre-empt' : 'Approve & send'
+            const inlineLabel = g.type === 'late_dc' ? 'Confirm booking' : (g.type === 'predicted' || g.type === 'fill_risk') ? 'Send pre-empt' : 'Approve & send'
             return (
               <div
                 key={ck}
@@ -11456,7 +11573,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                 <div className="text-right">
                   {lostRev > 0
                     ? (isPredictive
-                        ? <><div className="text-[8px] uppercase tracking-wide text-amber-500">if it slips</div><div className="text-[12px] font-semibold text-amber-600 tabular-nums">~£{lostRev.toLocaleString()}</div><div className="text-[10px] text-amber-500 tabular-nums">~{lostUnits.toLocaleString()} units</div></>
+                        ? <><div className="text-[8px] uppercase tracking-wide text-amber-500">{isFill ? 'if it under-fills' : 'if it slips'}</div><div className="text-[12px] font-semibold text-amber-600 tabular-nums">~£{lostRev.toLocaleString()}</div><div className="text-[10px] text-amber-500 tabular-nums">~{lostUnits.toLocaleString()} units{isFill ? ' short' : ''}</div></>
                         : <><div className="text-[8px] uppercase tracking-wide text-red-400">sales at risk</div><div className="text-[12px] font-bold text-red-600 tabular-nums">£{lostRev.toLocaleString()}</div><div className="text-[10px] text-red-500 tabular-nums">{lostUnits.toLocaleString()} units</div></>)
                     : (maxOver > 0
                         ? <div className="text-[10px] text-gray-400 tabular-nums">{maxOver}d late · no sales hit</div>
@@ -11554,6 +11671,12 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
             const pill = drawerCurrentPill
             const closing = nl + nl + 'Kind regards,' + nl + 'Debenhams Buying Team'
             const poList = drawerGroup.pos.map(p => '- ' + p.id + ': ' + p.product + ' (Due: ' + formatDate(p.expectedDelivery) + ')').join(nl)
+            // Fill-rate pre-empt: ask the supplier to confirm they'll ship the FULL
+            // ordered quantity. We do NOT change our order — just flag and confirm.
+            if (drawerGroup.type === 'fill_risk') {
+              const qtyList = drawerGroup.pos.map(p => '- ' + p.id + ': ' + p.product + ' — ordered ' + p.quantity.toLocaleString('en-GB') + ' units').join(nl)
+              return 'Dear ' + drawerSup.name + ' Team,' + nl + nl + 'Ahead of production, please confirm you will deliver the FULL ordered quantity on the following lines (no short-shipment), and flag now if any line is at risk of under-fulfilment:' + nl + nl + qtyList + nl + nl + 'If a full quantity cannot be met, let us know the shortfall and revised plan as early as possible.' + closing
+            }
             if (pill === 'approve_date') return 'Dear ' + drawerSup.name + ' Team,' + nl + nl + 'Thank you for advising of the revised schedule. We confirm acceptance of the updated dates for:' + nl + nl + poList + nl + nl + 'Please update your records and ensure freight is booked accordingly.' + closing
             if (pill === 'counter') {
               const d = cpDate ? new Date(cpDate).toLocaleDateString('en-GB', {day:'numeric', month:'long', year:'numeric'}) : '[DATE TBC]'
@@ -11638,7 +11761,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                 <div className="relative">
                   <select value={actTypeFilter} onChange={e => setActTypeFilter(e.target.value)}
                     className="h-9 pl-2.5 pr-7 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none">
-                    {[['all','All'],['chase','Chase'],['date_change','Date change'],['dc_booking','DC booking'],['decision','Decision']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                    {[['all','All'],['chase','Chase'],['date_change','Date change'],['dc_booking','DC booking'],['fill_risk','Fill risk'],['decision','Decision']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                   </select>
                   <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
                 </div>
@@ -11683,7 +11806,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
               {(modePredicted ? [
                 { label: 'Pre-empts ready',         value: awaitingUser,                                                                  color: 'text-violet-700', bg: 'bg-violet-50 border border-violet-100' },
                 { label: '£ at risk if it slips',   value: `~£${modeGroups.reduce((s, g) => s + groupMissedSales(g), 0).toLocaleString()}`, color: 'text-amber-600',  bg: 'bg-amber-50 border border-amber-100' },
-                { label: 'Lines predicted to slip', value: modeGroups.length,                                                             color: 'text-violet-700', bg: 'bg-violet-50 border border-violet-100' },
+                { label: 'Predicted risks (slip + fill)', value: modeGroups.length,                                                             color: 'text-violet-700', bg: 'bg-violet-50 border border-violet-100' },
                 { label: 'Awaiting reply',          value: awaitingReply,                                                                 color: 'text-gray-500',   bg: 'bg-gray-50 border border-gray-100' },
               ] : [
                 { label: 'Actions awaiting you', value: awaitingUser,                       color: 'text-gray-900', bg: 'bg-white border border-gray-100' },
@@ -11920,7 +12043,48 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                       <div className="border-b border-gray-100 px-6 py-4 shrink-0">
                         {true ? (
                           <>
-                            {drawerGroup.type === 'predicted' ? (() => {
+                            {drawerGroup.type === 'fill_risk' ? (() => {
+                              // Predicted under-fulfilment. The ONLY recommended action is a
+                              // pre-emptive supplier comms to confirm the full quantity — we do
+                              // NOT re-spec or gross up the order. Inferred from history.
+                              const worst = drawerGroup.pos.map(p => FILL_PREDICTIONS[p.id]).filter(Boolean).sort((a, b) => a!.predictedFillRatePct - b!.predictedFillRatePct)[0]
+                              const shortUnits = drawerGroup.pos.reduce((s, p) => s + (FILL_PREDICTIONS[p.id]?.predictedShortfallUnits ?? 0), 0)
+                              const fillSignals = worst?.signals ?? []
+                              return (
+                                <>
+                                  <div className="mb-3">
+                                    <div className="text-[13px] font-semibold text-gray-900">Next step</div>
+                                    <div className="text-[11px] text-gray-500 mt-0.5">Recommended: Pre-empt — confirm full quantity</div>
+                                    <p className="text-[12px] text-gray-700 leading-relaxed mt-2">
+                                      {drawerSup.name} is predicted to under-fill at ~{worst?.predictedFillRatePct ?? 0}% (≈{shortUnits.toLocaleString('en-GB')} units short across this action) — based on their fill-rate history, <span className="italic">not</span> a supplier-confirmed shortfall. Send a pre-emptive note to confirm the full ordered quantity now; this warns and prompts a conversation. We are deliberately <span className="font-semibold">not</span> changing the order quantity.
+                                    </p>
+                                  </div>
+                                  <ActionRecommendationRow
+                                    recommendedKey="chase"
+                                    selectedKey="chase"
+                                    options={[
+                                      { key: 'chase', label: 'Pre-empt: confirm full quantity', consequence: 'Agent-drafted note asking the supplier to confirm no short-shipment', onClick: () => { if (drawerCardKey) setSelectedActionPill(prev => ({ ...prev, [drawerCardKey]: 'chase' })) } },
+                                    ]}
+                                  />
+                                  <details className="mt-3">
+                                    <summary className="text-[11px] text-gray-400 cursor-pointer hover:text-gray-600 select-none">▸ Why this prediction? (inferred — not supplier-confirmed)</summary>
+                                    <div className="mt-1.5 pl-3 border-l-2 border-gray-100 space-y-0.5">
+                                      {fillSignals.map((s, i) => <div key={i} className="text-[11px] text-gray-500">{s}</div>)}
+                                    </div>
+                                  </details>
+                                  <div className="flex items-center gap-3 mt-3">
+                                    {isSnoozeConfirm ? (
+                                      <span className="text-[11px] text-gray-600">Reappear in 3 days?
+                                        <button onClick={() => { setSnoozedCards(prev => { const n = new Set(prev); n.add(drawerCardKey!); return n }); setDrawerCardKey(null) }} className="ml-1.5 font-semibold text-indigo-600 hover:text-indigo-800">Confirm</button>
+                                        <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: false }))} className="ml-1.5 text-gray-400 hover:text-gray-600">Cancel</button>
+                                      </span>
+                                    ) : (
+                                      <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors">Snooze 3 days</button>
+                                    )}
+                                  </div>
+                                </>
+                              )
+                            })() : drawerGroup.type === 'predicted' ? (() => {
                               // Forward-looking pre-empt: PO isn't late yet but is predicted to slip.
                               // Pre-empt is the recommended path; CPR / hold-to-contract stays
                               // available regardless of sales impact (supplier broke contract).
@@ -13084,7 +13248,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
               <div className="bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden">
                 <table className="w-full text-xs">
                   <thead className="bg-gray-50 border-b border-gray-100">
-                    <tr>{['Supplier','Category','On-Time Rate','Open PO risk','Avg Delay','Open POs','Lead Time','Trend','Status'].map(h => <th key={h} className="px-4 py-3 text-left font-semibold text-gray-500 whitespace-nowrap">{h}</th>)}</tr>
+                    <tr>{['Supplier','Category','On-Time Rate','Order completeness','Open PO risk','Avg Delay','Open POs','Lead Time','Trend','Status'].map(h => <th key={h} className="px-4 py-3 text-left font-semibold text-gray-500 whitespace-nowrap">{h}</th>)}</tr>
                   </thead>
                   <tbody className="divide-y divide-gray-50">
                     {SUPPLIERS.map(s => {
@@ -13094,6 +13258,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                       const atRiskOpen = openPreds.filter(p => p.riskBand !== 'Low').length
                       const riskShare = openPreds.length > 0 ? atRiskOpen / openPreds.length : 0
                       const riskCls = riskShare >= 0.5 ? 'text-red-700' : riskShare >= 0.25 ? 'text-amber-700' : 'text-gray-500'
+                      const fh = supplierFillHistory(s.id)   // order-completeness — independent of OTR
                       return (
                         <tr key={s.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => setSelectedSupplierId(s.id)}>
                           <td className="px-4 py-3 font-semibold text-indigo-700 hover:text-indigo-900">{s.name}</td>
@@ -13110,6 +13275,15 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                 {atRiskOpen} of {openPreds.length} at risk
                               </span>
                             ) : <span className="text-gray-300">—</span>}
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-1.5" title="Average fill rate (units delivered ÷ ordered) — inferred from history, independent of on-time rate">
+                              <span className={`font-semibold ${fh.avgFillRatePct >= 95 ? 'text-green-700' : fh.avgFillRatePct >= 85 ? 'text-amber-700' : 'text-red-700'}`}>{fh.avgFillRatePct}%</span>
+                              {fh.trend === 'improving' && <TrendingUp className="w-3 h-3 text-green-500" />}
+                              {fh.trend === 'stable'    && <Minus className="w-3 h-3 text-gray-400" />}
+                              {fh.trend === 'worsening' && <TrendingDown className="w-3 h-3 text-red-500" />}
+                              <span className="text-[10px] text-gray-400 capitalize">{fillConsistency(fh.fillVolatilityPts)}</span>
+                            </div>
                           </td>
                           <td className="px-4 py-3 text-gray-600">{s.avgDelayDays}d</td>
                           <td className="px-4 py-3 text-gray-600">{s.openPOs}</td>
