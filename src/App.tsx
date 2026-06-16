@@ -10598,7 +10598,6 @@ function IntakeForecastView({ onOpenPO }: { onOpenPO: (poId: string) => void }) 
 
   const totalAtRisk = rows.filter(r => r.atRisk).length
   const totalLostRev = rows.reduce((s, r) => s + r.pred.missedSalesRisk.estimatedLostRevenue, 0)
-  const weeksLateFor = (r: Row) => Math.max(0, Math.round((new Date(r.pred.predictedLandingDate).getTime() - new Date(r.pred.targetStockDate).getTime()) / (7 * 86400000)))
 
   return (
     <div className="space-y-4">
@@ -10629,23 +10628,36 @@ function IntakeForecastView({ onOpenPO }: { onOpenPO: (poId: string) => void }) 
         {exceptions.length === 0 ? (
           <div className="text-[11px] text-gray-500 px-1 py-2">No lines predicted to miss their stock date in this view.</div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
-            {exceptions.map(r => (
-              <button
-                key={r.po.id}
-                onClick={() => onOpenPO(r.po.id)}
-                className="text-left bg-white border border-red-200 rounded-xl px-3 py-2 hover:bg-red-50/60 transition-colors"
-              >
-                <div className="flex items-center gap-1.5 mb-0.5">
-                  <span className="font-semibold text-indigo-700 text-xs">{r.po.id}</span>
-                  <RiskPill pred={r.pred} />
-                </div>
-                <div className="text-[11px] text-gray-600 truncate">{r.po.product}</div>
-                <div className="text-[11px] font-semibold text-red-700 mt-0.5">
-                  {weeksLateFor(r)} {weeksLateFor(r) === 1 ? 'week' : 'weeks'} late · £{r.pred.missedSalesRisk.estimatedLostRevenue.toLocaleString('en-GB')} sales at risk
-                </div>
-              </button>
-            ))}
+          <div className="bg-white border border-red-200 rounded-xl overflow-hidden">
+            <table className="w-full text-xs">
+              <thead className="bg-red-50/60 border-b border-red-100">
+                <tr>{['PO / SKU','Supplier','Predicted landing vs plan','Days late','Sales at risk',''].map((h, i) => (
+                  <th key={h || i} className={`px-3 py-2 text-[10px] font-semibold text-red-700/80 uppercase tracking-wide whitespace-nowrap ${i >= 3 ? 'text-right' : 'text-left'}`}>{h}</th>
+                ))}</tr>
+              </thead>
+              <tbody className="divide-y divide-red-50">
+                {exceptions.map(r => {
+                  const supName = SUPPLIERS.find(s => s.id === r.po.supplierId)?.name ?? r.po.supplierId
+                  const daysLate = Math.max(0, Math.round((new Date(r.pred.predictedLandingDate).getTime() - new Date(r.pred.targetStockDate).getTime()) / 86400000))
+                  return (
+                    <tr key={r.po.id} onClick={() => onOpenPO(r.po.id)} className="hover:bg-red-50/40 cursor-pointer">
+                      <td className="px-3 py-2">
+                        <div className="flex items-center gap-1.5"><span className="font-semibold text-indigo-700">{r.po.id}</span><RiskPill pred={r.pred} /></div>
+                        <div className="text-[10px] text-gray-500 truncate max-w-[180px]">{r.po.product}</div>
+                      </td>
+                      <td className="px-3 py-2 text-gray-700 whitespace-nowrap">{supName}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        <span className="font-medium text-gray-800">{formatDate(r.pred.predictedLandingDate)}</span>
+                        <span className="text-[10px] text-gray-400"> vs {formatDate(r.pred.targetStockDate)}</span>
+                      </td>
+                      <td className="px-3 py-2 text-right font-bold text-red-700 tabular-nums whitespace-nowrap">{daysLate}d</td>
+                      <td className="px-3 py-2 text-right font-bold text-red-600 tabular-nums whitespace-nowrap">£{r.pred.missedSalesRisk.estimatedLostRevenue.toLocaleString('en-GB')}</td>
+                      <td className="px-3 py-2 text-right"><span className="inline-flex items-center gap-0.5 text-[11px] font-semibold text-indigo-600">Open <ArrowRight className="w-3 h-3" /></span></td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
           </div>
         )}
       </div>
@@ -10680,10 +10692,9 @@ function IntakeForecastView({ onOpenPO }: { onOpenPO: (poId: string) => void }) 
                   <div className="w-full bg-emerald-400 rounded-b-sm" style={{ height: onPlanH }} title={`${w.onPlanUnits.toLocaleString('en-GB')} units on plan`} />
                   {w.atRiskUnits > 0 && <div className="w-full bg-red-400 rounded-t-sm" style={{ height: Math.max(3, atRiskH) }} title={`${w.atRiskUnits.toLocaleString('en-GB')} units at risk`} />}
                 </div>
-                {/* at-risk callout — always shown when present, so a healthy net never hides slippage */}
-                {w.atRiskUnits > 0 && (
-                  <div className="text-[9px] font-bold text-red-600 leading-tight mt-1">{w.atRiskUnits.toLocaleString('en-GB')} at risk</div>
-                )}
+                {/* at-risk callout — fixed-height slot so every bar's labels align
+                    even when there's no at-risk value (incl. 0-unit weeks) */}
+                <div className="h-3.5 mt-1 text-[9px] font-bold text-red-600 leading-tight">{w.atRiskUnits > 0 ? `${w.atRiskUnits.toLocaleString('en-GB')} at risk` : ''}</div>
                 <div className="text-[9px] text-gray-500 mt-1 leading-tight">{w.label}</div>
                 <div className="text-[8px] text-gray-400 leading-tight">{w.newUnits.toLocaleString('en-GB')}N · {w.rebuyUnits.toLocaleString('en-GB')}R</div>
               </button>
@@ -10756,6 +10767,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
   const [poSupFilter,      setPoSupFilter]      = useState('all')
   const [poRiskFilter,     setPoRiskFilter]     = useState('all')
   const [poRiskSort,       setPoRiskSort]       = useState(false)
+  const [poGroupBy,        setPoGroupBy]        = useState<'none' | 'supplier'>('none')
   const [settingsAccordion, setSettingsAccordion] = useState<string | null>(null)
   // Actions queue state
   const [drawerCardKey,    setDrawerCardKey]    = useState<string | null>(initialOpenAction ?? null)
@@ -12924,6 +12936,55 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                 return (pb?.predictedRiskPct ?? -1) - (pa?.predictedRiskPct ?? -1)
               })
             : filtered
+          const poThead = (
+            <thead className="bg-gray-50 border-b border-gray-100">
+              <tr>{['PO Number','Supplier','Product','Status','Risk','Delivery','Predicted landing','Value','Freight'].map(h => <th key={h} className="px-4 py-3 text-left font-semibold text-gray-500 whitespace-nowrap">{h}</th>)}</tr>
+            </thead>
+          )
+          const renderPoRow = (po: PO) => {
+            const sup = getSupplier(po.supplierId)
+            const pred = PO_PREDICTIONS[po.id]
+            const diffDays = Math.ceil((new Date(po.expectedDelivery).getTime() - today.getTime()) / 86400000)
+            const relLabel = diffDays < 0 ? `${Math.abs(diffDays)} days overdue` : diffDays === 0 ? 'Due today' : `due in ${diffDays}d`
+            const gap = pred?.landingGapDays ?? 0
+            const gapCls = gap >= 14 ? 'text-red-600' : gap >= 4 ? 'text-amber-600' : 'text-gray-400'
+            return (
+              <tr key={po.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => setSelectedPOId(po.id)}>
+                <td className="px-4 py-3 font-semibold text-indigo-700">{po.id}</td>
+                <td className="px-4 py-3 text-gray-700">{sup?.name ?? po.supplierId}</td>
+                <td className="px-4 py-3 text-gray-600 max-w-[160px] truncate">{po.product}</td>
+                <td className="px-4 py-3">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {(() => { const sc = STATUS_CONFIG[po.status]; return <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-semibold text-[10px] border ${sc.bg} ${sc.text} ${sc.border}`}><span className={`w-1.5 h-1.5 rounded-full ${sc.dot}`} />{po.status}</span> })()}
+                    {isPredictedToSlip(po, pred) && <PredictedToSlipChip />}
+                  </div>
+                </td>
+                <td className="px-4 py-3">{pred ? <RiskPill pred={pred} /> : <span className="text-[10px] text-gray-300">—</span>}</td>
+                <td className="px-4 py-3">
+                  <div className="font-medium text-gray-800">{formatDate(po.expectedDelivery)}</div>
+                  <div className={`text-[10px] mt-0.5 ${diffDays < 0 ? 'text-red-500' : diffDays <= 7 ? 'text-amber-500' : 'text-gray-400'}`}>{relLabel}</div>
+                  {po.revisedDelivery && <div className="text-[10px] text-orange-500 mt-0.5">→ {formatDate(po.revisedDelivery)}</div>}
+                </td>
+                <td className="px-4 py-3">
+                  {pred ? (
+                    <>
+                      <div className="font-medium text-gray-800">{formatDate(pred.predictedLandingDate)}</div>
+                      {gap > 2
+                        ? <div className={`text-[10px] mt-0.5 font-semibold ${gapCls}`}>{gap}d later than plan</div>
+                        : <div className="text-[10px] mt-0.5 text-green-600">On plan</div>}
+                    </>
+                  ) : <span className="text-[10px] text-gray-300">—</span>}
+                </td>
+                <td className="px-4 py-3 text-gray-700 font-medium">{po.orderValue}</td>
+                <td className="px-4 py-3"><span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${po.freight === 'Air' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>{po.freight}</span></td>
+              </tr>
+            )
+          }
+          // By-supplier grouping reuses the shared <SupplierGroup> (same as Reorder
+          // + the Actions supplier grouping), preserving the risk/filter order.
+          const poSupplierOrder: string[] = []
+          const poBySupplier = new Map<string, PO[]>()
+          ordered.forEach(po => { if (!poBySupplier.has(po.supplierId)) { poBySupplier.set(po.supplierId, []); poSupplierOrder.push(po.supplierId) } poBySupplier.get(po.supplierId)!.push(po) })
           return (
             <div className="space-y-4">
               <div className="flex items-center gap-3 flex-wrap">
@@ -12955,59 +13016,37 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                 >
                   <TrendingDown className="w-3.5 h-3.5" /> {poRiskSort ? 'Sorted by risk' : 'Sort by risk'}
                 </button>
+                {/* Individual ⇄ By supplier — same grouping concept as Reorder */}
+                <div className="inline-flex items-center bg-gray-100 rounded-lg p-0.5 gap-0.5">
+                  {([['none','Individual'],['supplier','By supplier']] as const).map(([k, label]) => (
+                    <button key={k} onClick={() => setPoGroupBy(k)}
+                      className={`h-7 px-3 rounded-md text-xs font-semibold transition-colors ${poGroupBy === k ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>{label}</button>
+                  ))}
+                </div>
                 <button className="ml-auto h-8 px-3 rounded-lg border border-gray-200 text-xs font-semibold text-gray-600 hover:bg-gray-50 flex items-center gap-1.5">
                   <Download className="w-3.5 h-3.5" /> Export Excel
                 </button>
               </div>
-              <div className="bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden">
-                <table className="w-full text-xs">
-                  <thead className="bg-gray-50 border-b border-gray-100">
-                    <tr>{['PO Number','Supplier','Product','Status','Risk','Delivery','Predicted landing','Value','Freight'].map(h => <th key={h} className="px-4 py-3 text-left font-semibold text-gray-500 whitespace-nowrap">{h}</th>)}</tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-50">
-                    {ordered.map(po => {
-                      const sup = getSupplier(po.supplierId)
-                      const pred = PO_PREDICTIONS[po.id]
-                      const diffDays = Math.ceil((new Date(po.expectedDelivery).getTime() - today.getTime()) / 86400000)
-                      const relLabel = diffDays < 0 ? `${Math.abs(diffDays)} days overdue` : diffDays === 0 ? 'Due today' : `due in ${diffDays}d`
-                      const gap = pred?.landingGapDays ?? 0
-                      const gapCls = gap >= 14 ? 'text-red-600' : gap >= 4 ? 'text-amber-600' : 'text-gray-400'
-                      return (
-                        <tr key={po.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => setSelectedPOId(po.id)}>
-                          <td className="px-4 py-3 font-semibold text-indigo-700">{po.id}</td>
-                          <td className="px-4 py-3 text-gray-700">{sup?.name ?? po.supplierId}</td>
-                          <td className="px-4 py-3 text-gray-600 max-w-[160px] truncate">{po.product}</td>
-                          <td className="px-4 py-3">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              {(() => { const sc = STATUS_CONFIG[po.status]; return <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-semibold text-[10px] border ${sc.bg} ${sc.text} ${sc.border}`}><span className={`w-1.5 h-1.5 rounded-full ${sc.dot}`} />{po.status}</span> })()}
-                              {isPredictedToSlip(po, pred) && <PredictedToSlipChip />}
-                            </div>
-                          </td>
-                          <td className="px-4 py-3">{pred ? <RiskPill pred={pred} /> : <span className="text-[10px] text-gray-300">—</span>}</td>
-                          <td className="px-4 py-3">
-                            <div className="font-medium text-gray-800">{formatDate(po.expectedDelivery)}</div>
-                            <div className={`text-[10px] mt-0.5 ${diffDays < 0 ? 'text-red-500' : diffDays <= 7 ? 'text-amber-500' : 'text-gray-400'}`}>{relLabel}</div>
-                            {po.revisedDelivery && <div className="text-[10px] text-orange-500 mt-0.5">→ {formatDate(po.revisedDelivery)}</div>}
-                          </td>
-                          <td className="px-4 py-3">
-                            {pred ? (
-                              <>
-                                <div className="font-medium text-gray-800">{formatDate(pred.predictedLandingDate)}</div>
-                                {gap > 2
-                                  ? <div className={`text-[10px] mt-0.5 font-semibold ${gapCls}`}>{gap}d later than plan</div>
-                                  : <div className="text-[10px] mt-0.5 text-green-600">On plan</div>}
-                              </>
-                            ) : <span className="text-[10px] text-gray-300">—</span>}
-                          </td>
-                          <td className="px-4 py-3 text-gray-700 font-medium">{po.orderValue}</td>
-                          <td className="px-4 py-3"><span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${po.freight === 'Air' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>{po.freight}</span></td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-                {ordered.length === 0 && <div className="text-center text-xs text-gray-400 py-10">No POs match the selected filters</div>}
-              </div>
+              {ordered.length === 0 ? (
+                <div className="bg-white border border-gray-100 rounded-2xl shadow-sm text-center text-xs text-gray-400 py-10">No POs match the selected filters</div>
+              ) : poGroupBy === 'supplier' ? (
+                <div className="space-y-3">
+                  {poSupplierOrder.map(supId => {
+                    const ps = poBySupplier.get(supId)!
+                    const nm = getSupplier(supId)?.name ?? supId
+                    const val = ps.reduce((s, po) => s + parseOrderVal(po.orderValue), 0)
+                    return (
+                      <SupplierGroup key={supId} supplierName={nm} count={ps.length} unit="PO" valueLabel={`£${Math.round(val).toLocaleString('en-GB')}`}>
+                        <table className="w-full text-xs">{poThead}<tbody className="divide-y divide-gray-50">{ps.map(renderPoRow)}</tbody></table>
+                      </SupplierGroup>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden">
+                  <table className="w-full text-xs">{poThead}<tbody className="divide-y divide-gray-50">{ordered.map(renderPoRow)}</tbody></table>
+                </div>
+              )}
             </div>
           )
         })()}
