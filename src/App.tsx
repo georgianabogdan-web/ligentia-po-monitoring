@@ -7474,6 +7474,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
   const [filter, setFilter]   = useState<ReorderFilter>('All')   // Buy-status track
   const [supplierFilter, setSupplierFilter] = useState<SupplierStatus | 'all'>('all')  // Supplier-status track
   const [selectedProduct, setSelectedProduct] = useState<typeof REORDER_RECOMMENDATIONS[0] | null>(null)
+  const [showInbox, setShowInbox] = useState(false)   // Active Negotiations conversation inbox
   const [chartTab, setChartTab] = useState<'stock' | 'availability' | 'size-curve'>('stock')
   const [timeRange, setTimeRange] = useState<'1m' | '6m' | '1y'>('6m')
   const [statusOverrides, setStatusOverrides] = useState<Record<string, ApprovalStatus>>({})
@@ -7499,10 +7500,14 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
   // state and survive the round-trip on their own).
   const listScrollRef = useRef<HTMLDivElement>(null)
   const savedScroll   = useRef(0)
-  const openLine = (id: string) => { savedScroll.current = listScrollRef.current?.scrollTop ?? 0; setOpenLineId(id) }
+  const saveScroll = () => { savedScroll.current = listScrollRef.current?.scrollTop ?? 0 }
+  // Clicking a line opens its full line-detail page (the buy case) — NOT the
+  // email thread. The negotiation is triggered from there or the inbox.
+  const openLineDetail = (p: typeof REORDER_RECOMMENDATIONS[0]) => { saveScroll(); setSelectedProduct(p) }
+  const openInbox = () => { saveScroll(); setShowInbox(true) }
   useLayoutEffect(() => {
-    if (!openLineId && !openSession && listScrollRef.current) listScrollRef.current.scrollTop = savedScroll.current
-  }, [openLineId, openSession])
+    if (!openLineId && !openSession && !selectedProduct && !showInbox && listScrollRef.current) listScrollRef.current.scrollTop = savedScroll.current
+  }, [openLineId, openSession, selectedProduct, showInbox])
 
   // Start (or resume) a supplier inquiry across N lines → navigate into the
   // multi-line negotiation workspace, carrying the selected line IDs.
@@ -7522,9 +7527,15 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
     setOpenSession(session)
   }
 
-  // Negotiation is no longer a place you navigate to — opening a supplier
-  // inquiry opens that line's full-page detail/conversation workspace in place.
-  const openSupplierInquiry = (recId: string) => openLine(recId)
+  // TRIGGER the negotiation from the line-detail page: leave the buy case and
+  // open the shared negotiation workspace (resume its multi-line session if the
+  // line already belongs to one, else a single-line thread).
+  const openSupplierInquiry = (recId: string) => {
+    setSelectedProduct(null)
+    const session = supplierSessions.find(s => s.threadIds.includes(recId))
+    if (session) setOpenSession(session)
+    else setOpenLineId(recId)
+  }
   const [editQty, setEditQty]                   = useState(0)
   const [editExFactory, setEditExFactory]       = useState('')
   const [editCostPrice, setEditCostPrice]       = useState(0)
@@ -7691,11 +7702,17 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                         Push to Order App
                       </button>
                     )}
-                    <button onClick={() => openSupplierInquiry(p.id)}
-                      className="h-7 px-2.5 text-[10px] font-medium rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 transition-colors flex items-center gap-1"
-                      title="Send supplier inquiry">
-                      <Mail className="w-3 h-3" />Supplier Inquiry
-                    </button>
+                    {(() => {
+                      const hasInquiry = supplierSessions.some(s => s.threadIds.includes(p.id)) ||
+                        (!!inquiries[p.id] && !['idle', 'draft'].includes(inquiries[p.id].status))
+                      return (
+                        <button onClick={() => openSupplierInquiry(p.id)}
+                          className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-violet-600 text-white hover:bg-violet-700 transition-colors flex items-center gap-1.5"
+                          title={hasInquiry ? 'Open the live supplier conversation' : 'Start a supplier inquiry for this line'}>
+                          <Mail className="w-3 h-3" />{hasInquiry ? 'Open supplier inquiry' : 'Start supplier inquiry'}
+                        </button>
+                      )
+                    })()}
                   </div>
                 </div>
                 {/* Divider */}
@@ -8291,6 +8308,71 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
     )
   }
 
+  // ── ACTIVE NEGOTIATIONS — the conversation inbox (one entry per live thread) ──
+  // HOUSES conversations (vs the line list which TRIGGERS them). Both entry
+  // points — a line-detail "Start supplier inquiry" and the By-supplier bulk
+  // action — create threads/sessions that surface here. Clicking opens the same
+  // negotiation workspace (single or multi-line); not a competing line list.
+  const inboxSessionThreadIds = new Set(supplierSessions.flatMap(s => s.threadIds))
+  const inboxOrphanThreads = Object.values(inquiries).filter(t => t && !['idle', 'draft'].includes(t.status) && !inboxSessionThreadIds.has(t.recId))
+  const activeNegCount = supplierSessions.length + inboxOrphanThreads.length
+
+  if (showInbox && !openSession && !openLineId) {
+    const sessionEntries = supplierSessions.map(s => {
+      const lines = s.threadIds.map(id => REORDER_RECOMMENDATIONS.find(r => r.id === id)).filter(Boolean) as typeof REORDER_RECOMMENDATIONS
+      const round = Math.max(1, ...lines.map(l => inquiries[l.id]?.rounds.length ?? 1))
+      const statuses = lines.map(l => threadToSupplierStatus(inquiries[l.id]) ?? l.supplierStatus)
+      return { key: s.id, supplier: s.supplierId, lineCount: s.threadIds.length, statuses, round, onOpen: () => setOpenSession(s) }
+    })
+    const orphanEntries = inboxOrphanThreads.map(t => {
+      const rec = REORDER_RECOMMENDATIONS.find(r => r.id === t.recId)
+      return { key: t.recId, supplier: t.supplierId, lineCount: 1, statuses: [threadToSupplierStatus(t) ?? 'awaiting_reply' as SupplierStatus], round: t.rounds.length, onOpen: () => setOpenLineId(t.recId), name: rec?.name }
+    })
+    const entries = [...sessionEntries, ...orphanEntries]
+    return (
+      <DetailWorkspaceLayout
+        onBack={() => setShowInbox(false)}
+        backLabel="Back to reorders"
+        breadcrumb={<>Reorder · Active Negotiations</>}
+        header={
+          <div className="bg-white border border-gray-200 rounded-2xl px-5 py-4">
+            <div className="text-base font-bold text-gray-900">Active Negotiations</div>
+            <div className="text-xs text-gray-400 mt-0.5">{entries.length} live supplier conversation{entries.length === 1 ? '' : 's'} · the home for every thread you've opened</div>
+          </div>
+        }
+      >
+        {entries.length === 0 ? (
+          <div className="bg-white border border-gray-200 rounded-2xl py-16 text-center">
+            <Mail className="w-7 h-7 text-gray-300 mx-auto mb-2" />
+            <div className="text-sm text-gray-500">No active negotiations yet.</div>
+            <div className="text-[11px] text-gray-400 mt-1">Open a line and choose “Start supplier inquiry”, or use “Start supplier inquiry” in the By-supplier view.</div>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {entries.map(e => {
+              const sup = SUPPLIERS.find(s => s.name === e.supplier)
+              const counts = e.statuses.reduce((m, st) => { m[st] = (m[st] ?? 0) + 1; return m }, {} as Record<string, number>)
+              return (
+                <button key={e.key} onClick={e.onOpen}
+                  className="w-full text-left bg-white border border-gray-200 rounded-2xl px-4 py-3 hover:border-indigo-300 hover:bg-indigo-50/30 transition-colors flex items-center gap-3 flex-wrap">
+                  <span className="text-[13px] font-bold text-gray-900">{e.supplier}</span>
+                  {sup && <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${sup.onTimeRate >= 80 ? 'bg-green-50 text-green-700 border-green-100' : sup.onTimeRate >= 70 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'}`}>OTR {sup.onTimeRate}%</span>}
+                  <span className="text-[11px] text-gray-400">{e.lineCount} line{e.lineCount === 1 ? '' : 's'} · Round {e.round}</span>
+                  <span className="ml-auto flex items-center gap-1.5 flex-wrap justify-end">
+                    {(Object.keys(counts) as SupplierStatus[]).map(st => (
+                      <span key={st} className="inline-flex items-center gap-1"><SupplierStatusChip status={st} />{counts[st] > 1 && <span className="text-[10px] text-gray-400">×{counts[st]}</span>}</span>
+                    ))}
+                    <ArrowRight className="w-3.5 h-3.5 text-indigo-400" />
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+        )}
+      </DetailWorkspaceLayout>
+    )
+  }
+
   // KPI computations
   const totalReorderValue = REORDER_RECOMMENDATIONS.reduce((s, r) => s + r.totalCost, 0)
   const livePos           = REORDER_RECOMMENDATIONS.filter(r => effStatus(r) === 'Approved').length
@@ -8417,19 +8499,27 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
           ))}
         </div>
 
-        {/* View toggle — the ONE global control for the whole Reorder list */}
-        <div className="flex items-center bg-gray-100 rounded-xl p-1 mb-5 w-fit gap-0.5">
-          {([
-            { k: 'individual',  lbl: 'Individual',  hint: 'One row per SKU/line' },
-            { k: 'by_supplier', lbl: 'By supplier', hint: 'Lines grouped under each supplier' },
-          ] as const).map(opt => (
-            <button key={opt.k} onClick={() => setReorderView(opt.k)} title={opt.hint}
-              className={`h-8 px-5 rounded-lg text-xs font-semibold transition-colors ${
-                reorderView === opt.k ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'
-              }`}>
-              {opt.lbl}
-            </button>
-          ))}
+        {/* View toggle — the ONE global control for the whole Reorder list — and
+            a separate doorway to the Active Negotiations conversation inbox. */}
+        <div className="flex items-center justify-between gap-3 flex-wrap mb-5">
+          <div className="flex items-center bg-gray-100 rounded-xl p-1 w-fit gap-0.5">
+            {([
+              { k: 'individual',  lbl: 'Individual',  hint: 'One row per SKU/line' },
+              { k: 'by_supplier', lbl: 'By supplier', hint: 'Lines grouped under each supplier' },
+            ] as const).map(opt => (
+              <button key={opt.k} onClick={() => setReorderView(opt.k)} title={opt.hint}
+                className={`h-8 px-5 rounded-lg text-xs font-semibold transition-colors ${
+                  reorderView === opt.k ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'
+                }`}>
+                {opt.lbl}
+              </button>
+            ))}
+          </div>
+          <button onClick={openInbox} title="All live supplier conversations"
+            className="h-9 inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-semibold text-gray-700 hover:bg-gray-50 transition-colors">
+            <Mail className="w-3.5 h-3.5 text-violet-500" /> Active Negotiations
+            {activeNegCount > 0 && <span className="ml-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700">{activeNegCount}</span>}
+          </button>
         </div>
 
         {/* One-line onboarding: the two parallel tracks every line carries */}
@@ -8571,7 +8661,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                 onToggleRow={toggleRowSel}
                 onToggleMany={toggleManySel}
                 effStatus={effStatus}
-                onOpenLine={p => openLine(p.id)}
+                onOpenLine={p => openLineDetail(p)}
                 onStartInquiry={openSupplierSession}
               />
             ) : (
@@ -8626,7 +8716,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                     const fmtK = (v: number) => v >= 1000 ? `${(v/1000).toFixed(1)}K` : `${v}`
                     const stickyBg = i % 2 !== 0 ? '#f9fafb' : '#ffffff'
                     return (
-                      <tr key={p.id} onClick={() => openLine(p.id)}
+                      <tr key={p.id} onClick={() => openLineDetail(p)}
                         className={`border-b border-gray-50 hover:bg-indigo-50/40 cursor-pointer transition-colors ${inquiries[p.id]?.status === 'escalated' ? 'bg-red-50/50' : i % 2 !== 0 ? 'bg-gray-50/20' : ''}`}>
                         <td className="sticky z-10 px-3 py-2 border-r border-gray-100" style={{ left: 0, backgroundColor: stickyBg }} onClick={e => e.stopPropagation()}>
                           <input type="checkbox" className="rounded"
