@@ -11623,20 +11623,58 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           <>
             {!drawerOpen && (<>
             {actionToast && <Toast message={actionToast} onDone={() => setActionToast(null)} />}
-            {/* ── Mode toggle (reactive vs pre-emptive) + Group by ─────────── */}
-            <div className="flex items-center justify-between gap-3 flex-wrap mb-1">
+            {/* ── One tidy controls row: mode · Type ▾ · Urgency ▾ … Sort ▾ · Group by ── */}
+            <div className="flex items-center gap-2 flex-wrap mb-1">
+              {/* Primary mode cut */}
               <div className="inline-flex items-center bg-gray-100 rounded-xl p-1 gap-0.5">
                 {([['now','Live issues'],['predicted','Predicted'],['all','All']] as const).map(([k, label]) => (
                   <button key={k} onClick={() => setActionMode(k)}
                     className={`h-8 px-4 rounded-lg text-xs font-semibold transition-colors ${actionMode === k ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>{label}</button>
                 ))}
               </div>
-              <div className="inline-flex items-center gap-1.5">
-                <span className="text-[10px] text-gray-400 font-medium">Group by:</span>
-                {([['none','None'],['supplier','Supplier']] as const).map(([k, label]) => (
-                  <button key={k} onClick={() => setActionGroupBy(k)}
-                    className={`px-3 py-1 rounded-lg text-xs font-semibold transition-colors ${actionGroupBy === k ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>{label}</button>
-                ))}
+              {/* Type filter — collapsed from the pill row into a labelled dropdown */}
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wide">Type</span>
+                <div className="relative">
+                  <select value={actTypeFilter} onChange={e => setActTypeFilter(e.target.value)}
+                    className="h-9 pl-2.5 pr-7 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none">
+                    {[['all','All'],['chase','Chase'],['date_change','Date change'],['dc_booking','DC booking'],['decision','Decision']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                  </select>
+                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+                </div>
+              </div>
+              {/* Urgency filter — collapsed from the pill row into a labelled dropdown */}
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wide">Urgency</span>
+                <div className="relative">
+                  <select value={urgencyFilter} onChange={e => setUrgencyFilter(e.target.value)}
+                    className="h-9 pl-2.5 pr-7 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none">
+                    {[['all','Any'],['overdue','Overdue'],['at_risk','At risk'],['routine','Routine']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                  </select>
+                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+                </div>
+              </div>
+              {/* Sort + Group by — aligned right */}
+              <div className="ml-auto flex items-center gap-3 flex-wrap">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wide">Sort</span>
+                  <div className="relative">
+                    <select value={sortMode} onChange={e => setSortMode(e.target.value as 'missed_sales' | 'value' | 'overdue')}
+                      className="h-9 pl-2.5 pr-7 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none">
+                      {[['missed_sales','Sales at risk'],['value','Value at risk'],['overdue','Most overdue']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                    </select>
+                    <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+                  </div>
+                </div>
+                <div className="inline-flex items-center gap-1.5">
+                  <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wide">Group by</span>
+                  <div className="inline-flex items-center bg-gray-100 rounded-lg p-0.5 gap-0.5">
+                    {([['none','None'],['supplier','Supplier']] as const).map(([k, label]) => (
+                      <button key={k} onClick={() => setActionGroupBy(k)}
+                        className={`h-7 px-3 rounded-md text-xs font-semibold transition-colors ${actionGroupBy === k ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>{label}</button>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -11674,48 +11712,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                   <span className="font-bold">{count}</span> {label}
                 </span>
               ))}
-            </div>
-
-            {/* ── Filter bar (type · urgency · sort — within the active mode) ── */}
-            <div className="flex items-center gap-2 flex-wrap bg-white border border-gray-100 rounded-xl px-4 py-3 shadow-sm">
-              <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mr-1">Filter</span>
-              {[
-                { value: 'all',         label: 'All types' },
-                { value: 'chase',       label: 'Chase' },
-                { value: 'date_change', label: 'Date change' },
-                { value: 'dc_booking',  label: 'DC booking' },
-                { value: 'decision',    label: 'Decision' },
-              ].map(opt => (
-                <button key={opt.value} onClick={() => setActTypeFilter(opt.value)}
-                  className={`px-3 py-1 rounded-lg text-xs font-semibold transition-colors ${actTypeFilter === opt.value ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
-                  {opt.label}
-                </button>
-              ))}
-              <div className="w-px h-4 bg-gray-200 mx-1" />
-              {[
-                { value: 'all',      label: 'Any urgency' },
-                { value: 'overdue',  label: 'Overdue' },
-                { value: 'at_risk',  label: 'At risk' },
-                { value: 'routine',  label: 'Routine' },
-              ].map(opt => (
-                <button key={opt.value} onClick={() => setUrgencyFilter(opt.value)}
-                  className={`px-3 py-1 rounded-lg text-xs font-semibold transition-colors ${urgencyFilter === opt.value ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
-                  {opt.label}
-                </button>
-              ))}
-              <div className="ml-auto flex items-center gap-1.5">
-                <span className="text-[10px] text-gray-400 font-medium">Sort:</span>
-                {([
-                  { v: 'missed_sales', label: '↓ Sales at risk' },
-                  { v: 'value',        label: 'Value at risk' },
-                  { v: 'overdue',      label: 'Most overdue' },
-                ] as const).map(opt => (
-                  <button key={opt.v} onClick={() => setSortMode(opt.v)}
-                    className={`px-3 py-1 rounded-lg text-xs font-semibold transition-colors ${sortMode === opt.v ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
             </div>
 
             {/* ── Guidance line (reflects active mode) ──────────────────────── */}
