@@ -3530,13 +3530,6 @@ const STOCK_CFG: Record<StockStatus, { bg: string; text: string; dot: string; bo
   'overstocked': { bg: 'bg-blue-50',   text: 'text-blue-700',  dot: 'bg-blue-500',  border: 'border-blue-200',  label: 'Overstocked' },
 }
 
-const APPROVAL_CFG: Record<ApprovalStatus, { bg: string; text: string; dot: string; border: string }> = {
-  'Draft':            { bg: 'bg-gray-100',  text: 'text-gray-600',  dot: 'bg-gray-400',  border: 'border-gray-200' },
-  'Pending Approval': { bg: 'bg-amber-50',  text: 'text-amber-700', dot: 'bg-amber-400', border: 'border-amber-200' },
-  'Approved':         { bg: 'bg-green-50',  text: 'text-green-700', dot: 'bg-green-500', border: 'border-green-200' },
-  'Rejected':         { bg: 'bg-red-50',    text: 'text-red-700',   dot: 'bg-red-500',   border: 'border-red-200' },
-  'Sent':             { bg: 'bg-indigo-50', text: 'text-indigo-700',dot: 'bg-indigo-500',border: 'border-indigo-200' },
-}
 
 // ── Two parallel status tracks ────────────────────────────────────────────────
 // Every reorder line advances on two independent tracks at once. These render as
@@ -6106,7 +6099,8 @@ function ReorderBySupplier({
                 <tr>
                   <th className="px-2 py-2 w-7"></th>
                   <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Product</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Status</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Buy Status</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Supplier Status</th>
                   <th className="px-2 py-2 text-right text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Reorder qty</th>
                   <th className="px-2 py-2 text-right text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Total cost</th>
                   <th className="px-2 py-2 text-right text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Margin</th>
@@ -6132,12 +6126,8 @@ function ReorderBySupplier({
                           </div>
                         </div>
                       </td>
-                      <td className="px-2 py-2">
-                        <div className="flex flex-col gap-1 items-start">
-                          <BuyStatusChip status={buyStatusOf(st)} />
-                          <SupplierStatusChip status={p.supplierStatus} />
-                        </div>
-                      </td>
+                      <td className="px-2 py-2"><BuyStatusChip status={buyStatusOf(st)} /></td>
+                      <td className="px-2 py-2"><SupplierStatusChip status={p.supplierStatus} /></td>
                       <td className="px-2 py-2 text-right font-bold text-indigo-700">{p.recommendedReorderQty.toLocaleString()}</td>
                       <td className="px-2 py-2 text-right font-semibold text-gray-700">£{p.totalCost.toLocaleString()}</td>
                       <td className={`px-2 py-2 text-right font-semibold ${grossMargin > 25 ? 'text-green-700' : grossMargin >= 10 ? 'text-amber-700' : 'text-red-600'}`}>{grossMargin}%</td>
@@ -7467,7 +7457,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
   // Single Reorder working list. One global view toggle (the only one in the
   // whole Reorder experience): per-line vs grouped-by-supplier. Negotiation is
   // no longer a separate destination — it's a conversation attached to a line.
-  const [reorderView, setReorderView] = useState<'individual' | 'by_supplier'>('individual')
+  const [reorderView, setReorderView] = useState<'individual' | 'by_supplier'>('by_supplier')
   const [openLineId, setOpenLineId]   = useState<string | null>(null)
   // Multi-line negotiation: one supplier, N lines (same workspace, N>1).
   const [openSession, setOpenSession] = useState<SupplierSession | null>(null)
@@ -8394,14 +8384,6 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
   const filteredRows = filter === 'All'
     ? supplierScoped
     : supplierScoped.filter(p => effStatus(p) === filter)
-  const tabCounts: Record<ReorderFilter, number> = {
-    All:               supplierScoped.length,
-    Draft:             supplierScoped.filter(p => effStatus(p) === 'Draft').length,
-    'Pending Approval':supplierScoped.filter(p => effStatus(p) === 'Pending Approval').length,
-    Approved:          supplierScoped.filter(p => effStatus(p) === 'Approved').length,
-    Rejected:          supplierScoped.filter(p => effStatus(p) === 'Rejected').length,
-    Sent:              supplierScoped.filter(p => effStatus(p) === 'Sent').length,
-  }
   const SUPPLIER_FILTER_OPTS: { value: SupplierStatus | 'all'; label: string }[] = [
     { value: 'all',            label: 'All' },
     { value: 'not_contacted',  label: 'Not contacted' },
@@ -8522,37 +8504,9 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
           </button>
         </div>
 
-        {/* One-line onboarding: the two parallel tracks every line carries */}
-        <div className="flex items-center gap-1.5 text-[11px] text-gray-400 mb-3">
-          <Info className="w-3 h-3 shrink-0" />
-          Every line runs two independent tracks — <span className="font-semibold text-gray-500">Buy</span> (internal management approval) and <span className="font-semibold text-gray-500">Supplier</span> (negotiation) — shown as two chips per line.
-        </div>
-
         {/* Single working list — filters apply to both views */}
         {(
           <>
-
-
-            {/* Status filter tabs */}
-            <div className="flex items-center bg-gray-100 rounded-xl p-1 mb-4 w-fit gap-0.5">
-              {FILTER_TABS.map(s => {
-                const active = filter === s
-                const cfgKey = s === 'All' ? null : s as ApprovalStatus
-                const ac = cfgKey ? APPROVAL_CFG[cfgKey] : null
-                return (
-                  <button key={s} onClick={() => setFilter(s)}
-                    className={`flex items-center gap-2 h-8 px-4 rounded-lg text-xs font-semibold transition-colors ${
-                      active ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'
-                    }`}>
-                    {s}
-                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
-                      active && ac ? `${ac.bg} ${ac.text} border ${ac.border}` : 'bg-gray-200 text-gray-500'
-                    }`}>{tabCounts[s]}</span>
-                  </button>
-                )
-              })}
-            </div>
-
             {/* Filter bar */}
             <div className="flex items-center gap-2 mb-4 flex-wrap">
               <div className="relative w-52">
@@ -8683,7 +8637,8 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                     <th className="sticky z-20 bg-gray-50 text-left px-3 py-3 font-semibold text-gray-500 whitespace-nowrap" style={{ left: 236, minWidth: 104 }}>Category</th>
                     <th className="sticky z-20 bg-indigo-50 text-right px-3 py-3 font-bold text-indigo-700 whitespace-nowrap border-l border-indigo-100" style={{ left: 340, minWidth: 100 }}>Reorder qty</th>
                     <th className="sticky z-20 bg-indigo-50 text-right px-3 py-3 font-bold text-indigo-700 whitespace-nowrap border-x border-indigo-100" style={{ left: 440, minWidth: 130, boxShadow: '2px 0 4px -1px rgba(0,0,0,0.06)' }}>Total reorder cost</th>
-                    <th className="text-left px-3 py-3 font-semibold text-gray-500 whitespace-nowrap" style={{ minWidth: 150 }}>Status</th>
+                    <th className="text-left px-3 py-3 font-semibold text-gray-500 whitespace-nowrap" style={{ minWidth: 130 }}>Buy Status</th>
+                    <th className="text-left px-3 py-3 font-semibold text-gray-500 whitespace-nowrap" style={{ minWidth: 150 }}>Supplier Status</th>
                     <th className="text-left px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Freight</th>
                     <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Selling Price</th>
                     <th className="text-right px-3 py-3 font-semibold text-gray-500 whitespace-nowrap">Cost Price</th>
@@ -8740,12 +8695,8 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                         <td className="sticky z-10 px-3 py-2 text-right font-bold text-indigo-700 text-sm" style={{ left: 440, backgroundColor: stickyBg, boxShadow: '2px 0 4px -1px rgba(0,0,0,0.06)' }}>
                           £{p.totalCost.toLocaleString()}
                         </td>
-                        <td className="px-3 py-2">
-                          <div className="flex flex-col gap-1 items-start">
-                            <BuyStatusChip status={buyStatusOf(curSt)} />
-                            <SupplierStatusChip status={p.supplierStatus} />
-                          </div>
-                        </td>
+                        <td className="px-3 py-2"><BuyStatusChip status={buyStatusOf(curSt)} /></td>
+                        <td className="px-3 py-2"><SupplierStatusChip status={p.supplierStatus} /></td>
                         <td className="px-3 py-2">
                           <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border whitespace-nowrap ${
                             curFr === 'Air' ? 'bg-sky-50 text-sky-700 border-sky-200' : 'bg-blue-50 text-blue-700 border-blue-200'
@@ -8848,7 +8799,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                   })}
                   {filteredRows.length === 0 && (
                     <tr>
-                      <td colSpan={22} className="px-3 py-12 text-center">
+                      <td colSpan={23} className="px-3 py-12 text-center">
                         <div className="text-sm text-gray-500">No reorder lines match the current filters.</div>
                         <div className="text-[11px] text-gray-400 mt-1.5">Each line tracks two things in parallel: Buy status (internal approval) and Supplier status (negotiation).</div>
                       </td>
