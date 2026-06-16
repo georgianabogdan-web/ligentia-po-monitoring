@@ -2222,7 +2222,7 @@ function SupplierDetailView({
       <div className="bg-white border border-gray-100 rounded-2xl shadow-sm">
         <div className="px-6 pt-5 pb-4 border-b border-gray-100">
           <button onClick={onBack} className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-800 mb-3">
-            <ChevronLeft className="w-3.5 h-3.5" /> Back to Suppliers
+            <ChevronLeft className="w-3.5 h-3.5" /> Back to Supplier Health
           </button>
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0 flex-1">
@@ -10605,7 +10605,7 @@ function IntakeForecastView({ onOpenPO }: { onOpenPO: (poId: string) => void }) 
       {/* Summary header — net totals, but immediately paired with the at-risk count */}
       <div className="flex items-end justify-between flex-wrap gap-3">
         <div>
-          <div className="text-sm font-bold text-gray-900">Intake forecast — next {WEEKS} weeks</div>
+          <div className="text-sm font-bold text-gray-900">Intake Forecast — next {WEEKS} weeks</div>
           <div className="text-[11px] text-gray-500 mt-0.5">
             Predicted landings (not stated dates). {rows.length} open POs ·{' '}
             <span className="font-semibold text-red-600">{totalAtRisk} at risk</span> ·{' '}
@@ -10738,7 +10738,7 @@ function IntakeForecastView({ onOpenPO }: { onOpenPO: (poId: string) => void }) 
 
 // ── PO Monitoring View ────────────────────────────────────────────────────────
 function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _onNavigateToNeg }: { initialOpenPO?: string | null; initialOpenAction?: string | null; onNavigateToNeg?: (recId: string) => void }) {
-  const [subTab,           setSubTab]           = useState<'intake' | 'actions' | 'allpos' | 'suppliers' | 'agentlog'>('intake')
+  const [subTab,           setSubTab]           = useState<'intake' | 'actions' | 'allpos' | 'suppliers' | 'agentlog'>('actions')
   const [poEventsMap,      setPoEventsMap]      = useState<Map<string, POEvent[]>>(new Map(Object.entries(SEED_PO_EVENTS)))
   const [lastChasedMap] = useState<Map<string, string>>(new Map()); void lastChasedMap
   const [selectedPOId,     setSelectedPOId]     = useState<string | null>(initialOpenPO ?? null)
@@ -11319,7 +11319,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
         {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center bg-gray-100 rounded-xl p-1 gap-0.5">
-            {([['intake','Intake'],['actions','Actions'],['allpos','All POs'],['suppliers','Suppliers'],['agentlog','Agent Log']] as const).map(([t, label]) => (
+            {([['intake','Intake Forecast'],['actions','Actions'],['allpos','All POs'],['suppliers','Supplier Health'],['agentlog','Agent Log']] as const).map(([t, label]) => (
               <button key={t} onClick={() => setSubTab(t)} className={`h-8 px-4 rounded-lg text-xs font-semibold transition-colors ${subTab === t ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>{label}</button>
             ))}
           </div>
@@ -11392,6 +11392,26 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
             // Urgency indicator: red overdue/decision · amber at-risk · violet predictive · grey routine
             const urg = (state === 'decision-needed' || g.type === 'overdue') ? 'red' : g.type === 'at_risk' ? 'amber' : g.type === 'predicted' ? 'violet' : 'grey'
             const urgBorder = { red: 'border-l-red-500', amber: 'border-l-amber-500', violet: 'border-l-violet-400', grey: 'border-l-gray-300' }[urg]
+            // Problem chip: what's wrong + how bad. Loud for real (Live issues),
+            // toned violet for predicted slips — matching the real-vs-potential treatment.
+            const problem = (() => {
+              if (g.type === 'predicted') {
+                const reason = PO_PREDICTIONS[worstPO?.id ?? '']?.gatingStageLabel
+                return { label: `Predicted slip${reason ? ` · ${reason}` : ''}`, cls: 'bg-violet-50 text-violet-700 border-violet-200' }
+              }
+              if (g.type === 'overdue') {
+                const noRevised = g.pos.some(p => daysOverdue(p) > 0 && !p.revisedDelivery)
+                return { label: `${maxOver}d late${noRevised ? ' · no revised date' : ''}`, cls: maxOver >= 14 ? 'bg-red-50 text-red-700 border-red-200' : 'bg-amber-50 text-amber-700 border-amber-200' }
+              }
+              if (g.type === 'at_risk') {
+                const dp = Math.max(0, ...g.pos.map(p => p.revisedDelivery ? Math.round((new Date(p.revisedDelivery).getTime() - new Date(p.expectedDelivery).getTime()) / 86400000) : 0))
+                return { label: dp > 0 ? `Date change · +${dp}d` : 'Date change required', cls: 'bg-amber-50 text-amber-700 border-amber-200' }
+              }
+              if (g.type === 'late_dc') {
+                return { label: 'DC unconfirmed', cls: (sup?.onTimeRate ?? 100) <= 85 ? 'bg-red-50 text-red-700 border-red-200' : 'bg-amber-50 text-amber-700 border-amber-200' }
+              }
+              return { label: issueTitle, cls: 'bg-gray-100 text-gray-600 border-gray-200' }
+            })()
             // Action control follows TYPE: judgment → Open →; agent-drafted → inline approve.
             const tier1Decision = g.type === 'overdue' && (state === 'decision-needed' || (sup?.onTimeRate ?? 100) < 70)
             const lowOtrBooking = g.type === 'late_dc' && (sup?.onTimeRate ?? 100) <= 85   // needs root-cause look
@@ -11402,7 +11422,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                 key={ck}
                 onClick={() => openActionCard(ck)}
                 className={`grid items-center gap-x-3 px-4 py-2.5 border-l-4 ${urgBorder} cursor-pointer transition-colors hover:bg-gray-50 ${snoozedCards.has(ck) ? 'opacity-50' : ''}`}
-                style={{ gridTemplateColumns: 'minmax(0,1fr) 96px 132px 152px 148px' }}
+                style={{ gridTemplateColumns: 'minmax(0,1fr) 156px 92px 124px 150px 140px' }}
               >
                 {/* 1 · supplier + one-line situation */}
                 <div className="min-w-0">
@@ -11410,7 +11430,12 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                   <div className="text-[12px] font-semibold text-gray-900 truncate">{sup?.name ?? g.supplierId} <span className="font-normal text-gray-500">· {issueTitle}</span></div>
                   <div className="text-[10px] text-gray-400 truncate">{g.pos.length <= 2 ? g.pos.map(p => p.id).join(', ') : `${g.pos[0].id}, ${g.pos[1].id} +${g.pos.length - 2} more`}</div>
                 </div>
-                {/* 2 · £ at risk */}
+                {/* 2 · PROBLEM — what's wrong + how bad (separate from £/sales + recommendation) */}
+                <div>
+                  <div className="text-[8px] uppercase tracking-wide text-gray-400 mb-0.5">Problem</div>
+                  <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold border whitespace-nowrap ${problem.cls}`}>{problem.label}</span>
+                </div>
+                {/* 3 · £ at risk */}
                 <div className="text-right">
                   <div className="text-[8px] uppercase tracking-wide text-gray-400">£ at risk</div>
                   <div className="text-[12px] font-semibold text-gray-800 tabular-nums">£{valAtRisk.toLocaleString()}</div>
@@ -11589,7 +11614,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
             {/* ── Mode toggle (reactive vs pre-emptive) + Group by ─────────── */}
             <div className="flex items-center justify-between gap-3 flex-wrap mb-1">
               <div className="inline-flex items-center bg-gray-100 rounded-xl p-1 gap-0.5">
-                {([['now','Happening now'],['predicted','Predicted'],['all','All']] as const).map(([k, label]) => (
+                {([['now','Live issues'],['predicted','Predicted'],['all','All']] as const).map(([k, label]) => (
                   <button key={k} onClick={() => setActionMode(k)}
                     className={`h-8 px-4 rounded-lg text-xs font-semibold transition-colors ${actionMode === k ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>{label}</button>
                 ))}
