@@ -5998,12 +5998,46 @@ function BulkNegotiationsView({
   )
 }
 
+// ── Shared "By supplier" group shell ─────────────────────────────────────────
+// ONE grouping pattern used by BOTH the Reorder "By supplier" view and the PO
+// Monitoring Actions "Group by supplier" view: a supplier card with a header
+// (name + relationship badges + OTR + count + combined £) and clustered rows.
+// headerLeading (e.g. a select-all checkbox) and headerAction (e.g. a button)
+// are optional slots so each caller adds its own affordances.
+function SupplierGroup({
+  supplierName, count, unit = 'line', valueLabel, headerLeading, headerAction, children,
+}: {
+  supplierName:   string
+  count:          number
+  unit?:          string
+  valueLabel?:    string
+  headerLeading?: React.ReactNode
+  headerAction?:  React.ReactNode
+  children:       React.ReactNode
+}) {
+  const supObj = SUPPLIERS.find(s => s.name === supplierName)
+  const pat    = supObj ? getRelationshipPattern(supObj) : null
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl overflow-hidden">
+      <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/50 flex items-center gap-3 flex-wrap">
+        {headerLeading}
+        <span className="text-[13px] font-bold text-gray-900">{supplierName}</span>
+        {pat === 'structural'    && <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-700 uppercase tracking-wide">Structural underperformer</span>}
+        {pat === 'concentration' && <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 uppercase tracking-wide">High concentration</span>}
+        {supObj && <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${supObj.onTimeRate >= 80 ? 'bg-green-50 text-green-700 border-green-100' : supObj.onTimeRate >= 70 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'}`}>OTR {supObj.onTimeRate}%</span>}
+        <span className="text-[10px] text-gray-400">{count} {unit}{count === 1 ? '' : 's'}{valueLabel ? ` · ${valueLabel}` : ''}</span>
+        {headerAction && <span className="ml-auto">{headerAction}</span>}
+      </div>
+      {children}
+    </div>
+  )
+}
+
 // ── Reorder · By-supplier grouped view ───────────────────────────────────────
 // Same reorder lines as the Individual table, grouped under a supplier header
-// with the dense bulk tick-through pattern (the BulkNegotiationsView is the
-// basis): per-supplier select-all + "Apply recommended steps", per-row buy/
-// supplier chips, click a row to open its detail/conversation panel. Operates
-// on the already-filtered rows, so it honours the same status/category/search.
+// (shared SupplierGroup) with the dense bulk tick-through pattern: per-supplier
+// select-all + "Start supplier inquiry", per-row buy/supplier chips, click a row
+// to open its detail/conversation. Operates on the already-filtered rows.
 const REORDER_REC_STEP: Record<PipelineStage, { label: string; actionable: boolean }> = {
   draft:            { label: 'Send to manager',  actionable: true  },
   pending_approval: { label: 'Awaiting approval', actionable: false },
@@ -6041,8 +6075,6 @@ function ReorderBySupplier({
     <div className="space-y-4">
       {supplierNames.map(name => {
         const lines       = groups.get(name)!
-        const supObj      = SUPPLIERS.find(s => s.name === name)
-        const pat         = supObj ? getRelationshipPattern(supObj) : null
         const ids         = lines.map(l => l.id)
         const allSel      = ids.every(id => selectedIds.has(id))
         const totalValue  = lines.reduce((s, l) => s + l.totalCost, 0)
@@ -6051,24 +6083,23 @@ function ReorderBySupplier({
         const inquiryIds  = selForSup.length > 0 ? selForSup : ids
 
         return (
-          <div key={name} className="bg-white border border-gray-200 rounded-2xl overflow-hidden">
-            {/* Supplier header */}
-            <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/50 flex items-center gap-3 flex-wrap">
-              <input type="checkbox" checked={allSel} onChange={() => onToggleMany(ids, !allSel)} className="w-3.5 h-3.5" title="Select all lines for this supplier" />
-              <span className="text-[13px] font-bold text-gray-900">{name}</span>
-              {pat === 'structural'    && <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-700 uppercase tracking-wide">Structural underperformer</span>}
-              {pat === 'concentration' && <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 uppercase tracking-wide">High concentration</span>}
-              {supObj && <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${supObj.onTimeRate >= 80 ? 'bg-green-50 text-green-700 border-green-100' : supObj.onTimeRate >= 70 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'}`}>OTR {supObj.onTimeRate}%</span>}
-              <span className="text-[10px] text-gray-400">{lines.length} line{lines.length === 1 ? '' : 's'} · £{Math.round(totalValue).toLocaleString('en-GB')}</span>
+          <SupplierGroup
+            key={name}
+            supplierName={name}
+            count={lines.length}
+            unit="line"
+            valueLabel={`£${Math.round(totalValue).toLocaleString('en-GB')}`}
+            headerLeading={<input type="checkbox" checked={allSel} onChange={() => onToggleMany(ids, !allSel)} className="w-3.5 h-3.5" title="Select all lines for this supplier" />}
+            headerAction={
               <button
                 disabled={inquiryIds.length === 0}
                 onClick={() => onStartInquiry(name, inquiryIds)}
-                className="ml-auto text-[11px] font-semibold text-white bg-violet-600 hover:bg-violet-700 disabled:bg-gray-200 disabled:text-gray-400 px-3 py-1.5 rounded-lg transition-colors inline-flex items-center gap-1.5"
+                className="text-[11px] font-semibold text-white bg-violet-600 hover:bg-violet-700 disabled:bg-gray-200 disabled:text-gray-400 px-3 py-1.5 rounded-lg transition-colors inline-flex items-center gap-1.5"
               >
                 <Mail className="w-3 h-3" /> Start supplier inquiry ({inquiryIds.length})
               </button>
-            </div>
-
+            }
+          >
             {/* Dense lines table */}
             <table className="w-full text-[11px]">
               <thead className="bg-white border-b border-gray-100">
@@ -6118,7 +6149,7 @@ function ReorderBySupplier({
                 })}
               </tbody>
             </table>
-          </div>
+          </SupplierGroup>
         )
       })}
     </div>
@@ -10547,6 +10578,11 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
   const [actTypeFilter,    setActTypeFilter]    = useState('all')
   const [urgencyFilter,    setUrgencyFilter]    = useState('all')
   const [sortMode,         setSortMode]         = useState<'missed_sales' | 'value' | 'overdue'>('missed_sales')
+  // Actions: top-level mode (reactive vs pre-emptive) + grouping + optimistic toast.
+  const [actionMode,       setActionMode]       = useState<'now' | 'predicted' | 'all'>('now')
+  const [actionGroupBy,    setActionGroupBy]    = useState<'none' | 'supplier'>('none')
+  const [actedCards,       setActedCards]       = useState<Set<string>>(new Set())
+  const [actionToast,      setActionToast]      = useState<string | null>(null)
   const [drawerDecision,   setDrawerDecision]   = useState<Record<string, 'cancel' | 'cpr' | 'accept_late'>>({})
   // Demo: lets the user reassign who caused a date change (by change id) → re-derives
   // attribution and flips the CPR recommendation live.
@@ -11098,12 +11134,19 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
         {/* ── ACTIONS ── */}
         {subTab === 'actions' && (() => {
           // ── Queue data ───────────────────────────────────────────────────
-          const awaitingUser   = actionGroups.filter(g => ['agent-drafted','decision-needed','reply-received'].includes(getCardState(g))).length
-          const valueAtRisk    = [...overduePOs, ...atRiskPOs].reduce((s, p) => s + parseOrderVal(p.orderValue), 0)
-          const decisionsPend  = actionGroups.filter(g => getCardState(g) === 'decision-needed').length
-          const awaitingReply  = actionGroups.filter(g => getCardState(g) === 'awaiting-reply').length
+          // Mode scopes the whole tab: reactive (now) = everything that is
+          // already late/at-risk; pre-emptive (predicted) = not-yet-late slips.
+          const modeGroups = actionGroups.filter(g =>
+            actionMode === 'all' ? true : actionMode === 'predicted' ? g.type === 'predicted' : g.type !== 'predicted'
+          )
+          const awaitingUser   = modeGroups.filter(g => ['agent-drafted','decision-needed','reply-received'].includes(getCardState(g))).length
+          const valueAtRisk    = modeGroups.reduce((s, g) => s + g.pos.reduce((ss, p) => ss + parseOrderVal(p.orderValue), 0), 0)
+          const decisionsPend  = modeGroups.filter(g => getCardState(g) === 'decision-needed').length
+          const awaitingReply  = modeGroups.filter(g => getCardState(g) === 'awaiting-reply').length
+          const modePredicted  = actionMode === 'predicted'
 
-          const filtered = actionGroups.filter(g => {
+          const filtered = modeGroups.filter(g => {
+            if (actedCards.has(cardKey(g))) return false   // optimistic clear after inline approve
             if (actTypeFilter === 'chase'       && g.type !== 'overdue')  return false
             if (actTypeFilter === 'date_change' && g.type !== 'at_risk')  return false
             if (actTypeFilter === 'dc_booking'  && g.type !== 'late_dc')  return false
@@ -11120,7 +11163,84 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
             const ms = groupMissedSales(b) - groupMissedSales(a)
             return ms !== 0 ? ms : groupMaxOverdue(b) - groupMaxOverdue(a)
           })
-          const withHeaders = sorted.map((g, i) => ({ g, showHeader: i === 0 || sorted[i-1].supplierId !== g.supplierId }))
+
+          // Inline one-click approval: optimistic clear + toast (no navigation).
+          const inlineApprove = (g: ActionGroup, ck: string, label: string) => {
+            setActedCards(prev => { const n = new Set(prev); n.add(ck); return n })
+            setActionToast(`${label} — ${getSupplier(g.supplierId)?.name ?? g.supplierId}`)
+          }
+
+          // ── Dense action row — fixed left-to-right rhythm, aligned columns ──
+          const renderActionRow = (g: ActionGroup) => {
+            const sup        = getSupplier(g.supplierId)
+            const state      = getCardState(g)
+            const ck         = cardKey(g)
+            const issueTitle = actionIssueTitle(g, today)
+            const valAtRisk  = g.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0)
+            const lostRev    = groupMissedSales(g)
+            const lostUnits  = groupMissedUnits(g)
+            const maxOver    = groupMaxOverdue(g)
+            const isPredictive = g.type === 'predicted'
+            const recPreview = (() => {
+              if (g.type === 'overdue' && sup)  { const mo = Math.max(...g.pos.map(p => daysOverdue(p))); const ov = g.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0); return getPORecommendation(g, sup, mo, ov, 10).primaryLabel.split('(')[0].trim().replace(/\+$/, '').trim() }
+              if (g.type === 'at_risk' && sup)  { const dp = Math.max(...g.pos.map(p => p.revisedDelivery ? Math.round((new Date(p.revisedDelivery).getTime() - new Date(p.expectedDelivery).getTime()) / 86400000) : 0)); return getDateChangeRecommendation(g, sup, dp, isSubstantiveReason(g.triggerMessage), g.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0)).primaryLabel.split('(')[0].trim().replace(/\+$/, '').trim() }
+              if (g.type === 'late_dc')   return (sup?.onTimeRate ?? 100) > 85 ? 'Confirm booking' : 'Investigate root cause'
+              if (g.type === 'predicted') return 'Pre-empt with supplier'
+              return 'Chase supplier'
+            })()
+            const worstPO = [...g.pos].sort((a, b) => getEstimatedDelivery(b).delayDays - getEstimatedDelivery(a).delayDays)[0]
+            // Urgency indicator: red overdue/decision · amber at-risk · violet predictive · grey routine
+            const urg = (state === 'decision-needed' || g.type === 'overdue') ? 'red' : g.type === 'at_risk' ? 'amber' : g.type === 'predicted' ? 'violet' : 'grey'
+            const urgBorder = { red: 'border-l-red-500', amber: 'border-l-amber-500', violet: 'border-l-violet-400', grey: 'border-l-gray-300' }[urg]
+            // Action control follows TYPE: judgment → Open →; agent-drafted → inline approve.
+            const tier1Decision = g.type === 'overdue' && (state === 'decision-needed' || (sup?.onTimeRate ?? 100) < 70)
+            const lowOtrBooking = g.type === 'late_dc' && (sup?.onTimeRate ?? 100) <= 85   // needs root-cause look
+            const isJudgment = tier1Decision || lowOtrBooking || state === 'decision-needed' || state === 'reply-received' || g.type === 'at_risk'
+            const inlineLabel = g.type === 'late_dc' ? 'Confirm booking' : g.type === 'predicted' ? 'Send pre-empt' : 'Approve & send'
+            return (
+              <div
+                key={ck}
+                onClick={() => openActionCard(ck)}
+                className={`grid items-center gap-x-3 px-4 py-2.5 border-l-4 ${urgBorder} cursor-pointer transition-colors hover:bg-gray-50 ${snoozedCards.has(ck) ? 'opacity-50' : ''}`}
+                style={{ gridTemplateColumns: 'minmax(0,1fr) 96px 132px 152px 148px' }}
+              >
+                {/* 1 · supplier + one-line situation */}
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 mb-0.5 flex-wrap"><ActionCardPills group={g} supplier={sup ?? null} size="sm" /></div>
+                  <div className="text-[12px] font-semibold text-gray-900 truncate">{sup?.name ?? g.supplierId} <span className="font-normal text-gray-500">· {issueTitle}</span></div>
+                  <div className="text-[10px] text-gray-400 truncate">{g.pos.length <= 2 ? g.pos.map(p => p.id).join(', ') : `${g.pos[0].id}, ${g.pos[1].id} +${g.pos.length - 2} more`}</div>
+                </div>
+                {/* 2 · £ at risk */}
+                <div className="text-right">
+                  <div className="text-[8px] uppercase tracking-wide text-gray-400">£ at risk</div>
+                  <div className="text-[12px] font-semibold text-gray-800 tabular-nums">£{valAtRisk.toLocaleString()}</div>
+                </div>
+                {/* 3 · sales / units at risk — REAL loss (red) vs POTENTIAL if-it-slips (amber) */}
+                <div className="text-right">
+                  {lostRev > 0
+                    ? (isPredictive
+                        ? <><div className="text-[8px] uppercase tracking-wide text-amber-500">if it slips</div><div className="text-[12px] font-semibold text-amber-600 tabular-nums">~£{lostRev.toLocaleString()}</div><div className="text-[10px] text-amber-500 tabular-nums">~{lostUnits.toLocaleString()} units</div></>
+                        : <><div className="text-[8px] uppercase tracking-wide text-red-400">sales at risk</div><div className="text-[12px] font-bold text-red-600 tabular-nums">£{lostRev.toLocaleString()}</div><div className="text-[10px] text-red-500 tabular-nums">{lostUnits.toLocaleString()} units</div></>)
+                    : (maxOver > 0
+                        ? <div className="text-[10px] text-gray-400 tabular-nums">{maxOver}d late · no sales hit</div>
+                        : <span className="text-[10px] text-gray-300">—</span>)}
+                </div>
+                {/* 4 · recommended action + ETA */}
+                <div className="min-w-0">
+                  <div className="text-[8px] uppercase tracking-wide text-gray-400">Recommended</div>
+                  <div className="text-[11px] font-semibold text-gray-800 truncate">{recPreview}</div>
+                  {worstPO && <div className="mt-0.5"><EstDeliveryPill po={worstPO} size="sm" /></div>}
+                </div>
+                {/* 5 · action control (type-driven) + snooze */}
+                <div className="flex flex-col items-end gap-1" onClick={e => e.stopPropagation()}>
+                  {isJudgment
+                    ? <button onClick={() => openActionCard(ck)} className="h-7 px-3 text-[10px] font-semibold rounded-lg border border-indigo-200 text-indigo-700 hover:bg-indigo-50 inline-flex items-center gap-1">Open <ArrowRight className="w-3 h-3" /></button>
+                    : <button onClick={() => inlineApprove(g, ck, inlineLabel)} className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-green-600 text-white hover:bg-green-700">{inlineLabel}</button>}
+                  <span onClick={() => setSnoozedCards(prev => { const n = new Set(prev); n.has(ck) ? n.delete(ck) : n.add(ck); return n })} className="text-[9px] text-gray-400 hover:text-gray-600 font-medium cursor-pointer">{snoozedCards.has(ck) ? 'Unsnooze' : 'Snooze 3d'}</span>
+                </div>
+              </div>
+            )
+          }
 
           // ── Drawer data ──────────────────────────────────────────────────
           const drawerGroup    = actionGroups.find(g => cardKey(g) === drawerCardKey) ?? null
@@ -11265,35 +11385,61 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           return (
           <>
             {!drawerOpen && (<>
-            {/* ── Stats strip ───────────────────────────────────────────── */}
+            {actionToast && <Toast message={actionToast} onDone={() => setActionToast(null)} />}
+            {/* ── Mode toggle (reactive vs pre-emptive) + Group by ─────────── */}
+            <div className="flex items-center justify-between gap-3 flex-wrap mb-1">
+              <div className="inline-flex items-center bg-gray-100 rounded-xl p-1 gap-0.5">
+                {([['now','Happening now'],['predicted','Predicted'],['all','All']] as const).map(([k, label]) => (
+                  <button key={k} onClick={() => setActionMode(k)}
+                    className={`h-8 px-4 rounded-lg text-xs font-semibold transition-colors ${actionMode === k ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>{label}</button>
+                ))}
+              </div>
+              <div className="inline-flex items-center gap-1.5">
+                <span className="text-[10px] text-gray-400 font-medium">Group by:</span>
+                {([['none','None'],['supplier','Supplier']] as const).map(([k, label]) => (
+                  <button key={k} onClick={() => setActionGroupBy(k)}
+                    className={`px-3 py-1 rounded-lg text-xs font-semibold transition-colors ${actionGroupBy === k ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>{label}</button>
+                ))}
+              </div>
+            </div>
+
+            {/* ── Stats strip (per active mode) ─────────────────────────────── */}
             <div className="grid grid-cols-4 gap-3 mb-1">
-              {[
-                { label: 'Actions awaiting you', value: awaitingUser,   color: 'text-gray-900', bg: 'bg-white border border-gray-100' },
-                { label: '£ value at risk',       value: `£${valueAtRisk.toLocaleString()}`, color: 'text-red-600',   bg: 'bg-red-50 border border-red-100' },
-                { label: 'Decisions pending',     value: decisionsPend, color: 'text-red-700',  bg: 'bg-red-50 border border-red-100' },
-                { label: 'Awaiting reply',         value: awaitingReply, color: 'text-gray-500', bg: 'bg-gray-50 border border-gray-100' },
-              ].map(({ label, value, color, bg }) => (
+              {(modePredicted ? [
+                { label: 'Pre-empts ready',         value: awaitingUser,                                                                  color: 'text-violet-700', bg: 'bg-violet-50 border border-violet-100' },
+                { label: '£ at risk if it slips',   value: `~£${modeGroups.reduce((s, g) => s + groupMissedSales(g), 0).toLocaleString()}`, color: 'text-amber-600',  bg: 'bg-amber-50 border border-amber-100' },
+                { label: 'Lines predicted to slip', value: modeGroups.length,                                                             color: 'text-violet-700', bg: 'bg-violet-50 border border-violet-100' },
+                { label: 'Awaiting reply',          value: awaitingReply,                                                                 color: 'text-gray-500',   bg: 'bg-gray-50 border border-gray-100' },
+              ] : [
+                { label: 'Actions awaiting you', value: awaitingUser,                       color: 'text-gray-900', bg: 'bg-white border border-gray-100' },
+                { label: '£ value at risk',      value: `£${valueAtRisk.toLocaleString()}`, color: 'text-red-600',  bg: 'bg-red-50 border border-red-100' },
+                { label: 'Decisions pending',    value: decisionsPend,                      color: 'text-red-700',  bg: 'bg-red-50 border border-red-100' },
+                { label: 'Awaiting reply',       value: awaitingReply,                      color: 'text-gray-500', bg: 'bg-gray-50 border border-gray-100' },
+              ]).map(({ label, value, color, bg }) => (
                 <div key={label} className={`rounded-xl p-4 ${bg}`}>
                   <div className={`text-2xl font-bold ${color}`}>{value}</div>
                   <div className="text-xs text-gray-500 font-medium mt-0.5">{label}</div>
                 </div>
               ))}
             </div>
-            {/* Secondary status pills */}
+            {/* Secondary status pills (per active mode) */}
             <div className="flex items-center gap-2 flex-wrap pb-1">
-              {[
-                { label: 'On track',      count: onTrackPOs.length,      cls: 'bg-green-50 text-green-700 border-green-100' },
-                { label: 'Late DC',       count: preDispatchPOs.length,   cls: 'bg-amber-50 text-amber-700 border-amber-100' },
-                { label: 'At risk',       count: atRiskPOs.length,        cls: 'bg-orange-50 text-orange-700 border-orange-100' },
-                { label: 'Overdue',       count: overduePOs.length,       cls: 'bg-red-50 text-red-700 border-red-100' },
-              ].map(({ label, count, cls }) => (
+              {(modePredicted ? [
+                { label: 'Predicted to slip', count: modeGroups.length, cls: 'bg-violet-50 text-violet-700 border-violet-100' },
+                { label: 'On track',          count: onTrackPOs.length,  cls: 'bg-green-50 text-green-700 border-green-100' },
+              ] : [
+                { label: 'On track', count: onTrackPOs.length,    cls: 'bg-green-50 text-green-700 border-green-100' },
+                { label: 'Late DC',  count: preDispatchPOs.length, cls: 'bg-amber-50 text-amber-700 border-amber-100' },
+                { label: 'At risk',  count: atRiskPOs.length,      cls: 'bg-orange-50 text-orange-700 border-orange-100' },
+                { label: 'Overdue',  count: overduePOs.length,     cls: 'bg-red-50 text-red-700 border-red-100' },
+              ]).map(({ label, count, cls }) => (
                 <span key={label} className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold border ${cls}`}>
                   <span className="font-bold">{count}</span> {label}
                 </span>
               ))}
             </div>
 
-            {/* ── Filter bar ────────────────────────────────────────────── */}
+            {/* ── Filter bar (type · urgency · sort — within the active mode) ── */}
             <div className="flex items-center gap-2 flex-wrap bg-white border border-gray-100 rounded-xl px-4 py-3 shadow-sm">
               <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mr-1">Filter</span>
               {[
@@ -11335,152 +11481,51 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
               </div>
             </div>
 
-            {/* ── Full-width action list — primary surface (Sheet overlay opens on click) ── */}
-            <div className="bg-white border border-gray-200 rounded-2xl overflow-hidden">
-              <div className="px-5 py-3 border-b border-gray-100 flex items-baseline justify-between">
-                <span className="text-sm font-bold text-gray-900">Actions</span>
-                <span className="text-[11px] text-gray-400 font-medium">{withHeaders.length}</span>
+            {/* ── Guidance line (reflects active mode) ──────────────────────── */}
+            {sorted.length > 0 && (() => {
+              const totalVal = sorted.reduce((s, g) => s + g.pos.reduce((ss, p) => ss + parseOrderVal(p.orderValue), 0), 0)
+              const topSup = getSupplier(sorted[0].supplierId)
+              const decisions = sorted.filter(g => getCardState(g) === 'decision-needed').length
+              return (
+                <div className="text-[12px] text-gray-700 font-semibold px-1">
+                  {sorted.length} action{sorted.length === 1 ? '' : 's'}
+                  {decisions > 0 && <> · {decisions} require{decisions === 1 ? 's' : ''} a decision</>}
+                  {totalVal > 0 && <> · £{totalVal.toLocaleString()} {modePredicted ? 'at risk if it slips' : 'at risk'}</>}
+                  {topSup && <span className="font-normal text-gray-500"> · start with {topSup.name}</span>}
+                </div>
+              )
+            })()}
+
+            {/* ── Action list — dense rows; flat or grouped by supplier ─────── */}
+            {sorted.length === 0 ? (
+              <div className="bg-white border border-gray-200 rounded-2xl flex flex-col items-center justify-center py-20 text-gray-400 px-4">
+                <Check className="w-8 h-8 mb-2 text-green-300" />
+                <p className="text-xs font-semibold text-center">No actions match the current filters</p>
+                <p className="text-[10px] mt-1 text-center">Switch mode, adjust filters, or check back later</p>
               </div>
-              {/* Briefing line */}
-              {withHeaders.length > 0 && (() => {
-                const totalValAtRisk = withHeaders.reduce((s, { g }) => s + g.pos.reduce((ss, p) => ss + parseOrderVal(p.orderValue), 0), 0)
-                const topItem = withHeaders[0]?.g
-                const topSup = topItem ? getSupplier(topItem.supplierId) : null
-                const decisionsCount = withHeaders.filter(({ g }) => getCardState(g) === 'decision-needed').length
-                return (
-                  <div className="border-b border-gray-100 px-5 py-2.5 bg-gray-50/40">
-                    <div className="text-[12px] font-semibold text-gray-700">
-                      {withHeaders.length} action{withHeaders.length === 1 ? '' : 's'}
-                      {decisionsCount > 0 && <> · {decisionsCount} require{decisionsCount === 1 ? 's' : ''} a decision</>}
-                      {totalValAtRisk > 0 && <> · £{totalValAtRisk.toLocaleString()} at risk</>}
-                    </div>
-                    {topSup && (
-                      <div className="text-[11px] text-gray-500 mt-0.5 leading-snug">
-                        {decisionsCount > 0
-                          ? `${decisionsCount} overdue decision${decisionsCount === 1 ? ' is' : 's are'} most urgent — start with ${topSup.name}.`
-                          : `Top priority: ${topSup.name}.`}
-                      </div>
-                    )}
-                  </div>
-                )
-              })()}
-              <div className="divide-y divide-gray-100">
-                {withHeaders.length === 0 && (
-                  <div className="flex flex-col items-center justify-center py-20 text-gray-400 px-4">
-                    <Check className="w-8 h-8 mb-2 text-green-300" />
-                    <p className="text-xs font-semibold text-center">No actions match the current filters</p>
-                    <p className="text-[10px] mt-1 text-center">Adjust filters above or check back later</p>
-                  </div>
-                )}
-                {withHeaders.map(({ g }) => {
-                  const sup       = getSupplier(g.supplierId)
-                  const state     = getCardState(g)
-                  const ck        = cardKey(g)
-                  const issueTitle    = actionIssueTitle(g, today)
-                  const impactSubtitle = actionImpactSubtitle(g, sup ?? null)
-                  // Tier detection for inline-action gating
-                  const tier1Decision = g.type === 'overdue' && (state === 'decision-needed' || (sup?.onTimeRate ?? 100) < 70)
-                  const tier1DateChange = g.type === 'at_risk'
-                  const tier1 = tier1Decision || tier1DateChange
-                  // Recommended preview
-                  const recPreview = (() => {
-                    if (g.type === 'overdue' && sup) {
-                      const maxOver = Math.max(...g.pos.map(p => daysOverdue(p)))
-                      const orderVal = g.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0)
-                      const poRec = getPORecommendation(g, sup, maxOver, orderVal, 10)
-                      return poRec.primaryLabel.split('(')[0].trim().replace(/\+$/, '').trim()
-                    }
-                    if (g.type === 'at_risk' && sup) {
-                      const daysPushed = Math.max(...g.pos.map(p => {
-                        if (!p.revisedDelivery) return 0
-                        return Math.round((new Date(p.revisedDelivery).getTime() - new Date(p.expectedDelivery).getTime()) / 86400000)
-                      }))
-                      const dateRec = getDateChangeRecommendation(g, sup, daysPushed, isSubstantiveReason(g.triggerMessage), g.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0))
-                      return dateRec.primaryLabel.split('(')[0].trim().replace(/\+$/, '').trim()
-                    }
-                    if (g.type === 'late_dc') {
-                      return (sup?.onTimeRate ?? 100) > 85 ? 'Confirm booking' : 'Investigate root cause'
-                    }
-                    if (g.type === 'predicted') return 'Pre-empt with supplier'
-                    return 'Chase supplier'
-                  })()
-                  // Worst-case est delivery across the action's POs
-                  const worstPO = [...g.pos].sort((a, b) => getEstimatedDelivery(b).delayDays - getEstimatedDelivery(a).delayDays)[0]
-                  return (
-                    <div
-                      key={ck}
-                      onClick={() => openActionCard(ck)}
-                      className={`flex items-center gap-4 px-5 py-3 cursor-pointer transition-colors hover:bg-gray-50 ${snoozedCards.has(ck) ? 'opacity-50' : ''}`}
-                    >
-                      {/* Left: pills + identity + issue + POs */}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-1.5 mb-1.5 flex-wrap">
-                          <ActionCardPills group={g} supplier={sup ?? null} size="md" />
-                          {sup && (() => {
-                            const pat = getRelationshipPattern(sup)
-                            if (pat === 'structural')    return <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-red-100 text-red-700">Structural underperformer</span>
-                            if (pat === 'concentration') return <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">High concentration</span>
-                            return null
-                          })()}
-                        </div>
-                        <div className="flex items-baseline gap-2 mb-0.5">
-                          <span className="text-[12px] font-semibold text-gray-900">{sup?.name ?? g.supplierId}</span>
-                          <span className="text-[11px] text-gray-500">·</span>
-                          <span className="text-[12px] font-medium text-gray-800">{issueTitle}</span>
-                        </div>
-                        <div className="text-[11px] text-gray-500 mb-0.5">{impactSubtitle}</div>
-                        {/* Commercial consequence — a delay only matters if it costs sales.
-                            Loud when sales are at risk; quiet when late but no sales impact. */}
-                        {(() => {
-                          const lostRev = groupMissedSales(g)
-                          const lostUnits = groupMissedUnits(g)
-                          const anyLate = g.pos.some(p => daysOverdue(p) > 0)
-                          if (lostRev > 0) return (
-                            <div className="text-[11px] font-semibold text-red-600 mb-0.5">
-                              Predicted to miss sales: ~£{lostRev.toLocaleString()} / ~{lostUnits.toLocaleString()} units
-                            </div>
-                          )
-                          if (anyLate) return (
-                            <div className="text-[11px] text-gray-400 mb-0.5">Late · no sales impact predicted — CPR / hold-to-contract still available</div>
-                          )
-                          return null
-                        })()}
-                        <div className="text-[10px] text-gray-400">
-                          {g.pos.length <= 2
-                            ? g.pos.map(p => p.id).join(', ')
-                            : `${g.pos[0].id}, ${g.pos[1].id} +${g.pos.length - 2} more`
-                          }
-                        </div>
-                      </div>
-                      {/* Right: What's next preview + est delivery + open affordance */}
-                      <div className="shrink-0 w-72 flex flex-col items-end gap-1.5" onClick={e => e.stopPropagation()}>
-                        <div className="text-[11px] text-gray-500 text-right leading-tight">
-                          <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider block">Recommended</span>
-                          <span className="text-[12px] font-semibold text-gray-800">{recPreview}</span>
-                        </div>
-                        {worstPO && <EstDeliveryPill po={worstPO} />}
-                        <div className="flex items-center gap-2 mt-0.5">
-                          {/* Inline quick actions for low-stakes tiers */}
-                          {!tier1 && g.type === 'overdue' && (
-                            <button onClick={e => { e.stopPropagation(); openActionCard(ck); /* handled in workspace */ }} className="h-7 px-2.5 text-[10px] font-semibold rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200">Send chase</button>
-                          )}
-                          {!tier1 && g.type === 'late_dc' && (sup?.onTimeRate ?? 100) > 85 && (
-                            <button onClick={e => { e.stopPropagation(); openActionCard(ck); }} className="h-7 px-2.5 text-[10px] font-semibold rounded-lg bg-green-600 text-white hover:bg-green-700">Approve &amp; send</button>
-                          )}
-                          <button onClick={() => openActionCard(ck)} className="h-7 px-3 text-[10px] font-semibold rounded-lg border border-indigo-200 text-indigo-700 hover:bg-indigo-50 inline-flex items-center gap-1">
-                            Open <ArrowRight className="w-3 h-3" />
-                          </button>
-                          <span
-                            onClick={e => { e.stopPropagation(); setSnoozedCards(prev => { const n = new Set(prev); n.has(ck) ? n.delete(ck) : n.add(ck); return n }) }}
-                            className="text-[9px] text-gray-400 hover:text-gray-600 font-medium transition-colors cursor-pointer"
-                          >{snoozedCards.has(ck) ? 'Unsnooze' : 'Snooze 3d'}</span>
-                        </div>
-                      </div>
-                    </div>
-                  )
-                })}
+            ) : actionGroupBy === 'supplier' ? (
+              <div className="space-y-3">
+                {(() => {
+                  const order: string[] = []
+                  const bySup = new Map<string, ActionGroup[]>()
+                  sorted.forEach(g => { if (!bySup.has(g.supplierId)) { bySup.set(g.supplierId, []); order.push(g.supplierId) } bySup.get(g.supplierId)!.push(g) })
+                  return order.map(supId => {
+                    const gs  = bySup.get(supId)!
+                    const nm  = getSupplier(supId)?.name ?? supId
+                    const val = gs.reduce((s, g) => s + g.pos.reduce((ss, p) => ss + parseOrderVal(p.orderValue), 0), 0)
+                    return (
+                      <SupplierGroup key={supId} supplierName={nm} count={gs.length} unit="action" valueLabel={`£${val.toLocaleString()} at risk`}>
+                        <div className="divide-y divide-gray-100">{gs.map(renderActionRow)}</div>
+                      </SupplierGroup>
+                    )
+                  })
+                })()}
               </div>
-            </div>
+            ) : (
+              <div className="bg-white border border-gray-200 rounded-2xl overflow-hidden">
+                <div className="divide-y divide-gray-100">{sorted.map(renderActionRow)}</div>
+              </div>
+            )}
 
             {/* ── Sheet overlay: action workspace (existing drawer body, right-anchored 780px) ── */}
             </>)}
