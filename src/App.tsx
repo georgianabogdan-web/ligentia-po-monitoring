@@ -7352,7 +7352,8 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
   const [openLineId, setOpenLineId]   = useState<string | null>(null)
   // Multi-line negotiation: one supplier, N lines (same workspace, N>1).
   const [openSession, setOpenSession] = useState<SupplierSession | null>(null)
-  const [filter, setFilter]   = useState<ReorderFilter>('All')
+  const [filter, setFilter]   = useState<ReorderFilter>('All')   // Buy-status track
+  const [supplierFilter, setSupplierFilter] = useState<SupplierStatus | 'all'>('all')  // Supplier-status track
   const [selectedProduct, setSelectedProduct] = useState<typeof REORDER_RECOMMENDATIONS[0] | null>(null)
   const [chartTab, setChartTab] = useState<'stock' | 'availability' | 'size-curve'>('stock')
   const [timeRange, setTimeRange] = useState<'1m' | '6m' | '1y'>('6m')
@@ -8185,17 +8186,29 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
   const pct        = (n: number) => `${Math.round(n / total * 100)}%`
 
   const FILTER_TABS: ReorderFilter[] = ['All', 'Draft', 'Pending Approval', 'Approved', 'Rejected', 'Sent']
+  // The two independent tracks AND together. Supplier scope first, then Buy, so
+  // the Buy quick-chip counts reflect the current Supplier filter (and "X shown"
+  // reflects the combined result). Both Individual and By-supplier use filteredRows.
+  const supplierScoped = supplierFilter === 'all' ? rows : rows.filter(p => p.supplierStatus === supplierFilter)
   const filteredRows = filter === 'All'
-    ? rows
-    : rows.filter(p => effStatus(p) === filter)
+    ? supplierScoped
+    : supplierScoped.filter(p => effStatus(p) === filter)
   const tabCounts: Record<ReorderFilter, number> = {
-    All:               rows.length,
-    Draft:             rows.filter(p => effStatus(p) === 'Draft').length,
-    'Pending Approval':rows.filter(p => effStatus(p) === 'Pending Approval').length,
-    Approved:          rows.filter(p => effStatus(p) === 'Approved').length,
-    Rejected:          rows.filter(p => effStatus(p) === 'Rejected').length,
-    Sent:              rows.filter(p => effStatus(p) === 'Sent').length,
+    All:               supplierScoped.length,
+    Draft:             supplierScoped.filter(p => effStatus(p) === 'Draft').length,
+    'Pending Approval':supplierScoped.filter(p => effStatus(p) === 'Pending Approval').length,
+    Approved:          supplierScoped.filter(p => effStatus(p) === 'Approved').length,
+    Rejected:          supplierScoped.filter(p => effStatus(p) === 'Rejected').length,
+    Sent:              supplierScoped.filter(p => effStatus(p) === 'Sent').length,
   }
+  const SUPPLIER_FILTER_OPTS: { value: SupplierStatus | 'all'; label: string }[] = [
+    { value: 'all',            label: 'All' },
+    { value: 'not_contacted',  label: 'Not contacted' },
+    { value: 'awaiting_reply', label: 'Awaiting reply' },
+    { value: 'replied',        label: 'Replied' },
+    { value: 'agreed',         label: 'Agreed' },
+    { value: 'declined',       label: 'Declined' },
+  ]
 
   const handleSendToManager = () => {
     const eligible = [...selectedIds].filter(id => effStatus(REORDER_RECOMMENDATIONS.find(r => r.id === id)!) === 'Draft')
@@ -8348,6 +8361,33 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                   {(['Beauty', 'Clothing', 'Footwear', 'Accessories'] as const).map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
                 <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+              </div>
+              {/* Two independent status tracks — combine with AND */}
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wide">Buy status</span>
+                <div className="relative">
+                  <select
+                    className="h-9 pl-2.5 pr-7 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none"
+                    value={filter}
+                    onChange={e => setFilter(e.target.value as ReorderFilter)}
+                  >
+                    {FILTER_TABS.map(s => <option key={s} value={s}>{s === 'All' ? 'All' : s}</option>)}
+                  </select>
+                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wide">Supplier status</span>
+                <div className="relative">
+                  <select
+                    className="h-9 pl-2.5 pr-7 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none"
+                    value={supplierFilter}
+                    onChange={e => setSupplierFilter(e.target.value as SupplierStatus | 'all')}
+                  >
+                    {SUPPLIER_FILTER_OPTS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+                </div>
               </div>
               <span className="ml-auto text-xs text-gray-400">{filteredRows.length} shown</span>
               <button className="h-9 px-3 flex items-center gap-1.5 text-xs font-semibold text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50">
