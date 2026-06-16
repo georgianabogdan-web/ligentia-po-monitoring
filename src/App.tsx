@@ -7036,9 +7036,12 @@ function ReorderLineWorkspace({
   onUpdateGlobalCpRules?: (r: CpRulesState) => void
   onViewDetails?:         (recId: string) => void
 }) {
-  // Editable combined outbound draft + which line's row is expanded (multi mode).
-  const [combinedDraft, setCombinedDraft] = useState<string | null>(null)
-  const [expandedLineId, setExpandedLineId] = useState<string | null>(null)
+  // Multi-line return leg: per-line staged supplier-facing decision (does NOT
+  // send), one combined outbound draft, and which row's action chooser is open.
+  const [combinedDraft, setCombinedDraft] = useState<string | null>(null)   // round 1 draft
+  const [counterDraft,  setCounterDraft]  = useState<string | null>(null)   // staged counter round draft
+  const [staged,        setStaged]        = useState<Record<string, 'counter' | 'propose_alt' | 'escalate'>>({})
+  const [decidingLineId, setDecidingLineId] = useState<string | null>(null)
 
   // ── MULTI-LINE MODE: one supplier, N lines, one combined email ──────────────
   if (session && sessionLines) {
@@ -7105,6 +7108,67 @@ function ReorderLineWorkspace({
     const recChipCls: Record<NextStepRecommendation['type'], string> = {
       accept: 'bg-green-50 text-green-700 border-green-200', counter: 'bg-amber-50 text-amber-700 border-amber-200',
       escalate: 'bg-red-50 text-red-700 border-red-200', walk_away: 'bg-gray-100 text-gray-600 border-gray-200',
+    }
+
+    // ── Staging model: decide per line → stage → ONE combined outbound ──────────
+    const lineResolved = (l: ReorderRecommendation) => inquiries?.[l.id]?.status === 'agreed'   // internal apply/accept
+    const STAGE_LABEL: Record<'counter' | 'propose_alt' | 'escalate', string> = { counter: 'Counter staged', propose_alt: 'Alt terms staged', escalate: 'Escalate staged' }
+    const stagedLines   = sessionLines.filter(l => !!staged[l.id] && !lineResolved(l))
+    const appliedLines  = sessionLines.filter(l => lineResolved(l))
+    const openLines     = sessionLines.filter(l => !!lastReplyOf(l) && !staged[l.id] && !lineResolved(l))
+
+    // Resolve a line internally — silent, no supplier comms, excluded from email.
+    const resolveInternal = (l: ReorderRecommendation) => {
+      const t = inquiries?.[l.id]; if (!t) return
+      setStaged(prev => { const n = { ...prev }; delete n[l.id]; return n })
+      onUpdateThread({ ...t, status: 'agreed', agreedCP: lastReplyOf(l)?.offeredCP ?? t.agreedCP })
+      setDecidingLineId(null)
+    }
+    // Stage a supplier-facing decision — assembled into the combined outbound; no send.
+    const stageSupplier = (l: ReorderRecommendation, kind: 'counter' | 'propose_alt' | 'escalate') => {
+      setStaged(prev => ({ ...prev, [l.id]: kind }))
+      setCounterDraft(null)   // re-generate draft to include the newly staged line
+      setDecidingLineId(null)
+    }
+    const unstage = (l: ReorderRecommendation) => setStaged(prev => { const n = { ...prev }; delete n[l.id]; return n })
+
+    // ONE combined follow-up email covering every staged supplier-facing line.
+    const buildCounterBody = () => {
+      const lineItem = (l: ReorderRecommendation) => {
+        const s = lineOfferSummary(l, inquiries?.[l.id], globalCpRules)
+        const kind = staged[l.id]
+        if (!s) return `• ${l.id} ${l.name}`
+        if (kind === 'counter')     { const mid = +((s.target + s.reply.offeredCP) / 2).toFixed(2); return `• ${l.id} ${l.name} — counter to £${mid.toFixed(2)} (your £${s.reply.offeredCP.toFixed(2)} vs our £${s.target.toFixed(2)})` }
+        if (kind === 'propose_alt') return `• ${l.id} ${l.name} — open to alternative terms (MOQ / freight / delivery) to bridge £${s.reply.offeredCP.toFixed(2)}`
+        return `• ${l.id} ${l.name} — holding for internal review; will revert`
+      }
+      return `Dear ${session.supplierId} Team,\n\nThank you for your reply. Across the following line${stagedLines.length === 1 ? '' : 's'} we'd like to respond:\n\n` +
+        stagedLines.map(lineItem).join('\n') +
+        `\n\nThe remaining lines are confirmed on your terms. Please come back on the above and we'll close them out together.\n\nBest regards,\nDebenhams Buying`
+    }
+    const counterValue = counterDraft ?? buildCounterBody()
+
+    // Send the ONE combined counter → advance each staged line to the next round.
+    const sendCombinedCounter = () => {
+      const ts = new Date().toISOString()
+      const advanced = stagedLines.map(l => {
+        const t = inquiries![l.id]!
+        const nextRound = t.rounds.length + 1
+        const s = lineOfferSummary(l, t, globalCpRules)
+        const requestedCP = s ? +((s.target + s.reply.offeredCP) / 2).toFixed(2) : calcRequestedCP(l.costPrice, nextRound)
+        const updated: InquiryThread = { ...t, status: 'awaiting_reply', rounds: [...t.rounds, { roundNumber: nextRound, sentAt: ts.slice(0, 10), emailBody: counterValue, requestedCP, supplierReply: null }] }
+        onUpdateThread(updated)
+        return { l, updated }
+      })
+      setStaged({}); setCounterDraft(null)
+      // Supplier replies to the combined counter as ONE email → per-line offers.
+      setTimeout(() => {
+        advanced.forEach(({ l, updated }) => {
+          const last  = updated.rounds[updated.rounds.length - 1]
+          const reply = simulateSupplierReply(l, last, 'counter')
+          onUpdateThread({ ...updated, status: 'replied', rounds: [...updated.rounds.slice(0, -1), { ...last, supplierReply: reply }] })
+        })
+      }, 1600)
     }
 
     const multiHeader = (
@@ -7210,13 +7274,15 @@ function ReorderLineWorkspace({
                     <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Delivery</th>
                     <th className="px-2 py-2 text-right text-[10px] font-semibold text-gray-500 uppercase tracking-wide">GP% impact</th>
                     <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Supplier</th>
-                    <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide w-[200px]">Recommended → resolve</th>
+                    <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide w-[230px]">Decision (staged · sends once)</th>
                   </tr>
                 </thead>
                 <tbody>
                   {sessionLines.map(l => {
                     const s = lineOfferSummary(l, inquiries?.[l.id], globalCpRules)
-                    const expanded = expandedLineId === l.id
+                    const deciding = decidingLineId === l.id
+                    const resolved = lineResolved(l)
+                    const stagedKind = staged[l.id]
                     return (
                       <Fragment key={l.id}>
                         <tr className="border-b border-gray-50 last:border-0">
@@ -7231,31 +7297,56 @@ function ReorderLineWorkspace({
                               <td className={`px-2 py-2 text-right font-semibold ${s.gpDeltaPp >= 0 ? 'text-green-700' : 'text-red-600'}`}>{s.gpDeltaPp >= 0 ? '+' : ''}{s.gpDeltaPp}pp</td>
                               <td className="px-2 py-2"><SupplierStatusChip status={supStatusOf(l)} /></td>
                               <td className="px-2 py-2">
-                                <div className="flex items-center gap-1.5">
-                                  <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold border ${recChipCls[s.recType]}`}>{REC_NEXT_LABEL[s.recType]}</span>
-                                  <button onClick={() => setExpandedLineId(expanded ? null : l.id)} className="text-[10px] font-semibold text-indigo-600 hover:text-indigo-800 shrink-0">{expanded ? 'Hide' : 'Resolve ▸'}</button>
-                                </div>
+                                {resolved ? (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-green-700"><Check className="w-3 h-3" /> Resolved · internal</span>
+                                ) : stagedKind ? (
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold border bg-amber-50 text-amber-700 border-amber-200">{STAGE_LABEL[stagedKind]}</span>
+                                    <button onClick={() => unstage(l)} className="text-[10px] text-gray-400 hover:text-gray-600">Undo</button>
+                                  </div>
+                                ) : (
+                                  <div className="flex items-center gap-1.5">
+                                    <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold border ${recChipCls[s.recType]}`}>Rec: {REC_NEXT_LABEL[s.recType]}</span>
+                                    <button onClick={() => setDecidingLineId(deciding ? null : l.id)} className="text-[10px] font-semibold text-indigo-600 hover:text-indigo-800 shrink-0">{deciding ? 'Close' : 'Decide ▾'}</button>
+                                  </div>
+                                )}
                               </td>
                             </>
                           ) : (
                             <td colSpan={7} className="px-2 py-2 text-gray-400 italic">Awaiting reply…</td>
                           )}
                         </tr>
-                        {expanded && s && (
+                        {deciding && s && !resolved && (
                           <tr>
                             <td colSpan={9} className="p-0 border-b border-gray-100 bg-gray-50/40">
-                              <div className="h-[600px] flex flex-col border-t border-indigo-100">
-                                <InquiryDrawer
-                                  embed
-                                  rec={l}
-                                  thread={inquiries?.[l.id]}
-                                  onClose={() => setExpandedLineId(null)}
-                                  onUpdate={onUpdateThread}
-                                  globalCpRules={globalCpRules}
-                                  onUpdateGlobalCpRules={onUpdateGlobalCpRules}
-                                  onNavigateToPO={onNavigateToPO}
-                                  onViewDetails={onViewDetails}
-                                />
+                              <div className="px-4 py-3 border-t border-indigo-100">
+                                {/* Two clearly-distinct groups: internal (no email) vs supplier (combined email) */}
+                                <div className="grid grid-cols-2 gap-3">
+                                  <div className="rounded-lg border border-green-200 bg-green-50/40 p-2.5">
+                                    <div className="text-[10px] font-bold text-green-700 uppercase tracking-wide mb-1.5">Resolve internally · no email</div>
+                                    <div className="flex flex-wrap gap-1.5">
+                                      <button onClick={() => resolveInternal(l)} className={`px-2.5 py-1 rounded-md text-[11px] font-semibold border ${s.recType === 'accept' ? 'bg-green-600 text-white border-green-600' : 'bg-white text-green-700 border-green-300 hover:bg-green-50'}`}>Apply to Order App</button>
+                                      <button onClick={() => resolveInternal(l)} className="px-2.5 py-1 rounded-md text-[11px] font-semibold border bg-white text-green-700 border-green-300 hover:bg-green-50">Accept</button>
+                                    </div>
+                                  </div>
+                                  <div className="rounded-lg border border-violet-200 bg-violet-50/40 p-2.5">
+                                    <div className="text-[10px] font-bold text-violet-700 uppercase tracking-wide mb-1.5">Respond to supplier · goes in combined email</div>
+                                    <div className="flex flex-wrap gap-1.5">
+                                      <button onClick={() => stageSupplier(l, 'counter')} className={`px-2.5 py-1 rounded-md text-[11px] font-semibold border ${s.recType === 'counter' ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-violet-700 border-violet-300 hover:bg-violet-50'}`}>Counter</button>
+                                      <button onClick={() => stageSupplier(l, 'propose_alt')} className="px-2.5 py-1 rounded-md text-[11px] font-semibold border bg-white text-violet-700 border-violet-300 hover:bg-violet-50">Propose alternative</button>
+                                      <button onClick={() => stageSupplier(l, 'escalate')} className={`px-2.5 py-1 rounded-md text-[11px] font-semibold border ${s.recType === 'escalate' ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-violet-700 border-violet-300 hover:bg-violet-50'}`}>Escalate</button>
+                                    </div>
+                                  </div>
+                                </div>
+                                <details className="mt-2">
+                                  <summary className="text-[11px] text-gray-400 cursor-pointer hover:text-gray-600 select-none">▸ Why this recommendation? (signals)</summary>
+                                  <div className="mt-1.5 pl-3 border-l-2 border-gray-100 text-[11px] text-gray-500 space-y-0.5">
+                                    <div>Round: <span className="font-semibold text-gray-700">{s.round}</span></div>
+                                    <div>Your target CP: <span className="font-semibold text-gray-700">£{s.target.toFixed(2)}</span> · their offer: <span className="font-semibold text-gray-700">£{s.reply.offeredCP.toFixed(2)}</span> <span className={s.cpDeltaPct > 0 ? 'text-red-600' : 'text-green-600'}>({s.cpDeltaPct > 0 ? '+' : ''}{s.cpDeltaPct}% vs current)</span></div>
+                                    <div>GP impact: <span className={`font-semibold ${s.gpDeltaPp >= 0 ? 'text-green-700' : 'text-red-600'}`}>{s.gpDeltaPp >= 0 ? '+' : ''}{s.gpDeltaPp}pp</span> · lead time {s.reply.leadTimeWeeks}w{s.leadBreach && ' · ⚠ slips ex-fty'}</div>
+                                    <div>Recommended: <span className="font-semibold text-gray-700">{REC_NEXT_LABEL[s.recType]}</span></div>
+                                  </div>
+                                </details>
                               </div>
                             </td>
                           </tr>
@@ -7266,7 +7357,35 @@ function ReorderLineWorkspace({
                 </tbody>
               </table>
             </div>
-            <div className="text-[11px] text-gray-400 mt-2">Each line resolves independently — Apply / Counter / Propose alternative / Escalate / Walk away in its expanded panel; rounds accumulate per line.</div>
+
+            {/* ── Staging summary + ONE combined outbound counter ───────────── */}
+            <div className="mt-3 border border-violet-200 rounded-2xl bg-white overflow-hidden">
+              <div className="px-4 py-2.5 bg-violet-50/60 border-b border-violet-100 flex items-center gap-2 flex-wrap">
+                <Mail className="w-3.5 h-3.5 text-violet-500 shrink-0" />
+                <span className="text-[12px] font-semibold text-gray-800">
+                  {stagedLines.length} line{stagedLines.length === 1 ? '' : 's'} staged to respond · {appliedLines.length} applied internally · {openLines.length} still open
+                </span>
+              </div>
+              {stagedLines.length > 0 ? (
+                <>
+                  <div className="px-4 pt-3 text-[10px] font-bold text-gray-400 uppercase tracking-wide">Combined follow-up · one email · {stagedLines.length} SKU{stagedLines.length === 1 ? '' : 's'}</div>
+                  <textarea
+                    className="w-full text-[11px] text-gray-700 font-mono leading-relaxed px-4 py-3 resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-violet-200"
+                    rows={8}
+                    value={counterValue}
+                    onChange={e => setCounterDraft(e.target.value)}
+                  />
+                  <div className="px-4 py-2.5 bg-violet-50/60 border-t border-violet-100">
+                    <button onClick={sendCombinedCounter} className="w-full h-9 rounded-lg bg-violet-600 text-white text-xs font-semibold hover:bg-violet-700 transition-colors flex items-center justify-center gap-1.5">
+                      <Send className="w-3.5 h-3.5" /> Send combined counter ({stagedLines.length} line{stagedLines.length === 1 ? '' : 's'})
+                    </button>
+                    <div className="text-[10px] text-gray-400 text-center mt-1.5">Internal-resolve lines are excluded; undecided lines are left for a later round.</div>
+                  </div>
+                </>
+              ) : (
+                <div className="px-4 py-3 text-[11px] text-gray-400">Stage a Counter / Propose alternative / Escalate on one or more lines to assemble the combined follow-up email. Apply / Accept resolve silently with no supplier comms.</div>
+              )}
+            </div>
           </section>
         )}
       </DetailWorkspaceLayout>
