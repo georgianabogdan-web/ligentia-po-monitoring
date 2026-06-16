@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, Fragment } from 'react'
 import {
   AlertTriangle, TrendingDown, TrendingUp,
   Minus, Package, Sparkles, Home, BookOpen, HelpCircle, Ghost,
@@ -6934,6 +6934,34 @@ function DetailWorkspaceLayout({
   )
 }
 
+// Per-line offer summary + recommended next step for the multi-line table.
+// Uses the SAME pure helpers the single-line InquiryDrawer uses (calcRequestedCP,
+// recommendNextStep) with round-1 inputs, so the recommendation is identical —
+// not a forked re-implementation.
+const REC_NEXT_LABEL: Record<NextStepRecommendation['type'], string> = {
+  accept:    'Apply to Order App',
+  counter:   'Counter again',
+  escalate:  'Escalate to manager',
+  walk_away: 'Walk away',
+}
+function lineOfferSummary(rec: ReorderRecommendation, thread: InquiryThread | undefined, rules: CpRulesState) {
+  const lastRound = thread?.rounds[thread.rounds.length - 1]
+  const reply = lastRound?.supplierReply
+  if (!reply) return null
+  const target      = lastRound?.requestedCP ?? calcRequestedCP(rec.costPrice, 1)
+  const walkAwayPct = Math.ceil(rules.openingAskPct / 2)
+  const walkAway    = Math.round(rec.costPrice * (1 - walkAwayPct / 100) * 100) / 100
+  const exDt        = rec.exFactoryDate ? new Date(rec.exFactoryDate) : null
+  const weeksToEx   = exDt ? (exDt.getTime() - new Date().getTime()) / (7 * 86400000) : null
+  const leadBreach  = weeksToEx !== null && reply.leadTimeWeeks > weeksToEx
+  const cpDeltaPct  = +((reply.offeredCP - rec.costPrice) / rec.costPrice * 100).toFixed(1)
+  const newGP       = (rec.sellingPrice - reply.offeredCP) / rec.sellingPrice * 100
+  const curGP       = (rec.sellingPrice - rec.costPrice) / rec.sellingPrice * 100
+  const gpDeltaPp   = +(newGP - curGP).toFixed(1)
+  const recNext     = recommendNextStep(thread!, reply, rules, target, walkAway, rules.maxRounds)
+  return { reply, target, cpDeltaPct, leadBreach, gpDeltaPp, recType: recNext.type, round: thread!.rounds.length }
+}
+
 // Map a negotiation thread's status → the line-level Supplier status chip, so a
 // per-line resolution (agree / escalate / etc.) updates the chip live.
 function threadToSupplierStatus(t?: InquiryThread): SupplierStatus | null {
@@ -6977,8 +7005,9 @@ function ReorderLineWorkspace({
   onUpdateGlobalCpRules?: (r: CpRulesState) => void
   onViewDetails?:         (recId: string) => void
 }) {
-  // Editable combined outbound draft (multi mode).
+  // Editable combined outbound draft + which line's row is expanded (multi mode).
   const [combinedDraft, setCombinedDraft] = useState<string | null>(null)
+  const [expandedLineId, setExpandedLineId] = useState<string | null>(null)
 
   // ── MULTI-LINE MODE: one supplier, N lines, one combined email ──────────────
   if (session && sessionLines) {
@@ -6998,24 +7027,53 @@ function ReorderLineWorkspace({
       `\n\nPlease confirm acceptance or respond per line with revised terms.\n\nBest regards,\nDebenhams Buying`
     const draftValue = combinedDraft ?? buildCombinedBody()
 
-    // ONE combined email out → seed + send every line's thread. The existing
-    // InquiryDrawer effects then auto-generate a PER-LINE reply for each.
+    const lastReplyOf = (l: ReorderRecommendation) => {
+      const t = inquiries?.[l.id]
+      return t?.rounds[t.rounds.length - 1]?.supplierReply ?? null
+    }
+    const repliedLines = sessionLines.filter(l => !!lastReplyOf(l))
+    const anyReplied   = repliedLines.length > 0
+
+    // ONE combined email out → seed + send every line's thread. After a beat the
+    // supplier sends ONE reply addressing all SKUs; we attach the per-line offer
+    // to each line's thread (reusing the same simulateSupplierReply mechanism),
+    // so the inbound is a single shared reply with per-line offers — not N emails.
     const sendCombined = () => {
       const ts = new Date().toISOString()
-      sessionLines.forEach(l => {
+      const sent = sessionLines.map(l => {
         const existing = inquiries?.[l.id]
         const requestedCP = calcRequestedCP(l.costPrice, 1)
-        if (existing && existing.rounds.length) {
-          const last = existing.rounds[existing.rounds.length - 1]
-          onUpdateThread({ ...existing, status: 'sent', rounds: [...existing.rounds.slice(0, -1), { ...last, sentAt: ts.slice(0, 10), emailBody: draftValue }] })
-        } else {
-          onUpdateThread({
-            recId: l.id, supplierId: l.supplier, status: 'sent', scenario: getProductScenario(l),
-            rounds: [{ roundNumber: 1, sentAt: ts.slice(0, 10), emailBody: draftValue, requestedCP, supplierReply: null }],
-            agreedCP: null, agreedMOQ: null, flaggedReason: null, internalNotes: '',
-          })
-        }
+        const base: InquiryThread = (existing && existing.rounds.length)
+          ? { ...existing, status: 'sent', rounds: [...existing.rounds.slice(0, -1), { ...existing.rounds[existing.rounds.length - 1], sentAt: ts.slice(0, 10), emailBody: draftValue }] }
+          : { recId: l.id, supplierId: l.supplier, status: 'sent', scenario: getProductScenario(l), rounds: [{ roundNumber: 1, sentAt: ts.slice(0, 10), emailBody: draftValue, requestedCP, supplierReply: null }], agreedCP: null, agreedMOQ: null, flaggedReason: null, internalNotes: '' }
+        onUpdateThread(base)
+        return { l, base }
       })
+      setTimeout(() => {
+        sent.forEach(({ l, base }) => {
+          const last  = base.rounds[base.rounds.length - 1]
+          const reply = simulateSupplierReply(l, last, base.scenario === 'uncertain' ? 'counter' : base.scenario)
+          let nextStatus: NegotiationStatus = 'replied'
+          let flaggedReason: string | null  = base.flaggedReason
+          if (reply.scenario === 'escalate') { nextStatus = 'escalated'; flaggedReason = `CP (£${reply.offeredCP.toFixed(2)}) above acceptable threshold` }
+          onUpdateThread({ ...base, status: nextStatus, rounds: [...base.rounds.slice(0, -1), { ...last, supplierReply: reply }], flaggedReason })
+        })
+      }, 1600)
+    }
+
+    // The single combined reply email + AI summary, built from the per-line offers.
+    const replyVerb = (r: SupplierNegReply) => r.scenario === 'accepted' ? `accepted at £${r.offeredCP.toFixed(2)}` : r.scenario === 'escalate' ? `can only hold £${r.offeredCP.toFixed(2)} (firm)` : `offering £${r.offeredCP.toFixed(2)}`
+    const combinedReplyEmail =
+      `Dear Debenhams Buying Team,\n\nThank you for the consolidated rebuy proposal across ${repliedLines.length} line${repliedLines.length === 1 ? '' : 's'}. Our position per line:\n\n` +
+      repliedLines.map(l => { const r = lastReplyOf(l)!; return `• ${l.id} ${l.name} — ${replyVerb(r)}, MOQ ${r.moqOffered.toLocaleString()}, lead time ${r.leadTimeWeeks}w, delivery ${r.deliveryWindow}` }).join('\n') +
+      `\n\nWhere we've revised price, this reflects input-cost and capacity pressure since our last quote; we've absorbed where possible. Happy to discuss the open lines.\n\nBest regards,\n${session.supplierId}`
+    const accCount = repliedLines.filter(l => lastReplyOf(l)!.scenario === 'accepted').length
+    const cntCount = repliedLines.filter(l => lastReplyOf(l)!.scenario === 'counter').length
+    const escCount = repliedLines.filter(l => lastReplyOf(l)!.scenario === 'escalate').length
+    const replySummary = `${session.supplierId} replied to the combined email on all ${repliedLines.length} line${repliedLines.length === 1 ? '' : 's'}: ${[accCount && `${accCount} accepted`, cntCount && `${cntCount} countered`, escCount && `${escCount} above threshold`].filter(Boolean).join(', ')}. Review the per-line offers below.`
+    const recChipCls: Record<NextStepRecommendation['type'], string> = {
+      accept: 'bg-green-50 text-green-700 border-green-200', counter: 'bg-amber-50 text-amber-700 border-amber-200',
+      escalate: 'bg-red-50 text-red-700 border-red-200', walk_away: 'bg-gray-100 text-gray-600 border-gray-200',
     }
 
     const multiHeader = (
@@ -7077,37 +7135,107 @@ function ReorderLineWorkspace({
           </div>
         </section>
 
-        {/* INBOUND — per-line reply + Next step + alternatives + Why, each the
-            EXACT single-line InquiryDrawer (N=1). Suppliers reply per SKU, so
-            each line is resolved independently. */}
-        {anySent && (
+        {/* INBOUND — ONE supplier reply (full email + AI summary), then a
+            per-line offer table. Suppliers reply to the combined email with one
+            message, so the reply is shown once; decisions are per line below. */}
+        {anySent && !anyReplied && (
           <section>
-            <div className="text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-2">Per-line replies &amp; resolution</div>
-            <div className="space-y-4">
-              {sessionLines.map(l => (
-                <div key={l.id} className="border border-gray-200 rounded-2xl bg-white overflow-hidden">
-                  <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 bg-gray-50/50 flex-wrap">
-                    <span className="font-mono text-[10px] text-gray-400">{l.id}</span>
-                    <span className="text-[12px] font-semibold text-gray-800 truncate max-w-[260px]">{l.name}</span>
-                    <span className="text-[10px] text-gray-400">· {l.recommendedReorderQty.toLocaleString()} units</span>
-                    <span className="ml-auto"><SupplierStatusChip status={supStatusOf(l)} /></span>
-                  </div>
-                  <div className="h-[560px] flex flex-col">
-                    <InquiryDrawer
-                      embed
-                      rec={l}
-                      thread={inquiries?.[l.id]}
-                      onClose={onBack}
-                      onUpdate={onUpdateThread}
-                      globalCpRules={globalCpRules}
-                      onUpdateGlobalCpRules={onUpdateGlobalCpRules}
-                      onNavigateToPO={onNavigateToPO}
-                      onViewDetails={onViewDetails}
-                    />
-                  </div>
-                </div>
-              ))}
+            <div className="border border-gray-200 rounded-2xl bg-white px-5 py-6 text-center text-[12px] text-gray-400">
+              Awaiting {session.supplierId}'s reply to the combined email…
             </div>
+          </section>
+        )}
+
+        {anyReplied && (
+          <section>
+            <div className="text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-2">Supplier reply — one email · {repliedLines.length} line{repliedLines.length === 1 ? '' : 's'}</div>
+
+            {/* ONE shared reply: AI summary + expandable full email */}
+            <div className="border border-blue-200 rounded-2xl bg-white overflow-hidden mb-3">
+              <div className="px-4 py-2.5 bg-blue-50/50 border-b border-blue-100 flex items-center gap-2">
+                <Bot className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                <span className="text-[11px] font-bold text-blue-700">Agent summary</span>
+                <span className="text-[10px] text-blue-400">— AI-summarised, verify against full reply below</span>
+              </div>
+              <div className="px-4 py-3">
+                <p className="text-[12px] text-gray-700 leading-relaxed">{replySummary}</p>
+                <details className="mt-2">
+                  <summary className="text-[11px] text-blue-600 cursor-pointer hover:text-blue-800 select-none">▸ View full reply email</summary>
+                  <pre className="mt-2 text-[10px] text-gray-600 font-mono whitespace-pre-wrap bg-gray-50 rounded-lg p-3 border border-gray-100">{combinedReplyEmail}</pre>
+                </details>
+              </div>
+            </div>
+
+            {/* PER-LINE offer table — read the whole offer at a glance */}
+            <div className="border border-gray-200 rounded-2xl bg-white overflow-x-auto">
+              <table className="w-full text-[11px]">
+                <thead className="bg-gray-50 border-b border-gray-100">
+                  <tr>
+                    <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">SKU</th>
+                    <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Product</th>
+                    <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Ask → Their CP</th>
+                    <th className="px-2 py-2 text-right text-[10px] font-semibold text-gray-500 uppercase tracking-wide">MOQ</th>
+                    <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Lead time</th>
+                    <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Delivery</th>
+                    <th className="px-2 py-2 text-right text-[10px] font-semibold text-gray-500 uppercase tracking-wide">GP% impact</th>
+                    <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Supplier</th>
+                    <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wide w-[200px]">Recommended → resolve</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sessionLines.map(l => {
+                    const s = lineOfferSummary(l, inquiries?.[l.id], globalCpRules)
+                    const expanded = expandedLineId === l.id
+                    return (
+                      <Fragment key={l.id}>
+                        <tr className="border-b border-gray-50 last:border-0">
+                          <td className="px-2 py-2 font-mono text-[10px] text-gray-500">{l.id}</td>
+                          <td className="px-2 py-2 text-gray-800 font-medium truncate max-w-[180px]">{l.name}</td>
+                          {s ? (
+                            <>
+                              <td className="px-2 py-2 font-mono text-[10px] text-gray-700">£{s.target.toFixed(2)} → <span className="font-bold">£{s.reply.offeredCP.toFixed(2)}</span> <span className={s.cpDeltaPct > 0 ? 'text-red-600' : 'text-green-600'}>({s.cpDeltaPct > 0 ? '+' : ''}{s.cpDeltaPct}%)</span></td>
+                              <td className="px-2 py-2 text-right text-gray-700">{s.reply.moqOffered.toLocaleString()}</td>
+                              <td className="px-2 py-2 text-gray-700">{s.reply.leadTimeWeeks}w {s.leadBreach && <span className="text-red-600 font-semibold">⚠ slips ex-fty</span>}</td>
+                              <td className="px-2 py-2 text-gray-600">{s.reply.deliveryWindow}</td>
+                              <td className={`px-2 py-2 text-right font-semibold ${s.gpDeltaPp >= 0 ? 'text-green-700' : 'text-red-600'}`}>{s.gpDeltaPp >= 0 ? '+' : ''}{s.gpDeltaPp}pp</td>
+                              <td className="px-2 py-2"><SupplierStatusChip status={supStatusOf(l)} /></td>
+                              <td className="px-2 py-2">
+                                <div className="flex items-center gap-1.5">
+                                  <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold border ${recChipCls[s.recType]}`}>{REC_NEXT_LABEL[s.recType]}</span>
+                                  <button onClick={() => setExpandedLineId(expanded ? null : l.id)} className="text-[10px] font-semibold text-indigo-600 hover:text-indigo-800 shrink-0">{expanded ? 'Hide' : 'Resolve ▸'}</button>
+                                </div>
+                              </td>
+                            </>
+                          ) : (
+                            <td colSpan={7} className="px-2 py-2 text-gray-400 italic">Awaiting reply…</td>
+                          )}
+                        </tr>
+                        {expanded && s && (
+                          <tr>
+                            <td colSpan={9} className="p-0 border-b border-gray-100 bg-gray-50/40">
+                              <div className="h-[600px] flex flex-col border-t border-indigo-100">
+                                <InquiryDrawer
+                                  embed
+                                  rec={l}
+                                  thread={inquiries?.[l.id]}
+                                  onClose={() => setExpandedLineId(null)}
+                                  onUpdate={onUpdateThread}
+                                  globalCpRules={globalCpRules}
+                                  onUpdateGlobalCpRules={onUpdateGlobalCpRules}
+                                  onNavigateToPO={onNavigateToPO}
+                                  onViewDetails={onViewDetails}
+                                />
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div className="text-[11px] text-gray-400 mt-2">Each line resolves independently — Apply / Counter / Propose alternative / Escalate / Walk away in its expanded panel; rounds accumulate per line.</div>
           </section>
         )}
       </DetailWorkspaceLayout>
