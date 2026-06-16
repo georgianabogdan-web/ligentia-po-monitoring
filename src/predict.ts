@@ -535,3 +535,138 @@ export const RISK_BAND_CFG: Record<RiskBand, { bg: string; text: string; border:
   High:     { bg: 'bg-orange-50', text: 'text-orange-700', border: 'border-orange-200', dot: 'bg-orange-500' },
   Critical: { bg: 'bg-red-50',    text: 'text-red-700',    border: 'border-red-200',    dot: 'bg-red-500' },
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// FILL RATE — a SECOND, independent supplier-risk dimension alongside slip risk.
+// Measures order completeness: units delivered ÷ units ordered. Suppliers often
+// ship less than ordered (raise a PO for 100, receive 70) and rarely flag it in
+// advance, so — exactly like slip risk — we infer it from history rather than
+// trust a confirmation. Buyer-facing language only: "fill rate", "order
+// completeness", "under-fulfilment". (The underlying statistical concept is
+// yield volatility — that phrase stays in code comments, never in a UI field.)
+//
+// IMPORTANT: this is PREDICTION ONLY. Nothing here computes or applies an
+// "order more to compensate" gross-up — reorder quantities are deliberately
+// untouched in this iteration.
+// ════════════════════════════════════════════════════════════════════════════
+
+// Buyer-friendly consistency label derived from the spread (volatility) — a
+// steady 90% is very different from an erratic 90%, so we surface the spread.
+export type FillConsistency = 'steady' | 'variable' | 'erratic'
+export function fillConsistency(volatilityPts: number): FillConsistency {
+  return volatilityPts <= 5 ? 'steady' : volatilityPts <= 10 ? 'variable' : 'erratic'
+}
+
+// Historic order completeness for a supplier, across past (closed) POs.
+export interface SupplierFillHistory {
+  avgFillRatePct:   number   // units delivered ÷ ordered, averaged across past POs (0-100)
+  fillVolatilityPts: number  // spread of fill rate in percentage points (the yield-volatility measure)
+  trend:            'improving' | 'stable' | 'worsening'
+  posObserved:      number   // # of past POs the average is based on
+  worstRecentPct:   number   // worst fill seen in recent orders (drives signals)
+}
+
+// Seeded distribution (see summary at the bottom of this block). Independent of
+// the lateness/OTR signal: e.g. UF is on-time (85% OTR) yet a chronic
+// under-fulfiller (~74% fill), and UL looks fine on timing (94% OTR) but only
+// ~85% complete and worsening.
+export const SUPPLIER_FILL_RATE: Record<string, SupplierFillHistory> = {
+  // Chronic under-fulfillers (low fill + high spread)
+  UF: { avgFillRatePct: 74, fillVolatilityPts: 16, trend: 'worsening', posObserved: 15, worstRecentPct: 55 }, // on-time but under-fills — independent signal
+  ET: { avgFillRatePct: 76, fillVolatilityPts: 14, trend: 'worsening', posObserved: 12, worstRecentPct: 58 }, // weak on both timing AND fill
+  // In between
+  UL: { avgFillRatePct: 85, fillVolatilityPts: 9,  trend: 'worsening', posObserved: 12, worstRecentPct: 73 }, // good OTR, mediocre + slipping fill
+  SS: { avgFillRatePct: 88, fillVolatilityPts: 9,  trend: 'stable',    posObserved: 14, worstRecentPct: 76 },
+  TB: { avgFillRatePct: 90, fillVolatilityPts: 8,  trend: 'stable',    posObserved: 13, worstRecentPct: 79 },
+  NK: { avgFillRatePct: 92, fillVolatilityPts: 5,  trend: 'improving', posObserved: 11, worstRecentPct: 85 },
+  // Reliable (high fill, steady)
+  BA: { avgFillRatePct: 94, fillVolatilityPts: 4,  trend: 'stable',    posObserved: 16, worstRecentPct: 88 },
+  LL: { avgFillRatePct: 97, fillVolatilityPts: 3,  trend: 'stable',    posObserved: 10, worstRecentPct: 93 },
+  EL: { avgFillRatePct: 98, fillVolatilityPts: 2,  trend: 'stable',    posObserved: 9,  worstRecentPct: 95 },
+}
+const DEFAULT_FILL_HISTORY: SupplierFillHistory = { avgFillRatePct: 96, fillVolatilityPts: 3, trend: 'stable', posObserved: 8, worstRecentPct: 92 }
+export function supplierFillHistory(supplierId: string): SupplierFillHistory {
+  return SUPPLIER_FILL_RATE[supplierId] ?? DEFAULT_FILL_HISTORY
+}
+
+// ── Per-PO fill-rate prediction (open, not-yet-delivered POs) ─────────────────
+export interface FillPrediction {
+  poId:                    string
+  orderedUnits:            number
+  predictedFillRatePct:    number   // 0-100, expected order completeness
+  predictedShortfallUnits: number   // ordered × expected shortfall (PREDICTION ONLY — no gross-up)
+  fillRiskBand:            RiskBand
+  consistency:             FillConsistency
+  signals:                 string[] // human-readable "why this score"
+  // Provenance — surfaced so the UI can label it illustrative/inferred, exactly
+  // like slip predictions. Suppliers rarely communicate shortfall ahead of time.
+  inferred:                true     // pattern-based, derived from history
+  supplierConfirmed:       false    // never confirmed by the supplier in advance
+  isOpen:                  boolean
+}
+
+// computeFillRisk — a transparent pure function (tweakable for demos). Mirrors
+// computePoRisk but on the QUANTITY axis (delivered vs ordered) instead of timing.
+export function computeFillRisk(po: RiskPO, supplier: RiskSupplier): FillPrediction {
+  const hist = supplierFillHistory(supplier.id)
+  const ordered = po.quantity
+
+  // Point estimate: the supplier's historic average, nudged by trend. The spread
+  // (volatility) feeds the risk BAND below, not the point estimate.
+  const trendAdj = hist.trend === 'worsening' ? -3 : hist.trend === 'improving' ? 2 : 0
+  const predictedFillRatePct = Math.max(0, Math.min(100, Math.round(hist.avgFillRatePct + trendAdj)))
+  const predictedShortfallUnits = Math.max(0, Math.round(ordered * (1 - predictedFillRatePct / 100)))
+
+  // Risk = how far below 100% we expect to land, widened by an erratic spread and
+  // a worsening trend. A consistent 90% is lower risk than an erratic 90%.
+  const shortfallPct = 100 - predictedFillRatePct
+  const riskScore = shortfallPct + hist.fillVolatilityPts * 0.6 + (hist.trend === 'worsening' ? 8 : 0)
+  const fillRiskBand: RiskBand = riskScore >= 35 ? 'Critical' : riskScore >= 22 ? 'High' : riskScore >= 12 ? 'Medium' : 'Low'
+
+  const consistency = fillConsistency(hist.fillVolatilityPts)
+  const signals: string[] = []
+  signals.push(`Supplier averaged ${hist.avgFillRatePct}% fill over the last ${hist.posObserved} POs`)
+  if (consistency === 'erratic') signals.push(`Fill rate is erratic (±${hist.fillVolatilityPts}pts) — wide downside on any single order`)
+  else if (consistency === 'variable') signals.push(`Fill rate varies (±${hist.fillVolatilityPts}pts) order to order`)
+  if (hist.trend === 'worsening') signals.push('Order completeness is trending worse over recent orders')
+  if (hist.worstRecentPct <= 80) signals.push(`Recent orders under-delivered to as low as ${hist.worstRecentPct}%`)
+  if (supplier.onTimeRate >= 85 && hist.avgFillRatePct < 85) signals.push(`On-time (${supplier.onTimeRate}% OTR) but under-fills — a separate risk from lateness`)
+  if (predictedShortfallUnits > 0) signals.push(`Expect ~${predictedShortfallUnits.toLocaleString('en-GB')} of ${ordered.toLocaleString('en-GB')} units short (~${predictedFillRatePct}% fill)`)
+  if (signals.length === 1 && fillRiskBand === 'Low') signals.push('Order completeness tracking on plan')
+
+  return {
+    poId: po.id,
+    orderedUnits: ordered,
+    predictedFillRatePct,
+    predictedShortfallUnits,
+    fillRiskBand,
+    consistency,
+    signals,
+    inferred: true,
+    supplierConfirmed: false,
+    isOpen: isPoOpen(po.status),
+  }
+}
+
+// ── Closed-PO fill outcomes (delivered POs) ───────────────────────────────────
+// Real history so Supplier Health can show what actually happened, not only
+// predictions. Deterministic per-PO derivation (hash of the PO id, no RNG) so it
+// is reproducible: it lands within the supplier's historic [avg ± volatility]
+// band. Use only for delivered/closed POs.
+export interface FillOutcome {
+  poId:          string
+  orderedUnits:  number
+  receivedUnits: number
+  fillRatePct:   number   // received ÷ ordered (0-100)
+  shortfallUnits: number
+}
+export function computeFillOutcome(po: RiskPO, supplier: RiskSupplier): FillOutcome {
+  const hist = supplierFillHistory(supplier.id)
+  const ordered = po.quantity
+  const seed = po.id.split('').reduce((a, c) => a + c.charCodeAt(0), 0)
+  const span = hist.fillVolatilityPts * 2 + 1
+  const jitter = (seed % span) - hist.fillVolatilityPts   // deterministic [-vol, +vol]
+  const fillRatePct = Math.max(40, Math.min(100, hist.avgFillRatePct + jitter))
+  const receivedUnits = Math.round(ordered * fillRatePct / 100)
+  return { poId: po.id, orderedUnits: ordered, receivedUnits, fillRatePct, shortfallUnits: Math.max(0, ordered - receivedUnits) }
+}
