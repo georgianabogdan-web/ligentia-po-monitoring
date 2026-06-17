@@ -11753,7 +11753,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
               {/* TIER 2 — MODE: the lens. Solid, connected segmented switch, active
                   segment filled — deliberately heavier than the outline filters. */}
               <div className="inline-flex items-stretch rounded-lg border border-gray-300 overflow-hidden shadow-sm">
-                {([['now','Live issues'],['predicted','Predicted'],['all','All']] as const).map(([k, label], i) => (
+                {([['now','Live issues'],['predicted','Predicted Issues'],['all','All']] as const).map(([k, label], i) => (
                   <button key={k} onClick={() => setActionMode(k)}
                     className={`h-9 px-4 text-xs font-bold transition-colors ${i > 0 ? 'border-l border-gray-300' : ''} ${actionMode === k ? 'bg-indigo-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}>{label}</button>
                 ))}
