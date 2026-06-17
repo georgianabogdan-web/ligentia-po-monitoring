@@ -11545,7 +11545,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
         {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center bg-gray-100 rounded-xl p-1 gap-0.5">
-            {([['actions','Actions'],['conversations','Supplier conversations'],['intake','Intake Forecast'],['allpos','All POs'],['suppliers','Supplier Health'],['agentlog','Agent Log']] as const).map(([t, label]) => (
+            {([['actions','Actions'],['intake','Intake Forecast'],['allpos','All POs'],['suppliers','Supplier Health'],['agentlog','Agent Log'],['conversations','Active Supplier Conversations']] as const).map(([t, label]) => (
               <button key={t} onClick={() => setSubTab(t)} className={`h-8 px-4 rounded-lg text-xs font-semibold transition-colors ${subTab === t ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>{label}</button>
             ))}
           </div>
@@ -11592,8 +11592,8 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
             <ConversationsInbox
               onBack={() => setSubTab('actions')}
               backLabel="Back to Actions"
-              breadcrumb={<>PO Monitoring · Supplier conversations</>}
-              title="Supplier conversations"
+              breadcrumb={<>PO Monitoring · Active Supplier Conversations</>}
+              title="Active Supplier Conversations"
               subtitle={`${entries.length} live post-purchase conversation${entries.length === 1 ? '' : 's'} · chase / fix / pre-empt on live POs · separate from Reorder's price negotiations`}
               emptyTitle="No supplier conversations yet."
               emptyHint="Start one from an action — chase a late PO, or pre-empt a predicted slip / under-fill — and it'll appear here as the single home for monitoring threads."
