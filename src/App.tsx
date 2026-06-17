@@ -4546,6 +4546,27 @@ Best regards,
 [Buyer Name]`
 }
 
+// ── Shared auto-reply mechanic (single source of truth) ───────────────────────
+// A sent supplier email turns into an inbound reply on its own — no operator/demo
+// action. This is the ONE place that defines the timing and the two-phase
+// transition, reused by every agentic thread (Reorder + PO Monitoring, single- and
+// multi-line):
+//   Phase 1 — the lifelike "Sent · awaiting reply" state is shown for AWAIT_MS
+//             (a calm, narratable window — never instantly skipped).
+//   Phase 2 — the reply lands LAND_MS later and flows into the normal inbound
+//             handling (parsed terms / per-line table / recommended next step).
+// onAwaiting is optional: some threads enter the awaiting state synchronously at
+// send (e.g. PO Monitoring chase threads), so they only need onReply.
+// Returns a cleanup that cancels any pending timers.
+const AUTO_REPLY_AWAIT_MS = 2200
+const AUTO_REPLY_LAND_MS  = 2600
+function scheduleAutoReply(opts: { onAwaiting?: () => void; onReply: () => void }): () => void {
+  const timers: ReturnType<typeof setTimeout>[] = []
+  if (opts.onAwaiting) timers.push(setTimeout(opts.onAwaiting, AUTO_REPLY_AWAIT_MS))
+  timers.push(setTimeout(opts.onReply, AUTO_REPLY_AWAIT_MS + AUTO_REPLY_LAND_MS))
+  return () => timers.forEach(clearTimeout)
+}
+
 function simulateSupplierReply(
   rec: typeof REORDER_RECOMMENDATIONS[0],
   round: InquiryRound,
@@ -4713,45 +4734,44 @@ function InquiryDrawer({
     })
   }, [rec.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // sent → awaiting_reply after 2s
+  // ── Auto-arriving reply (shared mechanic) ──────────────────────────────────
+  // Keyed on a stable send signature (round count + sentAt) so the Phase-1 status
+  // flip (sent → awaiting_reply) does NOT cancel the pending Phase-2 reply.
+  const lastRoundForReply = thread?.rounds[thread.rounds.length - 1]
+  const pendingSendKey = lastRoundForReply && !lastRoundForReply.supplierReply && (status === 'sent' || status === 'awaiting_reply')
+    ? `${thread!.rounds.length}:${lastRoundForReply.sentAt ?? ''}` : null
   useEffect(() => {
-    if (status !== 'sent') return
-    const t = setTimeout(() => {
-      const cur = latestThread.current
-      if (!cur || cur.status !== 'sent') return
-      onUpdate({ ...cur, status: 'awaiting_reply' })
-    }, 2000)
-    return () => clearTimeout(t)
-  }, [status]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // awaiting_reply → replied/escalated after 3s
-  useEffect(() => {
-    if (status !== 'awaiting_reply') return
-    const t = setTimeout(() => {
-      const cur = latestThread.current
-      if (!cur || cur.status !== 'awaiting_reply') return
-      const last  = cur.rounds[cur.rounds.length - 1]
-      const reply = simulateSupplierReply(rec, last, cur.scenario === 'uncertain' ? 'counter' : cur.scenario)
-      let nextStatus: NegotiationStatus = 'replied'
-      let flaggedReason: string | null  = null
-      if (reply.scenario === 'escalate') {
-        if (reply.moqOffered > rec.minOrderQty * ESCALATION_RULES.moqMaxMultiplier) {
-          nextStatus    = 'escalated'
-          flaggedReason = `Supplier MOQ (${reply.moqOffered.toLocaleString()}) exceeds limit (${Math.round(rec.minOrderQty * ESCALATION_RULES.moqMaxMultiplier).toLocaleString()})`
-        } else {
-          nextStatus    = 'escalated'
-          flaggedReason = `CP (£${reply.offeredCP.toFixed(2)}) above acceptable threshold`
+    if (!pendingSendKey) return
+    return scheduleAutoReply({
+      onAwaiting: () => {
+        const cur = latestThread.current
+        if (cur && cur.status === 'sent') onUpdate({ ...cur, status: 'awaiting_reply' })
+      },
+      onReply: () => {
+        const cur = latestThread.current
+        if (!cur || cur.status !== 'awaiting_reply') return
+        const last  = cur.rounds[cur.rounds.length - 1]
+        const reply = simulateSupplierReply(rec, last, cur.scenario === 'uncertain' ? 'counter' : cur.scenario)
+        let nextStatus: NegotiationStatus = 'replied'
+        let flaggedReason: string | null  = null
+        if (reply.scenario === 'escalate') {
+          if (reply.moqOffered > rec.minOrderQty * ESCALATION_RULES.moqMaxMultiplier) {
+            nextStatus    = 'escalated'
+            flaggedReason = `Supplier MOQ (${reply.moqOffered.toLocaleString()}) exceeds limit (${Math.round(rec.minOrderQty * ESCALATION_RULES.moqMaxMultiplier).toLocaleString()})`
+          } else {
+            nextStatus    = 'escalated'
+            flaggedReason = `CP (£${reply.offeredCP.toFixed(2)}) above acceptable threshold`
+          }
         }
-      }
-      onUpdate({
-        ...cur,
-        status:        nextStatus,
-        rounds:        [...cur.rounds.slice(0, -1), { ...last, supplierReply: reply }],
-        flaggedReason: flaggedReason ?? cur.flaggedReason,
-      })
-    }, 3000)
-    return () => clearTimeout(t)
-  }, [status]) // eslint-disable-line react-hooks/exhaustive-deps
+        onUpdate({
+          ...cur,
+          status:        nextStatus,
+          rounds:        [...cur.rounds.slice(0, -1), { ...last, supplierReply: reply }],
+          flaggedReason: flaggedReason ?? cur.flaggedReason,
+        })
+      },
+    })
+  }, [pendingSendKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // draftCpOverride → regenerate email body live
   useEffect(() => {
@@ -7209,16 +7229,18 @@ function ReorderLineWorkspace({
         onUpdateThread(base)
         return { l, base }
       })
-      setTimeout(() => {
-        sent.forEach(({ l, base }) => {
+      // Shared auto-reply mechanic: visible "awaiting" window, then the ONE combined reply lands.
+      scheduleAutoReply({
+        onAwaiting: () => sent.forEach(({ base }) => onUpdateThread({ ...base, status: 'awaiting_reply' })),
+        onReply: () => sent.forEach(({ l, base }) => {
           const last  = base.rounds[base.rounds.length - 1]
           const reply = simulateSupplierReply(l, last, base.scenario === 'uncertain' ? 'counter' : base.scenario)
           let nextStatus: NegotiationStatus = 'replied'
           let flaggedReason: string | null  = base.flaggedReason
           if (reply.scenario === 'escalate') { nextStatus = 'escalated'; flaggedReason = `CP (£${reply.offeredCP.toFixed(2)}) above acceptable threshold` }
           onUpdateThread({ ...base, status: nextStatus, rounds: [...base.rounds.slice(0, -1), { ...last, supplierReply: reply }], flaggedReason })
-        })
-      }, 1600)
+        }),
+      })
     }
 
     // The single combined reply email + AI summary, built from the per-line offers.
@@ -7287,14 +7309,14 @@ function ReorderLineWorkspace({
         return { l, updated }
       })
       setStaged({}); setCounterDraft(null)
-      // Supplier replies to the combined counter as ONE email → per-line offers.
-      setTimeout(() => {
-        advanced.forEach(({ l, updated }) => {
+      // Shared auto-reply mechanic: lines are already awaiting; the ONE combined reply lands on its own.
+      scheduleAutoReply({
+        onReply: () => advanced.forEach(({ l, updated }) => {
           const last  = updated.rounds[updated.rounds.length - 1]
           const reply = simulateSupplierReply(l, last, 'counter')
           onUpdateThread({ ...updated, status: 'replied', rounds: [...updated.rounds.slice(0, -1), { ...last, supplierReply: reply }] })
-        })
-      }, 1600)
+        }),
+      })
     }
 
     const multiHeader = (
@@ -11249,6 +11271,9 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
     setChaseThreads(prev => ({ ...prev, [key]: thread }))
     setExpandedMsgIds(new Set())
     addPOEvent(primary.pos[0].id, { id: `ev-${Date.now()}`, type: 'chase_sent', timestamp: new Date().toISOString(), body: `Chase email sent to ${getSupplier(primary.supplierId)?.name}.`, author: 'agent' })
+    // Shared auto-reply mechanic: the thread is already in the visible "awaiting reply"
+    // state; after a calm, narratable window the supplier reply lands on its own.
+    scheduleAutoReply({ onReply: () => handleSimulateReply(primary) })
   }
 
   // ── "Message supplier" — start an agentic conversation from anywhere ──────────
@@ -11293,7 +11318,9 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
     const followMsg: ChaseThreadMsg = { id: followId, sender: 'agent', timestamp: new Date().toISOString(), body: followUpBody, status: cfg?.autoSend ? 'auto-sent' : 'awaiting-review', emailType }
     setChaseThreads(prev => {
       const cur = prev[key]
-      if (!cur) return prev
+      // Only land the auto-reply if the thread is still genuinely awaiting one
+      // (user hasn't already moved it on, snoozed, or it isn't already replied).
+      if (!cur || cur.status !== 'awaiting-reply') return prev
       return { ...prev, [key]: { ...cur, status: 'reply-received', messages: [...cur.messages, replyMsg, followMsg] } }
     })
     // Generate proposed PO mutations (push expected dates forward ~3-5 weeks)
@@ -11367,17 +11394,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
     })
     setProposedMutations(prev => { const n = { ...prev }; delete n[group.supplierId]; return n })
     setResolvedCards(prev => { const n = new Set(prev); n.add(cardKey); return n })
-  }
-
-  const handleNoReplyTrigger = (group: ActionGroup) => {
-    const key = getThreadKey(group)
-    const ts = new Date().toISOString()
-    setChaseThreads(prev => {
-      const cur = prev[key]
-      if (!cur) return prev
-      const sysEv: ThreadSystemEvent = { id: `sys-${Date.now()}`, timestamp: ts, body: 'No reply received after 3 days — action escalated to overdue' }
-      return { ...prev, [key]: { ...cur, status: 'no-reply-overdue', systemEvents: [...(cur.systemEvents ?? []), sysEv] } }
-    })
   }
 
   const handleDP3Action = (group: ActionGroup, action: string, draft: string, cardKey: string) => {
@@ -12840,7 +12856,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
 
                           /* ── Type B: inbound email ──────────────────────── */
                           if (entry.kind === 'inbound') return (
-                            <div key={entry.id} className="flex justify-start">
+                            <div key={entry.id} className="flex justify-start animate-reply-in">
                               <div className="max-w-[82%] space-y-1.5">
                                 <div className="flex items-center gap-1.5 text-[10px] text-gray-400">
                                   <span className="font-semibold text-gray-700">{entry.sender}</span>
@@ -12856,7 +12872,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
 
                           /* ── Type C: agent summary ──────────────────────── */
                           if (entry.kind === 'agent_summary') return (
-                            <div key={entry.id} className="border-l-2 border-blue-300 bg-blue-50/50 rounded-r-xl px-3.5 py-3 space-y-1.5">
+                            <div key={entry.id} className="border-l-2 border-blue-300 bg-blue-50/50 rounded-r-xl px-3.5 py-3 space-y-1.5 animate-reply-in">
                               <div className="flex items-center gap-1.5 text-[10px] text-blue-600">
                                 <Bot className="w-3 h-3 shrink-0" />
                                 <span className="font-bold">✦ Agent summary</span>
@@ -12934,9 +12950,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                           </div>
                           <pre className="text-[11px] text-gray-600 whitespace-pre-wrap font-sans leading-relaxed p-3.5 bg-gray-50/40 select-text">{actionDraftBody}</pre>
                         </div>
-                        <div className="flex items-center justify-end">
-                          <button onClick={() => handleSimulateReply(drawerGroup)} className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-gray-500 transition-colors"><MessageSquare className="w-3 h-3" />Simulate reply (demo)</button>
-                        </div>
                       </div>
                     )}
 
@@ -13012,21 +13025,28 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                         </button>
                         <div className="flex items-center justify-between text-[11px] text-gray-400">
                           <button className="hover:text-gray-600 transition-colors">Save draft</button>
-                          <button onClick={() => handleSimulateReply(drawerGroup)} className="flex items-center gap-1 hover:text-gray-500 transition-colors"><MessageSquare className="w-3 h-3" />Simulate reply (demo)</button>
                         </div>
                       </div>
                     )}
 
-                    {/* State C: awaiting reply — status banner + secondary actions */}
+                    {/* State C: awaiting reply — lifelike sent + auto-arriving reply (no demo controls) */}
                     {drawerUiState === 'C' && (
                       <div className="shrink-0 border-t border-gray-100 px-6 py-4 bg-white space-y-3">
-                        <div className="flex items-center justify-center gap-2 text-[11px] text-gray-400 bg-gray-50 rounded-xl py-3">
-                          <Clock className="w-3.5 h-3.5 shrink-0 text-gray-300" />
-                          <span>Sent {drawerThread ? new Date(drawerThread.startedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'} · awaiting supplier reply</span>
+                        <div className="flex flex-col items-center justify-center gap-2 bg-gray-50 rounded-xl py-3.5">
+                          <div className="flex items-center gap-2 text-[11px] text-gray-500">
+                            <Check className="w-3.5 h-3.5 shrink-0 text-green-500" />
+                            <span>Sent {drawerThread ? new Date(drawerThread.startedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5 text-[11px] text-gray-400">
+                            <span>{drawerSup.name} is replying</span>
+                            <span className="flex items-end gap-0.5 h-3">
+                              <span className="typing-dot w-1 h-1 rounded-full bg-gray-400" />
+                              <span className="typing-dot w-1 h-1 rounded-full bg-gray-400" />
+                              <span className="typing-dot w-1 h-1 rounded-full bg-gray-400" />
+                            </span>
+                          </div>
                         </div>
-                        <div className="flex items-center justify-center gap-4">
-                          <button onClick={() => handleNoReplyTrigger(drawerGroup)} className="text-[11px] text-amber-600 hover:text-amber-800 font-medium transition-colors">Mark: no reply (demo)</button>
-                          <span className="text-gray-200">·</span>
+                        <div className="flex items-center justify-center">
                           <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-500 hover:text-gray-700 font-medium transition-colors">Snooze 3 days</button>
                         </div>
                         {isSnoozeConfirm && (
@@ -13035,9 +13055,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                             <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: false }))} className="ml-1.5 text-gray-400 hover:text-gray-600">Cancel</button>
                           </div>
                         )}
-                        <button onClick={() => handleSimulateReply(drawerGroup)} className="w-full h-7 rounded-lg border border-dashed border-gray-200 text-[10px] font-medium text-gray-400 hover:text-gray-500 hover:bg-gray-50 transition-colors flex items-center justify-center gap-1.5">
-                          <MessageSquare className="w-3 h-3" />Simulate reply (demo)
-                        </button>
                       </div>
                     )}
 
