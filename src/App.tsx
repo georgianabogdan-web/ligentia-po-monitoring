@@ -11434,7 +11434,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
         {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center bg-gray-100 rounded-xl p-1 gap-0.5">
-            {([['intake','Intake Forecast'],['actions','Actions'],['allpos','All POs'],['suppliers','Supplier Health'],['agentlog','Agent Log']] as const).map(([t, label]) => (
+            {([['actions','Actions'],['intake','Intake Forecast'],['allpos','All POs'],['suppliers','Supplier Health'],['agentlog','Agent Log']] as const).map(([t, label]) => (
               <button key={t} onClick={() => setSubTab(t)} className={`h-8 px-4 rounded-lg text-xs font-semibold transition-colors ${subTab === t ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>{label}</button>
             ))}
           </div>
