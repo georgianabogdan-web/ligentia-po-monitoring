@@ -11456,10 +11456,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           const modeGroups = actionGroups.filter(g =>
             actionMode === 'all' ? true : actionMode === 'predicted' ? isPredictiveType(g.type) : !isPredictiveType(g.type)
           )
-          const awaitingUser   = modeGroups.filter(g => ['agent-drafted','decision-needed','reply-received'].includes(getCardState(g))).length
-          const valueAtRisk    = modeGroups.reduce((s, g) => s + g.pos.reduce((ss, p) => ss + parseOrderVal(p.orderValue), 0), 0)
-          const decisionsPend  = modeGroups.filter(g => getCardState(g) === 'decision-needed').length
-          const awaitingReply  = modeGroups.filter(g => getCardState(g) === 'awaiting-reply').length
           const modePredicted  = actionMode === 'predicted'
 
           const filtered = modeGroups.filter(g => {
@@ -11801,53 +11797,35 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
               </div>
             </div>
 
-            {/* ── Stats strip (per active mode) ─────────────────────────────── */}
-            <div className="grid grid-cols-4 gap-3 mb-1">
-              {(modePredicted ? [
-                { label: 'Pre-empts ready',         value: awaitingUser,                                                                  color: 'text-violet-700', bg: 'bg-violet-50 border border-violet-100' },
-                { label: '£ at risk if it slips',   value: `~£${modeGroups.reduce((s, g) => s + groupMissedSales(g), 0).toLocaleString()}`, color: 'text-amber-600',  bg: 'bg-amber-50 border border-amber-100' },
-                { label: 'Predicted risks (slip + fill)', value: modeGroups.length,                                                             color: 'text-violet-700', bg: 'bg-violet-50 border border-violet-100' },
-                { label: 'Awaiting reply',          value: awaitingReply,                                                                 color: 'text-gray-500',   bg: 'bg-gray-50 border border-gray-100' },
-              ] : [
-                { label: 'Actions awaiting you', value: awaitingUser,                       color: 'text-gray-900', bg: 'bg-white border border-gray-100' },
-                { label: '£ value at risk',      value: `£${valueAtRisk.toLocaleString()}`, color: 'text-red-600',  bg: 'bg-red-50 border border-red-100' },
-                { label: 'Decisions pending',    value: decisionsPend,                      color: 'text-red-700',  bg: 'bg-red-50 border border-red-100' },
-                { label: 'Awaiting reply',       value: awaitingReply,                      color: 'text-gray-500', bg: 'bg-gray-50 border border-gray-100' },
-              ]).map(({ label, value, color, bg }) => (
-                <div key={label} className={`rounded-xl p-4 ${bg}`}>
-                  <div className={`text-2xl font-bold ${color}`}>{value}</div>
-                  <div className="text-xs text-gray-500 font-medium mt-0.5">{label}</div>
-                </div>
-              ))}
-            </div>
-            {/* Secondary status pills (per active mode) */}
-            <div className="flex items-center gap-2 flex-wrap pb-1">
-              {(modePredicted ? [
-                { label: 'Predicted to slip', count: modeGroups.length, cls: 'bg-violet-50 text-violet-700 border-violet-100' },
-                { label: 'On track',          count: onTrackPOs.length,  cls: 'bg-green-50 text-green-700 border-green-100' },
-              ] : [
-                { label: 'On track', count: onTrackPOs.length,    cls: 'bg-green-50 text-green-700 border-green-100' },
-                { label: 'Late DC',  count: preDispatchPOs.length, cls: 'bg-amber-50 text-amber-700 border-amber-100' },
-                { label: 'At risk',  count: atRiskPOs.length,      cls: 'bg-orange-50 text-orange-700 border-orange-100' },
-                { label: 'Overdue',  count: overduePOs.length,     cls: 'bg-red-50 text-red-700 border-red-100' },
-              ]).map(({ label, count, cls }) => (
-                <span key={label} className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold border ${cls}`}>
-                  <span className="font-bold">{count}</span> {label}
-                </span>
-              ))}
-            </div>
-
-            {/* ── Guidance line (reflects active mode) ──────────────────────── */}
+            {/* ── Header: ONE slim stat strip (numbers) + orienting sentence
+                 (pointer). Mode-reactive; zero-value stats dropped. The four KPI
+                 cards and the PO-population pills were removed — the pills now
+                 live on All POs, and per-row problem chips carry severity. ── */}
             {sorted.length > 0 && (() => {
-              const totalVal = sorted.reduce((s, g) => s + g.pos.reduce((ss, p) => ss + parseOrderVal(p.orderValue), 0), 0)
-              const topSup = getSupplier(sorted[0].supplierId)
               const decisions = sorted.filter(g => getCardState(g) === 'decision-needed').length
+              const awaiting  = sorted.filter(g => getCardState(g) === 'awaiting-reply').length
+              const predVal = (g: ActionGroup) => g.type === 'fill_risk'
+                ? g.pos.reduce((s, p) => { const fr = FILL_PREDICTIONS[p.id]; const unit = p.quantity > 0 ? parseOrderVal(p.orderValue) / p.quantity : 0; return s + (fr ? Math.round(fr.predictedShortfallUnits * unit) : 0) }, 0)
+                : g.pos.reduce((s, p) => s + (PO_PREDICTIONS[p.id]?.missedSalesRisk.estimatedLostRevenue ?? 0), 0)
+              const totalVal = modePredicted
+                ? sorted.reduce((s, g) => s + predVal(g), 0)
+                : sorted.reduce((s, g) => s + g.pos.reduce((ss, p) => ss + parseOrderVal(p.orderValue), 0), 0)
+              const topSup = getSupplier(sorted[0].supplierId)
+              const stats: React.ReactNode[] = []
+              stats.push(<span key="a"><span className="font-bold text-gray-900">{sorted.length}</span> {sorted.length === 1 ? 'action' : 'actions'}</span>)
+              if (decisions > 0) stats.push(<span key="d"><span className="font-bold text-red-700">{decisions}</span> decision{decisions === 1 ? '' : 's'} pending</span>)
+              if (totalVal > 0) stats.push(<span key="v"><span className={`font-bold ${modePredicted ? 'text-amber-600' : 'text-red-600'}`}>{modePredicted ? '~£' : '£'}{totalVal.toLocaleString()}</span> {modePredicted ? 'at risk if it slips' : 'at risk'}</span>)
+              if (awaiting > 0) stats.push(<span key="w"><span className="font-bold text-gray-700">{awaiting}</span> awaiting reply</span>)
               return (
-                <div className="text-[12px] text-gray-700 font-semibold px-1">
-                  {sorted.length} action{sorted.length === 1 ? '' : 's'}
-                  {decisions > 0 && <> · {decisions} require{decisions === 1 ? 's' : ''} a decision</>}
-                  {totalVal > 0 && <> · £{totalVal.toLocaleString()} {modePredicted ? 'at risk if it slips' : 'at risk'}</>}
-                  {topSup && <span className="font-normal text-gray-500"> · start with {topSup.name}</span>}
+                <div>
+                  <div className="flex items-center gap-x-2 gap-y-1 flex-wrap text-[12px] text-gray-500">
+                    {stats.map((s, i) => <Fragment key={i}>{i > 0 && <span className="text-gray-300">·</span>}{s}</Fragment>)}
+                  </div>
+                  {topSup && (
+                    <div className="text-[13px] font-semibold text-gray-800 mt-1">
+                      Start with {topSup.name}{decisions > 0 ? ' — overdue decisions are most urgent' : modePredicted ? ' — pre-empt before it’s late' : ''}
+                    </div>
+                  )}
                 </div>
               )
             })()}
@@ -13186,6 +13164,25 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                 <button className="ml-auto h-8 px-3 rounded-lg border border-gray-200 text-xs font-semibold text-gray-600 hover:bg-gray-50 flex items-center gap-1.5">
                   <Download className="w-3.5 h-3.5" /> Export Excel
                 </button>
+              </div>
+              {/* PO health — portfolio breakdown of ALL POs (relocated here from
+                  Actions, where it described the wrong population). Click to filter. */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wide mr-0.5">PO health</span>
+                {([
+                  { key: 'on_track', label: 'On track', count: onTrackPOs.length,     cls: 'bg-green-50 text-green-700 border-green-200',   active: 'bg-green-600 text-white border-green-600' },
+                  { key: 'late_dc',  label: 'Late DC',  count: preDispatchPOs.length,  cls: 'bg-amber-50 text-amber-700 border-amber-200',   active: 'bg-amber-500 text-white border-amber-500' },
+                  { key: 'at_risk',  label: 'At risk',  count: atRiskPOs.length,       cls: 'bg-orange-50 text-orange-700 border-orange-200',active: 'bg-orange-500 text-white border-orange-500' },
+                  { key: 'overdue',  label: 'Overdue',  count: overduePOs.length,      cls: 'bg-red-50 text-red-700 border-red-200',         active: 'bg-red-600 text-white border-red-600' },
+                ] as const).map(ph => {
+                  const on = poStatusFilter === ph.key
+                  return (
+                    <button key={ph.key} onClick={() => setPoStatusFilter(on ? 'all' : ph.key)} title={`Filter to ${ph.label} POs`}
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold border transition-colors ${on ? ph.active : ph.cls}`}>
+                      <span className="font-bold">{ph.count}</span> {ph.label}
+                    </button>
+                  )
+                })}
               </div>
               {ordered.length === 0 ? (
                 <div className="bg-white border border-gray-100 rounded-2xl shadow-sm text-center text-xs text-gray-400 py-10">No POs match the selected filters</div>
