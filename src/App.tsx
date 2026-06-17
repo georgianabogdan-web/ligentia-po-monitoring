@@ -11742,56 +11742,64 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           <>
             {!drawerOpen && (<>
             {actionToast && <Toast message={actionToast} onDone={() => setActionToast(null)} />}
-            {/* ── One tidy controls row: mode · Type ▾ · Urgency ▾ … Sort ▾ · Group by ── */}
+            {/* ── One control row, THREE distinct shapes (decreasing importance):
+                 TIER 2 mode = solid filled SEGMENTED control (heaviest) ‖ divider ‖
+                 TIER 3 filters/sort/group = recessive outline dropdowns. The pill
+                 sub-tabs (TIER 1) sit above. No two tiers share a shape. ── */}
             <div className="flex items-center gap-2 flex-wrap mb-1">
-              {/* Primary mode cut */}
-              <div className="inline-flex items-center bg-gray-100 rounded-xl p-1 gap-0.5">
-                {([['now','Live issues'],['predicted','Predicted'],['all','All']] as const).map(([k, label]) => (
+              {/* TIER 2 — MODE: the lens. Solid, connected segmented switch, active
+                  segment filled — deliberately heavier than the outline filters. */}
+              <div className="inline-flex items-stretch rounded-lg border border-gray-300 overflow-hidden shadow-sm">
+                {([['now','Live issues'],['predicted','Predicted'],['all','All']] as const).map(([k, label], i) => (
                   <button key={k} onClick={() => setActionMode(k)}
-                    className={`h-8 px-4 rounded-lg text-xs font-semibold transition-colors ${actionMode === k ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>{label}</button>
+                    className={`h-9 px-4 text-xs font-bold transition-colors ${i > 0 ? 'border-l border-gray-300' : ''} ${actionMode === k ? 'bg-indigo-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}>{label}</button>
                 ))}
               </div>
-              {/* Type filter — collapsed from the pill row into a labelled dropdown */}
+
+              {/* Firm vertical divider — separates the lens (tier 2) from refine (tier 3) */}
+              <div className="w-px h-7 bg-gray-300 mx-1.5 shrink-0" />
+
+              {/* TIER 3 — refine within the lens. Recessive: light labels, outline dropdowns. */}
               <div className="flex items-center gap-1.5">
-                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wide">Type</span>
+                <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wide">Type</span>
                 <div className="relative">
                   <select value={actTypeFilter} onChange={e => setActTypeFilter(e.target.value)}
-                    className="h-9 pl-2.5 pr-7 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none">
+                    className="h-8 pl-2.5 pr-7 rounded-lg border border-gray-200 bg-white text-xs text-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-300 appearance-none">
                     {[['all','All'],['chase','Chase'],['date_change','Date change'],['dc_booking','DC booking'],['fill_risk','Fill risk'],['decision','Decision']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                   </select>
                   <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
                 </div>
               </div>
-              {/* Urgency filter — collapsed from the pill row into a labelled dropdown */}
               <div className="flex items-center gap-1.5">
-                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wide">Urgency</span>
+                <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wide">Urgency</span>
                 <div className="relative">
                   <select value={urgencyFilter} onChange={e => setUrgencyFilter(e.target.value)}
-                    className="h-9 pl-2.5 pr-7 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none">
+                    className="h-8 pl-2.5 pr-7 rounded-lg border border-gray-200 bg-white text-xs text-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-300 appearance-none">
                     {[['all','Any'],['overdue','Overdue'],['at_risk','At risk'],['routine','Routine']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                   </select>
                   <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
                 </div>
               </div>
-              {/* Sort + Group by — aligned right */}
+              {/* Sort + Group — also recessive outline dropdowns, aligned right */}
               <div className="ml-auto flex items-center gap-3 flex-wrap">
                 <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wide">Sort</span>
+                  <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wide">Sort</span>
                   <div className="relative">
                     <select value={sortMode} onChange={e => setSortMode(e.target.value as 'missed_sales' | 'value' | 'overdue')}
-                      className="h-9 pl-2.5 pr-7 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none">
+                      className="h-8 pl-2.5 pr-7 rounded-lg border border-gray-200 bg-white text-xs text-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-300 appearance-none">
                       {[['missed_sales','Sales at risk'],['value','Value at risk'],['overdue','Most overdue']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                     </select>
                     <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
                   </div>
                 </div>
-                <div className="inline-flex items-center gap-1.5">
-                  <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wide">Group by</span>
-                  <div className="inline-flex items-center bg-gray-100 rounded-lg p-0.5 gap-0.5">
-                    {([['none','None'],['supplier','Supplier']] as const).map(([k, label]) => (
-                      <button key={k} onClick={() => setActionGroupBy(k)}
-                        className={`h-7 px-3 rounded-md text-xs font-semibold transition-colors ${actionGroupBy === k ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>{label}</button>
-                    ))}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wide">Group</span>
+                  <div className="relative">
+                    <select value={actionGroupBy} onChange={e => setActionGroupBy(e.target.value as 'none' | 'supplier')}
+                      className="h-8 pl-2.5 pr-7 rounded-lg border border-gray-200 bg-white text-xs text-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-300 appearance-none">
+                      {[['none','None'],['supplier','Supplier']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                    </select>
+                    <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
                   </div>
                 </div>
               </div>
