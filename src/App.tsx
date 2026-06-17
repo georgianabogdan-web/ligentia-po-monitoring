@@ -164,7 +164,7 @@ interface TriggerMessage {
   agentSummary?: string
   priorMessages?: { sender: string; timestamp: string; body: string; direction: 'inbound' | 'outbound' }[]
 }
-interface ActionGroup { supplierId: string; type: 'overdue' | 'at_risk' | 'late_dc' | 'predicted' | 'fill_risk'; pos: PO[]; triggerMessage?: TriggerMessage }
+interface ActionGroup { supplierId: string; type: 'overdue' | 'at_risk' | 'late_dc' | 'predicted' | 'fill_risk' | 'message'; pos: PO[]; triggerMessage?: TriggerMessage; messageContext?: 'chase' | 'preempt' | 'performance' }
 
 // ── Shared action-card primitives (used by PO Monitoring rail + Home overview) ──
 type ActionCardState = 'agent-drafted' | 'decision-needed' | 'awaiting-reply' | 'reply-received' | 'no-reply-overdue' | 'snoozed'
@@ -1550,6 +1550,7 @@ function deriveCardPills(group: ActionGroup, sup: Supplier | null): { status: Ca
   if (group.type === 'at_risk') return { status: 'agent-drafted', actionTypeLabel: 'Approve date change' }
   if (group.type === 'predicted') return { status: 'agent-drafted', actionTypeLabel: 'Pre-empt slip' }
   if (group.type === 'fill_risk') return { status: 'agent-drafted', actionTypeLabel: 'Pre-empt under-fulfilment' }
+  if (group.type === 'message') return { status: 'agent-drafted', actionTypeLabel: 'Supplier message' }
   return                                { status: 'agent-drafted', actionTypeLabel: 'Confirm DC booking' }
 }
 
@@ -2180,14 +2181,16 @@ function SupplierDetailView({
   supplier,
   onBack,
   onLogActivity,
+  onMessageSupplier,
   pos,
   onOpenPO,
 }: {
-  supplier:        Supplier
-  onBack:          () => void
-  onLogActivity?:  (kind: ActivityKind, text: string) => void
-  pos:             PO[]
-  onOpenPO?:       (poId: string) => void
+  supplier:           Supplier
+  onBack:             () => void
+  onLogActivity?:     (kind: ActivityKind, text: string) => void
+  onMessageSupplier?: () => void
+  pos:                PO[]
+  onOpenPO?:          (poId: string) => void
 }) {
   const journey = SUPPLIER_JOURNEY[supplier.id]
   const tierCfg = journey ? HEALTH_TIER_CFG[journey.tier] : null
@@ -2269,6 +2272,7 @@ function SupplierDetailView({
                   {journey.tier}
                 </span>
               )}
+              {onMessageSupplier && <button onClick={onMessageSupplier} title="Message this supplier about all their open POs (combined email)" className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-violet-600 text-white text-[11px] font-semibold hover:bg-violet-700"><Mail className="w-3.5 h-3.5" /> Message supplier</button>}
               {onLogActivity && <LogActivityButton onSave={onLogActivity} />}
             </div>
           </div>
@@ -10674,7 +10678,7 @@ function poIntakeKind(poId: string): 'New' | 'Rebuy' {
 // failure mode. So every week breaks out its AT-RISK portion (never just a net
 // total), and an always-visible exception strip ranks the worst lines by
 // missed-sales (commercial) impact regardless of how the aggregate looks.
-function IntakeForecastView({ onOpenPO }: { onOpenPO: (poId: string) => void }) {
+function IntakeForecastView({ onOpenPO, onMessagePO }: { onOpenPO: (poId: string) => void; onMessagePO?: (poId: string) => void }) {
   const WEEKS = 12
   const [catFilter, setCatFilter] = useState('all')
   const [openWeek, setOpenWeek] = useState<number | null>(null)
@@ -10810,7 +10814,12 @@ function IntakeForecastView({ onOpenPO }: { onOpenPO: (poId: string) => void }) 
                       </td>
                       <td className="px-3 py-2 text-right font-bold text-red-700 tabular-nums whitespace-nowrap">{daysLate}d</td>
                       <td className="px-3 py-2 text-right font-bold text-red-600 tabular-nums whitespace-nowrap">£{r.pred.missedSalesRisk.estimatedLostRevenue.toLocaleString('en-GB')}</td>
-                      <td className="px-3 py-2 text-right"><span className="inline-flex items-center gap-0.5 text-[11px] font-semibold text-indigo-600">Open <ArrowRight className="w-3 h-3" /></span></td>
+                      <td className="px-3 py-2 text-right" onClick={e => e.stopPropagation()}>
+                        <div className="inline-flex items-center gap-2 justify-end">
+                          {onMessagePO && <button onClick={() => onMessagePO(r.po.id)} title="Pre-empt: message this supplier about the PO" className="inline-flex items-center gap-1 text-[10px] font-semibold text-violet-700 hover:text-violet-900 whitespace-nowrap"><Mail className="w-3 h-3" /> Message supplier</button>}
+                          <button onClick={() => onOpenPO(r.po.id)} className="inline-flex items-center gap-0.5 text-[11px] font-semibold text-indigo-600 hover:text-indigo-800">Open <ArrowRight className="w-3 h-3" /></button>
+                        </div>
+                      </td>
                     </tr>
                   )
                 })}
@@ -10918,6 +10927,12 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
   const [emailDraft,       setEmailDraft]       = useState('')
   const [poSearch,         setPoSearch]         = useState('')
   const [chaseThreads,     setChaseThreads]     = useState<Record<string, ChaseThread>>({})
+  // Ad-hoc "Message supplier" conversations started from anywhere (All POs, Intake,
+  // Supplier Health). They become resolvable ActionGroups so the EXISTING action
+  // workspace can open them; the chase thread surfaces in the Supplier conversations
+  // inbox. msgReturnTab remembers where the message was launched, for back-nav.
+  const [messageGroups,    setMessageGroups]    = useState<ActionGroup[]>([])
+  const [msgReturnTab,     setMsgReturnTab]      = useState<'allpos' | 'intake' | 'suppliers' | null>(null)
   const [expandedMsgIds,   setExpandedMsgIds]   = useState<Set<string>>(new Set()); void expandedMsgIds; void setExpandedMsgIds
   const [chaseDraftMap,    setChaseDraftMap]    = useState<Record<string, string>>({})
   const [chaseHistoryOpen, setChaseHistoryOpen] = useState(false); void chaseHistoryOpen; void setChaseHistoryOpen
@@ -11081,7 +11096,9 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
   // ── Card helpers ────────────────────────────────────────────────────────────
   const parseOrderVal = (v: string) => parseInt(v.replace(/[^0-9]/g, '')) || 0
   const urgWt = (g: ActionGroup) => g.type === 'overdue' ? 3 : g.type === 'at_risk' ? 2 : 1
-  const cardKey = (g: ActionGroup) => `${g.supplierId}-${g.type}`
+  const cardKey = (g: ActionGroup) => g.type === 'message'
+    ? `msg-${g.supplierId}-${g.pos.length === 1 ? g.pos[0].id : 'all'}`   // per-PO vs per-supplier message
+    : `${g.supplierId}-${g.type}`
   const getCardState = (g: ActionGroup): 'agent-drafted' | 'decision-needed' | 'awaiting-reply' | 'reply-received' | 'no-reply-overdue' | 'snoozed' => {
     if (snoozedCards.has(cardKey(g))) return 'snoozed'
     const thread = chaseThreads[g.supplierId]
@@ -11235,6 +11252,35 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
     setChaseThreads(prev => ({ ...prev, [key]: thread }))
     setExpandedMsgIds(new Set())
     addPOEvent(primary.pos[0].id, { id: `ev-${Date.now()}`, type: 'chase_sent', timestamp: new Date().toISOString(), body: `Chase email sent to ${getSupplier(primary.supplierId)?.name}.`, author: 'agent' })
+  }
+
+  // ── "Message supplier" — start an agentic conversation from anywhere ──────────
+  // Builds an ad-hoc message group (single-PO or per-supplier), starts the chase
+  // thread via the SAME handleStartThread (→ surfaces in Supplier conversations),
+  // and opens the EXISTING action workspace. No new messaging screen.
+  const buildMessageDraft = (g: ActionGroup): string => {
+    const name = getSupplier(g.supplierId)?.name ?? g.supplierId
+    const nl = '\n'
+    const list = g.pos.map(p => `- ${p.id}: ${p.product} (due ${formatDate(p.expectedDelivery)}, ${p.quantity.toLocaleString('en-GB')} units)`).join(nl)
+    const closing = nl + nl + 'Kind regards,' + nl + 'Debenhams Buying Team'
+    const ctx = g.messageContext ?? 'chase'
+    if (ctx === 'preempt')     return `Dear ${name} Team,${nl}${nl}Ahead of delivery we'd like to confirm dates and the full ordered quantity on the following — please flag any risk to on-time, in-full delivery now:${nl}${nl}${list}${closing}`
+    if (ctx === 'performance') return `Dear ${name} Team,${nl}${nl}As part of a review of recent performance, please confirm your plan to deliver the following open orders on time and in full, and raise any concerns:${nl}${nl}${list}${closing}`
+    return `Dear ${name} Team,${nl}${nl}We're following up on the open order${g.pos.length === 1 ? '' : 's'} below. Please confirm current status and that delivery remains on the agreed date and full quantity:${nl}${nl}${list}${closing}`
+  }
+  const startMessage = (g: ActionGroup, returnTab: 'allpos' | 'intake' | 'suppliers') => {
+    setMessageGroups(prev => prev.some(x => cardKey(x) === cardKey(g)) ? prev.map(x => cardKey(x) === cardKey(g) ? g : x) : [...prev, g])
+    handleStartThread([g], buildMessageDraft(g))
+    setMsgReturnTab(returnTab)
+    setSubTab('actions')
+    openActionCard(cardKey(g))
+  }
+  const startMessageForPO = (po: PO, returnTab: 'allpos' | 'intake' | 'suppliers', context: ActionGroup['messageContext'] = 'chase') =>
+    startMessage({ supplierId: po.supplierId, type: 'message', pos: [po], messageContext: context }, returnTab)
+  const startMessageForSupplier = (supplierId: string, returnTab: 'allpos' | 'intake' | 'suppliers', context: ActionGroup['messageContext'] = 'chase') => {
+    const pos = ALL_POS.filter(p => p.supplierId === supplierId && p.status !== 'Delivered')
+    if (pos.length === 0) return
+    startMessage({ supplierId, type: 'message', pos, messageContext: context }, returnTab)
   }
 
   const handleSimulateReply = (group: ActionGroup) => {
@@ -11528,7 +11574,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
             'awaiting-reply': 'Awaiting reply', 'reply-received': 'Reply received', 'no-reply-overdue': 'No reply — overdue', 'resolved': 'Resolved',
           }
           const entries: ConversationInboxEntry[] = Object.entries(chaseThreads).map(([supplierId, thread]) => {
-            const grps = actionGroups.filter(g => g.supplierId === supplierId)
+            const grps = [...actionGroups, ...messageGroups].filter(g => g.supplierId === supplierId)
             const grp  = grps[0]
             const sup  = getSupplier(supplierId)
             const poIds = Array.from(new Set(grps.flatMap(g => g.pos.map(p => p.id))))
@@ -11557,7 +11603,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
         })()}
 
         {/* ── INTAKE FORECAST ── */}
-        {subTab === 'intake' && <IntakeForecastView onOpenPO={poId => setSelectedPOId(poId)} />}
+        {subTab === 'intake' && <IntakeForecastView onOpenPO={poId => setSelectedPOId(poId)} onMessagePO={poId => { const po = ALL_POS.find(p => p.id === poId); if (po) startMessageForPO(po, 'intake', 'preempt') }} />}
 
         {/* ── ACTIONS ── */}
         {subTab === 'actions' && (() => {
@@ -11709,7 +11755,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           }
 
           // ── Drawer data ──────────────────────────────────────────────────
-          const drawerGroup    = actionGroups.find(g => cardKey(g) === drawerCardKey) ?? null
+          const drawerGroup    = [...actionGroups, ...messageGroups].find(g => cardKey(g) === drawerCardKey) ?? null
           const drawerSup      = drawerGroup ? getSupplier(drawerGroup.supplierId) : null
           const drawerThread   = drawerGroup ? chaseThreads[drawerGroup.supplierId] : null
           const drawerState    = drawerGroup ? getCardState(drawerGroup) : null
@@ -11990,8 +12036,8 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
 
             {drawerOpen && drawerGroup && drawerSup && (
               <DetailWorkspaceLayout
-                onBack={() => { if (drawerView === 'po-detail') { setDrawerView('action'); setDrawerViewPOId(null) } else setDrawerCardKey(null) }}
-                backLabel={drawerView === 'po-detail' ? drawerSup.name : 'Back to actions'}
+                onBack={() => { if (drawerView === 'po-detail') { setDrawerView('action'); setDrawerViewPOId(null) } else { setDrawerCardKey(null); if (msgReturnTab) { setSubTab(msgReturnTab); setMsgReturnTab(null) } } }}
+                backLabel={drawerView === 'po-detail' ? drawerSup.name : msgReturnTab === 'allpos' ? 'Back to All POs' : msgReturnTab === 'intake' ? 'Back to Intake Forecast' : msgReturnTab === 'suppliers' ? 'Back to Supplier Health' : 'Back to actions'}
                 breadcrumb={drawerView === 'po-detail' ? <span className="font-mono">{drawerViewPOId}</span> : <>PO Monitoring · Actions · {drawerSup.name}</>}
                 header={drawerView === 'action' ? (
                   <div className="bg-white border border-gray-200 rounded-2xl px-5 py-4">
@@ -13200,7 +13246,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
             : filtered
           const poThead = (
             <thead className="bg-gray-50 border-b border-gray-100">
-              <tr>{['PO Number','Supplier','Product','Status','Risk','Delivery','Predicted landing','Value','Freight'].map(h => <th key={h} className="px-4 py-3 text-left font-semibold text-gray-500 whitespace-nowrap">{h}</th>)}</tr>
+              <tr>{['PO Number','Supplier','Product','Status','Risk','Delivery','Predicted landing','Value','Freight',''].map((h, i) => <th key={h || i} className="px-4 py-3 text-left font-semibold text-gray-500 whitespace-nowrap">{h}</th>)}</tr>
             </thead>
           )
           const renderPoRow = (po: PO) => {
@@ -13239,6 +13285,9 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                 </td>
                 <td className="px-4 py-3 text-gray-700 font-medium">{po.orderValue}</td>
                 <td className="px-4 py-3"><span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${po.freight === 'Air' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>{po.freight}</span></td>
+                <td className="px-4 py-3 text-right" onClick={e => e.stopPropagation()}>
+                  <button onClick={() => startMessageForPO(po, 'allpos')} title="Start a supplier conversation about this PO" className="inline-flex items-center gap-1 h-7 px-2.5 rounded-lg border border-indigo-200 text-indigo-700 text-[10px] font-semibold hover:bg-indigo-50 whitespace-nowrap"><Mail className="w-3 h-3" /> Message supplier</button>
+                </td>
               </tr>
             )
           }
@@ -13317,7 +13366,11 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                     const nm = getSupplier(supId)?.name ?? supId
                     const val = ps.reduce((s, po) => s + parseOrderVal(po.orderValue), 0)
                     return (
-                      <SupplierGroup key={supId} supplierName={nm} count={ps.length} unit="PO" valueLabel={`£${Math.round(val).toLocaleString('en-GB')}`}>
+                      <SupplierGroup key={supId} supplierName={nm} count={ps.length} unit="PO" valueLabel={`£${Math.round(val).toLocaleString('en-GB')}`}
+                        headerAction={
+                          <button onClick={() => startMessageForSupplier(supId, 'allpos')} title="Message this supplier about all their open POs (combined email)" className="inline-flex items-center gap-1.5 h-7 px-3 rounded-lg bg-violet-600 text-white text-[11px] font-semibold hover:bg-violet-700"><Mail className="w-3 h-3" /> Message supplier</button>
+                        }
+                      >
                         <table className="w-full text-xs">{poThead}<tbody className="divide-y divide-gray-50">{ps.map(renderPoRow)}</tbody></table>
                       </SupplierGroup>
                     )
@@ -13342,6 +13395,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                 supplier={sup}
                 onBack={() => setSelectedSupplierId(null)}
                 pos={ALL_POS}
+                onMessageSupplier={() => { setSelectedSupplierId(null); startMessageForSupplier(sup.id, 'suppliers', 'performance') }}
                 onOpenPO={poId => { setSelectedPOId(poId); setSelectedSupplierId(null) }}
                 onLogActivity={(kind, text) => {
                   // Prototype stub: log against the supplier's first PO so it surfaces in events.
