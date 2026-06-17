@@ -11547,7 +11547,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                 key={ck}
                 onClick={() => openActionCard(ck)}
                 className={`grid items-center gap-x-3 px-4 py-2.5 border-l-4 ${urgBorder} cursor-pointer transition-colors hover:bg-gray-50 ${snoozedCards.has(ck) ? 'opacity-50' : ''}`}
-                style={{ gridTemplateColumns: 'minmax(0,1fr) 156px 92px 124px 150px 140px' }}
+                style={{ gridTemplateColumns: 'minmax(0,1fr) 188px 92px 124px 150px 140px' }}
               >
                 {/* 1 · supplier + one-line situation */}
                 <div className="min-w-0">
@@ -11555,10 +11555,13 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                   <div className="text-[12px] font-semibold text-gray-900 truncate">{sup?.name ?? g.supplierId} <span className="font-normal text-gray-500">· {issueTitle}</span></div>
                   <div className="text-[10px] text-gray-400 truncate">{g.pos.length <= 2 ? g.pos.map(p => p.id).join(', ') : `${g.pos[0].id}, ${g.pos[1].id} +${g.pos.length - 2} more`}</div>
                 </div>
-                {/* 2 · PROBLEM — what's wrong + how bad (separate from £/sales + recommendation) */}
-                <div>
+                {/* 2 · PROBLEM — what's wrong + how bad. Sizes within its own track;
+                    min-w-0 + wrapping (no nowrap) keep it from bleeding into £ AT RISK.
+                    Long strings wrap to a 2nd line rather than truncate, so the end
+                    quantifier (e.g. "~73% fill", "78d late") is always preserved. */}
+                <div className="min-w-0">
                   <div className="text-[8px] uppercase tracking-wide text-gray-400 mb-0.5">Problem</div>
-                  <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold border whitespace-nowrap ${problem.cls}`}>{problem.label}</span>
+                  <span title={problem.label} className={`inline-block max-w-full px-2 py-0.5 rounded-md text-[11px] font-bold border leading-tight break-words ${problem.cls}`}>{problem.label}</span>
                 </div>
                 {/* 3 · £ at risk */}
                 <div className="text-right">
