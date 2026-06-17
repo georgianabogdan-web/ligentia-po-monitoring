@@ -10633,6 +10633,9 @@ function IntakeForecastView({ onOpenPO }: { onOpenPO: (poId: string) => void }) 
   const WEEKS = 12
   const [catFilter, setCatFilter] = useState('all')
   const [openWeek, setOpenWeek] = useState<number | null>(null)
+  // Top at-risk table sort — the title + header indicator reflect this.
+  const [exSort, setExSort] = useState<'sales' | 'days'>('sales')
+  const [exDir, setExDir]   = useState<'asc' | 'desc'>('desc')
 
   const weekStart0 = (() => {
     // Monday of DEMO_TODAY's week.
@@ -10683,11 +10686,19 @@ function IntakeForecastView({ onOpenPO }: { onOpenPO: (poId: string) => void }) 
   })
   const maxUnits = Math.max(1, ...weeks.map(w => w.totalUnits))
 
-  // Exception strip — worst lines by missed-sales £, ALWAYS shown.
+  // Top at-risk POs — worst lines by the ACTIVE sort, ALWAYS shown.
+  const exDaysLate = (r: Row) => Math.max(0, Math.round((new Date(r.pred.predictedLandingDate).getTime() - new Date(r.pred.targetStockDate).getTime()) / 86400000))
+  const exVal = (r: Row) => exSort === 'days' ? exDaysLate(r) : r.pred.missedSalesRisk.estimatedLostRevenue
   const exceptions = rows
     .filter(r => r.pred.missedSalesRisk.willMissSales)
-    .sort((a, b) => b.pred.missedSalesRisk.estimatedLostRevenue - a.pred.missedSalesRisk.estimatedLostRevenue)
+    .sort((a, b) => { const d = exVal(b) - exVal(a); return exDir === 'desc' ? d : -d })
     .slice(0, 5)
+  const exSortLabel = exSort === 'days' ? 'days late' : 'sales at risk'
+  const toggleExSort = (col: 'sales' | 'days') => {
+    if (exSort === col) setExDir(d => d === 'desc' ? 'asc' : 'desc')
+    else { setExSort(col); setExDir('desc') }
+  }
+  const sortArrow = (col: 'sales' | 'days') => exSort === col ? (exDir === 'desc' ? ' ↓' : ' ↑') : ''
 
   const totalAtRisk = rows.filter(r => r.atRisk).length
   const totalLostRev = rows.reduce((s, r) => s + r.pred.missedSalesRisk.estimatedLostRevenue, 0)
@@ -10716,7 +10727,7 @@ function IntakeForecastView({ onOpenPO }: { onOpenPO: (poId: string) => void }) 
       <div className="bg-red-50 border border-red-200 rounded-2xl p-3">
         <div className="flex items-center gap-1.5 mb-2 px-1">
           <AlertTriangle className="w-3.5 h-3.5 text-red-500" />
-          <span className="text-[11px] font-bold text-red-700 uppercase tracking-wide">Biggest exceptions — by sales at risk</span>
+          <span className="text-[11px] font-bold text-red-700 uppercase tracking-wide">Top at-risk POs — late or under-filling · by {exSortLabel}</span>
         </div>
         {exceptions.length === 0 ? (
           <div className="text-[11px] text-gray-500 px-1 py-2">No lines predicted to miss their stock date in this view.</div>
@@ -10724,14 +10735,23 @@ function IntakeForecastView({ onOpenPO }: { onOpenPO: (poId: string) => void }) 
           <div className="bg-white border border-red-200 rounded-xl overflow-hidden">
             <table className="w-full text-xs">
               <thead className="bg-red-50/60 border-b border-red-100">
-                <tr>{['PO / SKU','Supplier','Predicted landing vs plan','Days late','Sales at risk',''].map((h, i) => (
-                  <th key={h || i} className={`px-3 py-2 text-[10px] font-semibold text-red-700/80 uppercase tracking-wide whitespace-nowrap ${i >= 3 ? 'text-right' : 'text-left'}`}>{h}</th>
-                ))}</tr>
+                <tr>
+                  <th className="px-3 py-2 text-left text-[10px] font-semibold text-red-700/80 uppercase tracking-wide whitespace-nowrap">PO / SKU</th>
+                  <th className="px-3 py-2 text-left text-[10px] font-semibold text-red-700/80 uppercase tracking-wide whitespace-nowrap">Supplier</th>
+                  <th className="px-3 py-2 text-left text-[10px] font-semibold text-red-700/80 uppercase tracking-wide whitespace-nowrap">Predicted landing vs plan</th>
+                  <th className="px-3 py-2 text-right text-[10px] font-semibold uppercase tracking-wide whitespace-nowrap">
+                    <button onClick={() => toggleExSort('days')} className={`inline-flex items-center hover:text-red-900 ${exSort === 'days' ? 'text-red-800 font-bold' : 'text-red-700/80'}`} title="Sort by days late">Days late{sortArrow('days')}</button>
+                  </th>
+                  <th className="px-3 py-2 text-right text-[10px] font-semibold uppercase tracking-wide whitespace-nowrap">
+                    <button onClick={() => toggleExSort('sales')} className={`inline-flex items-center hover:text-red-900 ${exSort === 'sales' ? 'text-red-800 font-bold' : 'text-red-700/80'}`} title="Sort by sales at risk">Sales at risk{sortArrow('sales')}</button>
+                  </th>
+                  <th className="px-3 py-2" />
+                </tr>
               </thead>
               <tbody className="divide-y divide-red-50">
                 {exceptions.map(r => {
                   const supName = SUPPLIERS.find(s => s.id === r.po.supplierId)?.name ?? r.po.supplierId
-                  const daysLate = Math.max(0, Math.round((new Date(r.pred.predictedLandingDate).getTime() - new Date(r.pred.targetStockDate).getTime()) / 86400000))
+                  const daysLate = exDaysLate(r)
                   return (
                     <tr key={r.po.id} onClick={() => onOpenPO(r.po.id)} className="hover:bg-red-50/40 cursor-pointer">
                       <td className="px-3 py-2">
