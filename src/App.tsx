@@ -7019,6 +7019,74 @@ function DetailWorkspaceLayout({
   )
 }
 
+// ── Shared conversations inbox ────────────────────────────────────────────────
+// ONE inbox component, reused by BOTH Reorder's "Active Negotiations" (pre-
+// purchase price negotiations) and PO Monitoring's "Supplier conversations"
+// (post-purchase chase / fix / pre-empt). Same idea, different job — each caller
+// supplies its own scoped entries + routing; the inboxes never pool together,
+// but the user learns one layout. Entries open the caller's existing workspace.
+interface ConversationInboxEntry {
+  key:        string
+  supplier:   string
+  detail:     React.ReactNode               // e.g. "3 POs · Round 2 · last activity 2d ago"
+  reason?:    { label: string; cls: string } // why opened (Chase / Pre-empt / Performance) — monitoring only
+  statusNode?: React.ReactNode               // status chips (supplier-status or chase-status)
+  onOpen:     () => void
+}
+function ConversationsInbox({
+  onBack, backLabel, breadcrumb, title, subtitle, emptyTitle, emptyHint, entries,
+}: {
+  onBack:     () => void
+  backLabel:  string
+  breadcrumb: React.ReactNode
+  title:      string
+  subtitle:   string
+  emptyTitle: string
+  emptyHint:  string
+  entries:    ConversationInboxEntry[]
+}) {
+  return (
+    <DetailWorkspaceLayout
+      onBack={onBack}
+      backLabel={backLabel}
+      breadcrumb={breadcrumb}
+      header={
+        <div className="bg-white border border-gray-200 rounded-2xl px-5 py-4">
+          <div className="text-base font-bold text-gray-900">{title}</div>
+          <div className="text-xs text-gray-400 mt-0.5">{subtitle}</div>
+        </div>
+      }
+    >
+      {entries.length === 0 ? (
+        <div className="bg-white border border-gray-200 rounded-2xl py-16 text-center">
+          <Mail className="w-7 h-7 text-gray-300 mx-auto mb-2" />
+          <div className="text-sm text-gray-500">{emptyTitle}</div>
+          <div className="text-[11px] text-gray-400 mt-1">{emptyHint}</div>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {entries.map(e => {
+            const sup = SUPPLIERS.find(s => s.name === e.supplier)
+            return (
+              <button key={e.key} onClick={e.onOpen}
+                className="w-full text-left bg-white border border-gray-200 rounded-2xl px-4 py-3 hover:border-indigo-300 hover:bg-indigo-50/30 transition-colors flex items-center gap-3 flex-wrap">
+                <span className="text-[13px] font-bold text-gray-900">{e.supplier}</span>
+                {sup && <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${sup.onTimeRate >= 80 ? 'bg-green-50 text-green-700 border-green-100' : sup.onTimeRate >= 70 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'}`}>OTR {sup.onTimeRate}%</span>}
+                {e.reason && <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${e.reason.cls}`}>{e.reason.label}</span>}
+                <span className="text-[11px] text-gray-400">{e.detail}</span>
+                <span className="ml-auto flex items-center gap-1.5 flex-wrap justify-end">
+                  {e.statusNode}
+                  <ArrowRight className="w-3.5 h-3.5 text-indigo-400" />
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </DetailWorkspaceLayout>
+  )
+}
+
 // Per-line offer summary + recommended next step for the multi-line table.
 // Uses the SAME pure helpers the single-line InquiryDrawer uses (calcRequestedCP,
 // recommendNextStep) with round-1 inputs, so the recommendation is identical —
@@ -8401,58 +8469,35 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
   const activeNegCount = supplierSessions.length + inboxOrphanThreads.length
 
   if (showInbox && !openSession && !openLineId) {
-    const sessionEntries = supplierSessions.map(s => {
+    const sessionEntries: ConversationInboxEntry[] = supplierSessions.map(s => {
       const lines = s.threadIds.map(id => REORDER_RECOMMENDATIONS.find(r => r.id === id)).filter(Boolean) as typeof REORDER_RECOMMENDATIONS
       const round = Math.max(1, ...lines.map(l => inquiries[l.id]?.rounds.length ?? 1))
-      const statuses = lines.map(l => threadToSupplierStatus(inquiries[l.id]) ?? l.supplierStatus)
-      return { key: s.id, supplier: s.supplierId, lineCount: s.threadIds.length, statuses, round, onOpen: () => setOpenSession(s) }
+      const counts = lines.map(l => threadToSupplierStatus(inquiries[l.id]) ?? l.supplierStatus).reduce((m, st) => { m[st] = (m[st] ?? 0) + 1; return m }, {} as Record<string, number>)
+      return {
+        key: s.id, supplier: s.supplierId,
+        detail: `${s.threadIds.length} line${s.threadIds.length === 1 ? '' : 's'} · Round ${round}`,
+        statusNode: <>{(Object.keys(counts) as SupplierStatus[]).map(st => <span key={st} className="inline-flex items-center gap-1"><SupplierStatusChip status={st} />{counts[st] > 1 && <span className="text-[10px] text-gray-400">×{counts[st]}</span>}</span>)}</>,
+        onOpen: () => setOpenSession(s),
+      }
     })
-    const orphanEntries = inboxOrphanThreads.map(t => {
-      const rec = REORDER_RECOMMENDATIONS.find(r => r.id === t.recId)
-      return { key: t.recId, supplier: t.supplierId, lineCount: 1, statuses: [threadToSupplierStatus(t) ?? 'awaiting_reply' as SupplierStatus], round: t.rounds.length, onOpen: () => setOpenLineId(t.recId), name: rec?.name }
-    })
+    const orphanEntries: ConversationInboxEntry[] = inboxOrphanThreads.map(t => ({
+      key: t.recId, supplier: t.supplierId,
+      detail: `1 line · Round ${t.rounds.length}`,
+      statusNode: <SupplierStatusChip status={threadToSupplierStatus(t) ?? 'awaiting_reply'} />,
+      onOpen: () => setOpenLineId(t.recId),
+    }))
     const entries = [...sessionEntries, ...orphanEntries]
     return (
-      <DetailWorkspaceLayout
+      <ConversationsInbox
         onBack={() => setShowInbox(false)}
         backLabel="Back to reorders"
         breadcrumb={<>Reorder · Active Negotiations</>}
-        header={
-          <div className="bg-white border border-gray-200 rounded-2xl px-5 py-4">
-            <div className="text-base font-bold text-gray-900">Active Negotiations</div>
-            <div className="text-xs text-gray-400 mt-0.5">{entries.length} live supplier conversation{entries.length === 1 ? '' : 's'} · the home for every thread you've opened</div>
-          </div>
-        }
-      >
-        {entries.length === 0 ? (
-          <div className="bg-white border border-gray-200 rounded-2xl py-16 text-center">
-            <Mail className="w-7 h-7 text-gray-300 mx-auto mb-2" />
-            <div className="text-sm text-gray-500">No active negotiations yet.</div>
-            <div className="text-[11px] text-gray-400 mt-1">Open a line and choose “Start supplier inquiry”, or use “Start supplier inquiry” in the By-supplier view.</div>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {entries.map(e => {
-              const sup = SUPPLIERS.find(s => s.name === e.supplier)
-              const counts = e.statuses.reduce((m, st) => { m[st] = (m[st] ?? 0) + 1; return m }, {} as Record<string, number>)
-              return (
-                <button key={e.key} onClick={e.onOpen}
-                  className="w-full text-left bg-white border border-gray-200 rounded-2xl px-4 py-3 hover:border-indigo-300 hover:bg-indigo-50/30 transition-colors flex items-center gap-3 flex-wrap">
-                  <span className="text-[13px] font-bold text-gray-900">{e.supplier}</span>
-                  {sup && <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${sup.onTimeRate >= 80 ? 'bg-green-50 text-green-700 border-green-100' : sup.onTimeRate >= 70 ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-red-50 text-red-700 border-red-100'}`}>OTR {sup.onTimeRate}%</span>}
-                  <span className="text-[11px] text-gray-400">{e.lineCount} line{e.lineCount === 1 ? '' : 's'} · Round {e.round}</span>
-                  <span className="ml-auto flex items-center gap-1.5 flex-wrap justify-end">
-                    {(Object.keys(counts) as SupplierStatus[]).map(st => (
-                      <span key={st} className="inline-flex items-center gap-1"><SupplierStatusChip status={st} />{counts[st] > 1 && <span className="text-[10px] text-gray-400">×{counts[st]}</span>}</span>
-                    ))}
-                    <ArrowRight className="w-3.5 h-3.5 text-indigo-400" />
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-        )}
-      </DetailWorkspaceLayout>
+        title="Active Negotiations"
+        subtitle={`${entries.length} live supplier negotiation${entries.length === 1 ? '' : 's'} · pre-purchase price talks · the home for every thread you've opened`}
+        emptyTitle="No active negotiations yet."
+        emptyHint="Open a line and choose “Start supplier inquiry”, or use “Start supplier inquiry” in the By-supplier view."
+        entries={entries}
+      />
     )
   }
 
@@ -10862,7 +10907,7 @@ function IntakeForecastView({ onOpenPO }: { onOpenPO: (poId: string) => void }) 
 
 // ── PO Monitoring View ────────────────────────────────────────────────────────
 function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _onNavigateToNeg }: { initialOpenPO?: string | null; initialOpenAction?: string | null; onNavigateToNeg?: (recId: string) => void }) {
-  const [subTab,           setSubTab]           = useState<'intake' | 'actions' | 'allpos' | 'suppliers' | 'agentlog'>('actions')
+  const [subTab,           setSubTab]           = useState<'intake' | 'actions' | 'conversations' | 'allpos' | 'suppliers' | 'agentlog'>('actions')
   const [poEventsMap,      setPoEventsMap]      = useState<Map<string, POEvent[]>>(new Map(Object.entries(SEED_PO_EVENTS)))
   const [lastChasedMap] = useState<Map<string, string>>(new Map()); void lastChasedMap
   const [selectedPOId,     setSelectedPOId]     = useState<string | null>(initialOpenPO ?? null)
@@ -11454,7 +11499,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
         {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center bg-gray-100 rounded-xl p-1 gap-0.5">
-            {([['actions','Actions'],['intake','Intake Forecast'],['allpos','All POs'],['suppliers','Supplier Health'],['agentlog','Agent Log']] as const).map(([t, label]) => (
+            {([['actions','Actions'],['conversations','Supplier conversations'],['intake','Intake Forecast'],['allpos','All POs'],['suppliers','Supplier Health'],['agentlog','Agent Log']] as const).map(([t, label]) => (
               <button key={t} onClick={() => setSubTab(t)} className={`h-8 px-4 rounded-lg text-xs font-semibold transition-colors ${subTab === t ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>{label}</button>
             ))}
           </div>
@@ -11462,6 +11507,54 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
             <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
           </button>
         </div>
+
+        {/* ── SUPPLIER CONVERSATIONS — monitoring-side inbox (mirror of Reorder's
+             Active Negotiations, same component, scoped to post-purchase threads).
+             Entries route into the EXISTING action workspace (single-PO / multi-PO
+             by the supplier's open POs) — no new screen, no chase-vs-pre-empt fork. ── */}
+        {subTab === 'conversations' && (() => {
+          const reasonFor = (g?: ActionGroup) =>
+            g && (g.type === 'predicted' || g.type === 'fill_risk') ? { label: 'Pre-empt',    cls: 'bg-violet-50 text-violet-700 border-violet-200' }
+            : g && g.type === 'overdue'                            ? { label: 'Chase',       cls: 'bg-amber-50 text-amber-700 border-amber-200' }
+            : g && g.type === 'late_dc'                            ? { label: 'Chase',       cls: 'bg-amber-50 text-amber-700 border-amber-200' }
+            :                                                         { label: 'Performance', cls: 'bg-gray-100 text-gray-600 border-gray-200' }
+          const chaseCls: Record<ChaseThread['status'], string> = {
+            'awaiting-reply':   'bg-blue-50 text-blue-700 border-blue-200',
+            'reply-received':   'bg-amber-50 text-amber-700 border-amber-200',
+            'no-reply-overdue': 'bg-red-50 text-red-700 border-red-200',
+            'resolved':         'bg-green-50 text-green-700 border-green-200',
+          }
+          const chaseLbl: Record<ChaseThread['status'], string> = {
+            'awaiting-reply': 'Awaiting reply', 'reply-received': 'Reply received', 'no-reply-overdue': 'No reply — overdue', 'resolved': 'Resolved',
+          }
+          const entries: ConversationInboxEntry[] = Object.entries(chaseThreads).map(([supplierId, thread]) => {
+            const grps = actionGroups.filter(g => g.supplierId === supplierId)
+            const grp  = grps[0]
+            const sup  = getSupplier(supplierId)
+            const poIds = Array.from(new Set(grps.flatMap(g => g.pos.map(p => p.id))))
+            return {
+              key: supplierId,
+              supplier: sup?.name ?? supplierId,
+              detail: `${poIds.length || 1} PO${(poIds.length || 1) === 1 ? '' : 's'} · ${thread.messages.length} message${thread.messages.length === 1 ? '' : 's'}`,
+              reason: reasonFor(grp),
+              statusNode: <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border ${chaseCls[thread.status]}`}>{chaseLbl[thread.status]}</span>,
+              // Route into the existing monitoring action workspace (single/multi by group).
+              onOpen: () => { if (grp) { setSubTab('actions'); openActionCard(cardKey(grp)) } },
+            }
+          })
+          return (
+            <ConversationsInbox
+              onBack={() => setSubTab('actions')}
+              backLabel="Back to Actions"
+              breadcrumb={<>PO Monitoring · Supplier conversations</>}
+              title="Supplier conversations"
+              subtitle={`${entries.length} live post-purchase conversation${entries.length === 1 ? '' : 's'} · chase / fix / pre-empt on live POs · separate from Reorder's price negotiations`}
+              emptyTitle="No supplier conversations yet."
+              emptyHint="Start one from an action — chase a late PO, or pre-empt a predicted slip / under-fill — and it'll appear here as the single home for monitoring threads."
+              entries={entries}
+            />
+          )
+        })()}
 
         {/* ── INTAKE FORECAST ── */}
         {subTab === 'intake' && <IntakeForecastView onOpenPO={poId => setSelectedPOId(poId)} />}
