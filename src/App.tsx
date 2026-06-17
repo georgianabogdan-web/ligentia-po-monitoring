@@ -12113,8 +12113,8 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                       </div>
                     </div>
 
-                    {/* ── Trigger context block ─────────────────────────── */}
-                    {drawerTrigger && (
+                    {/* ── Supplier inbound message (always present; quiet empty state) ─── */}
+                    {drawerTrigger ? (
                       <div className="border-b border-gray-100 px-6 py-4 shrink-0">
                         {(drawerUiState === 'A' || drawerUiState === 'B') ? (
                           <div className="bg-sky-50/70 border border-sky-100 rounded-xl px-4 py-3 space-y-2">
@@ -12178,7 +12178,33 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                           </div>
                         )}
                       </div>
+                    ) : (
+                      <div className="border-b border-gray-100 px-6 py-3 shrink-0">
+                        <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-0.5">Supplier inbound</div>
+                        <div className="text-[11px] text-gray-400">{drawerState === 'reply-received' ? 'Reply received — see the conversation below.' : 'No supplier reply yet.'}</div>
+                      </div>
                     )}
+
+                    {/* ── Date-change history (always present; quiet empty state) ─── */}
+                    {(() => {
+                      const anyDateChanges = drawerGroup.pos.some(p => (p.dateChanges?.length ?? 0) > 0)
+                      return (
+                        <div className="border-b border-gray-100 px-6 py-4 shrink-0">
+                          {anyDateChanges ? (
+                            <DateChangeAttribution
+                              pos={drawerGroup.pos}
+                              override={dateChangeOverrides}
+                              onChange={(id, causedBy, reasonCode) => setDateChangeOverrides(prev => ({ ...prev, [id]: { causedBy, reasonCode } }))}
+                            />
+                          ) : (
+                            <>
+                              <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-0.5">Date-change history</div>
+                              <div className="text-[11px] text-gray-400">No date changes recorded yet.</div>
+                            </>
+                          )}
+                        </div>
+                      )
+                    })()}
 
                     {/* ── Decision panel ──────────────────────────────────── */}
                     {/* DP1: Tier-1 action picker (recommendation-first, equal-weight cards). State A and B render the same picker. */}
@@ -12186,7 +12212,43 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                       <div className="border-b border-gray-100 px-6 py-4 shrink-0">
                         {true ? (
                           <>
-                            {drawerGroup.type === 'fill_risk' ? (() => {
+                            {drawerGroup.type === 'message' ? (() => {
+                              // Buyer-initiated outreach (chase / pre-empt / performance review).
+                              // Same Next-step scaffold as every other thread — the recommended
+                              // action is simply "send the message", context-adapted by intent.
+                              const ctx = drawerGroup.messageContext ?? 'chase'
+                              const copy = ctx === 'preempt'
+                                ? { rec: 'Pre-empt with supplier', label: 'Send pre-empt message', consequence: 'Agent-drafted note to confirm dates and the full ordered quantity before delivery', why: `${drawerSup.name} isn't late yet — confirming dates and quantity now is cheaper than reacting once an order slips.` }
+                                : ctx === 'performance'
+                                ? { rec: 'Request a delivery plan', label: 'Send performance-review note', consequence: 'Agent-drafted note requesting an on-time, in-full delivery plan as part of a performance review', why: `Part of an active review of ${drawerSup.name}'s recent performance (OTR ${drawerSup.onTimeRate}%, avg delay ${drawerSup.avgDelayDays}d).` }
+                                : { rec: 'Chase supplier', label: 'Send chase message', consequence: 'Agent-drafted follow-up asking the supplier to confirm current status, date and full quantity', why: `Direct outreach to ${drawerSup.name} on the open order${drawerGroup.pos.length === 1 ? '' : 's'} in this conversation.` }
+                              return (
+                                <>
+                                  <div className="mb-3">
+                                    <div className="text-[13px] font-semibold text-gray-900">Next step</div>
+                                    <div className="text-[11px] text-gray-500 mt-0.5">Recommended: {copy.rec}</div>
+                                    <p className="text-[12px] text-gray-700 leading-relaxed mt-2">{copy.why}</p>
+                                  </div>
+                                  <ActionRecommendationRow
+                                    recommendedKey="chase"
+                                    selectedKey="chase"
+                                    options={[
+                                      { key: 'chase', label: copy.label, consequence: copy.consequence, onClick: () => { if (drawerCardKey) setSelectedActionPill(prev => ({ ...prev, [drawerCardKey]: 'chase' })) } },
+                                    ]}
+                                  />
+                                  <div className="flex items-center gap-3 mt-3">
+                                    {isSnoozeConfirm ? (
+                                      <span className="text-[11px] text-gray-600">Reappear in 3 days?
+                                        <button onClick={() => { setSnoozedCards(prev => { const n = new Set(prev); n.add(drawerCardKey!); return n }); setDrawerCardKey(null) }} className="ml-1.5 font-semibold text-indigo-600 hover:text-indigo-800">Confirm</button>
+                                        <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: false }))} className="ml-1.5 text-gray-400 hover:text-gray-600">Cancel</button>
+                                      </span>
+                                    ) : (
+                                      <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors">Snooze 3 days</button>
+                                    )}
+                                  </div>
+                                </>
+                              )
+                            })() : drawerGroup.type === 'fill_risk' ? (() => {
                               // Predicted under-fulfilment. The ONLY recommended action is a
                               // pre-emptive supplier comms to confirm the full quantity — we do
                               // NOT re-spec or gross up the order. Inferred from history.
@@ -12333,11 +12395,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                     const selectedKey = drawerCurrentPill === 'chase' ? 'chase' : drawerDecChoice
                                     return (
                                       <>
-                                        <DateChangeAttribution
-                                          pos={drawerGroup.pos}
-                                          override={dateChangeOverrides}
-                                          onChange={(id, causedBy, reasonCode) => setDateChangeOverrides(prev => ({ ...prev, [id]: { causedBy, reasonCode } }))}
-                                        />
                                         <div className="mb-3">
                                           <div className="text-[13px] font-semibold text-gray-900">Next step</div>
                                           <div className="text-[11px] text-gray-500 mt-0.5">Recommended: {recLbl}</div>
@@ -12460,11 +12517,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                         : ''
                                       return (
                                         <>
-                                          <DateChangeAttribution
-                                            pos={drawerGroup.pos}
-                                            override={dateChangeOverrides}
-                                            onChange={(id, causedBy, reasonCode) => setDateChangeOverrides(prev => ({ ...prev, [id]: { causedBy, reasonCode } }))}
-                                          />
                                           <div className="mb-3">
                                             <div className="text-[13px] font-semibold text-gray-900">Next step</div>
                                             <div className="text-[11px] text-gray-500 mt-0.5">Recommended: {recLbl}</div>
@@ -12618,30 +12670,9 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                       </div>
                     )}
 
-                    {/* DP2: State D — reply received decision panel */}
+                    {/* DP2: State D — reply received. Folded into the standard Next-step pattern. */}
                     {drawerUiState === 'D' && (
                       <div className="border-b border-gray-100 px-6 py-4 shrink-0 space-y-3">
-                        <p className="text-[11px] font-semibold text-gray-700">Supplier replied — what would you like to do?</p>
-                        <div className="grid grid-cols-2 gap-2">
-                          {([
-                            { key: 'apply_changes'   as const, label: 'Apply proposed changes', sub: 'Accept & confirm in writing',  cls: 'border-green-200 hover:border-green-400 hover:bg-green-50',   selCls: 'border-green-500 bg-green-50 ring-2 ring-green-200'   },
-                            { key: 'counter_propose' as const, label: 'Counter-propose',         sub: 'Push back with alternative',   cls: 'border-amber-200 hover:border-amber-400 hover:bg-amber-50',   selCls: 'border-amber-500 bg-amber-50 ring-2 ring-amber-200'   },
-                            { key: 'reject_escalate' as const, label: 'Reject and escalate',    sub: 'Refuse, escalate internally',  cls: 'border-red-200 hover:border-red-400 hover:bg-red-50',         selCls: 'border-red-500 bg-red-50 ring-2 ring-red-200'         },
-                            { key: 'reply_question'  as const, label: 'Reply with question',    sub: 'Need more info first',         cls: 'border-indigo-200 hover:border-indigo-400 hover:bg-indigo-50', selCls: 'border-indigo-500 bg-indigo-50 ring-2 ring-indigo-200' },
-                          ]).map(opt => (
-                            <button
-                              key={opt.key}
-                              onClick={() => {
-                                setDp2Action(prev => ({ ...prev, [drawerCardKey!]: opt.key }))
-                                setDp2Draft(prev => { const n = { ...prev }; delete n[drawerCardKey!]; return n })
-                              }}
-                              className={`border-2 rounded-xl p-3 text-left transition-all ${currentDp2Action === opt.key ? opt.selCls : opt.cls}`}
-                            >
-                              <div className="text-[12px] font-bold text-gray-800 leading-tight">{opt.label}</div>
-                              <div className="text-[10px] text-gray-500 mt-0.5 leading-tight">{opt.sub}</div>
-                            </button>
-                          ))}
-                        </div>
                         {drawerMuts.length > 0 && (
                           <div className="bg-blue-50/70 border border-blue-100 rounded-xl px-3 py-2.5 space-y-1.5">
                             <div className="flex items-center gap-1.5">
@@ -12661,6 +12692,24 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                             </div>
                           </div>
                         )}
+                        <div>
+                          <div className="text-[13px] font-semibold text-gray-900">Next step</div>
+                          <div className="text-[11px] text-gray-500 mt-0.5">Recommended: Apply proposed changes</div>
+                          <p className="text-[12px] text-gray-700 leading-relaxed mt-2">{drawerSup.name} has replied{drawerMuts.length > 0 ? ' with proposed changes' : ''}. Applying is the fastest route to a confirmed commitment; counter-propose only if it erodes cover or margin, and reserve escalation for an unacceptable response.</p>
+                        </div>
+                        <ActionRecommendationRow
+                          recommendedKey="apply_changes"
+                          selectedKey={currentDp2Action}
+                          options={([
+                            { key: 'apply_changes',   label: 'Apply proposed changes', consequence: 'Accept the proposed dates/terms and confirm in writing' },
+                            { key: 'counter_propose', label: 'Counter-propose',         consequence: 'Push back with an alternative — protects cover / margin' },
+                            { key: 'reject_escalate', label: 'Reject and escalate',     consequence: 'Refuse and escalate internally — for an unacceptable proposal' },
+                            { key: 'reply_question',  label: 'Reply with question',     consequence: 'Ask for missing detail before deciding' },
+                          ] as const).map(o => ({
+                            key: o.key, label: o.label, consequence: o.consequence,
+                            onClick: () => { setDp2Action(prev => ({ ...prev, [drawerCardKey!]: o.key })); setDp2Draft(prev => { const n = { ...prev }; delete n[drawerCardKey!]; return n }) },
+                          }))}
+                        />
                         <div className="flex items-center gap-3">
                           <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors">Snooze 3 days</button>
                         </div>
@@ -12673,30 +12722,27 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                       </div>
                     )}
 
-                    {/* DP3: State F — no reply overdue decision panel */}
+                    {/* DP3: State F — no reply overdue. Folded into the standard Next-step pattern. */}
                     {drawerUiState === 'F' && (
                       <div className="border-b border-amber-100 bg-amber-50/40 px-6 py-4 shrink-0 space-y-3">
-                        <p className="text-[11px] font-semibold text-amber-800">No reply from {drawerSup.name} after {Math.max(daysSinceChase, 3)} days — what would you like to do?</p>
-                        <div className="grid grid-cols-2 gap-2">
-                          {([
-                            { key: 'followup_chase'   as const, label: 'Send follow-up chase',    sub: 'Second, more urgent chase',    cls: 'border-amber-200 hover:border-amber-400 hover:bg-amber-50',   selCls: 'border-amber-500 bg-amber-50 ring-2 ring-amber-200'   },
-                            { key: 'escalate_manager' as const, label: 'Escalate to manager',     sub: 'Draft internal notification',  cls: 'border-red-200 hover:border-red-400 hover:bg-red-50',         selCls: 'border-red-500 bg-red-50 ring-2 ring-red-200'         },
-                            { key: 'switch_phone'     as const, label: 'Switch to phone',         sub: 'Log a call instead',           cls: 'border-indigo-200 hover:border-indigo-400 hover:bg-indigo-50', selCls: 'border-indigo-500 bg-indigo-50 ring-2 ring-indigo-200' },
-                            { key: 'accept_silence'   as const, label: 'Accept silence & close',  sub: 'Close with a note',            cls: 'border-gray-200 hover:border-gray-400 hover:bg-gray-50',       selCls: 'border-gray-500 bg-gray-50 ring-2 ring-gray-200'       },
-                          ]).map(opt => (
-                            <button
-                              key={opt.key}
-                              onClick={() => {
-                                setDp3Action(prev => ({ ...prev, [drawerCardKey!]: opt.key }))
-                                setDp3Draft(prev => { const n = { ...prev }; delete n[drawerCardKey!]; return n })
-                              }}
-                              className={`border-2 rounded-xl p-3 text-left transition-all ${currentDp3Action === opt.key ? opt.selCls : opt.cls}`}
-                            >
-                              <div className="text-[12px] font-bold text-gray-800 leading-tight">{opt.label}</div>
-                              <div className="text-[10px] text-gray-500 mt-0.5 leading-tight">{opt.sub}</div>
-                            </button>
-                          ))}
+                        <div>
+                          <div className="text-[13px] font-semibold text-gray-900">Next step</div>
+                          <div className="text-[11px] text-amber-700 mt-0.5">Recommended: Send follow-up chase</div>
+                          <p className="text-[12px] text-gray-700 leading-relaxed mt-2">No reply from {drawerSup.name} after {Math.max(daysSinceChase, 3)} days. A firmer follow-up usually lands; escalate to a manager if it stays silent, switch to phone for urgent cover, or accept the silence and close if it no longer matters.</p>
                         </div>
+                        <ActionRecommendationRow
+                          recommendedKey="followup_chase"
+                          selectedKey={currentDp3Action}
+                          options={([
+                            { key: 'followup_chase',   label: 'Send follow-up chase',   consequence: 'A second, more urgent chase to the supplier' },
+                            { key: 'escalate_manager', label: 'Escalate to manager',    consequence: 'Draft an internal notification to your manager' },
+                            { key: 'switch_phone',     label: 'Switch to phone',        consequence: 'Log a call instead of waiting on email' },
+                            { key: 'accept_silence',   label: 'Accept silence & close', consequence: 'Close the action with a note recording the silence' },
+                          ] as const).map(o => ({
+                            key: o.key, label: o.label, consequence: o.consequence,
+                            onClick: () => { setDp3Action(prev => ({ ...prev, [drawerCardKey!]: o.key })); setDp3Draft(prev => { const n = { ...prev }; delete n[drawerCardKey!]; return n }) },
+                          }))}
+                        />
                       </div>
                     )}
 
