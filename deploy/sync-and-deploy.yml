@@ -1,0 +1,73 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Sync upstream PO-agent → build → deploy to GitHub Pages.
+#
+# ENABLE ME: move this file to .github/workflows/sync-and-deploy.yml on the
+# main branch (see SETUP.md). It lives under deploy/ in the repo only because
+# the setup token lacked the `workflow` scope to push it into .github/workflows.
+#
+# What it does:
+#   • push to main        → build + deploy (the normal deploy path)
+#   • weekly schedule /    → merge upstream PO-agent into main (Ligentia data is
+#     manual dispatch        preserved via .gitattributes merge=ours), then deploy
+# ─────────────────────────────────────────────────────────────────────────────
+name: Sync upstream & deploy
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'        # Mondays 06:00 UTC — change cadence here
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-deploy
+  cancel-in-progress: false
+
+jobs:
+  sync-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge upstream PO-agent (scheduled / manual runs only)
+        if: github.event_name != 'push'
+        run: |
+          git config user.name  "ligentia-sync-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git config merge.ours.driver true        # honour .gitattributes merge=ours
+          git remote add upstream https://github.com/georgianabogdan-web/PO-agent.git 2>/dev/null || true
+          git fetch upstream main
+          if git merge --no-edit upstream/main; then
+            git push origin main
+          else
+            echo "::error::Upstream merge conflicts outside src/poData.ts — resolve manually."
+            git merge --abort
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      - name: Publish dist to gh-pages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          touch dist/.nojekyll
+          cd dist
+          git init -q
+          git checkout -q -b gh-pages
+          git add -A
+          git -c user.email=actions@users.noreply.github.com -c user.name=ligentia-deploy-bot \
+              commit -qm "Deploy ${SHA}"
+          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" gh-pages

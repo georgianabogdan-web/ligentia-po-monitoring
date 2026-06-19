@@ -1,0 +1,5 @@
+# Keep the Ligentia demo data layer on every upstream merge.
+# The sync workflow sets `git config merge.ours.driver true`, so merges from
+# upstream PO-agent never clobber Ligentia's suppliers/POs — all other files
+# merge normally, so upstream feature changes flow straight in.
+src/poData.ts merge=ours
