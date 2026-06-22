@@ -14322,7 +14322,7 @@ function ReplenishmentView() {
 
 // ── App ────────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [tab, setTab] = useState<Tab>('alerts')
+  const [tab, setTab] = useState<Tab>('po-monitoring')
   const [configMode, setConfigMode] = useState(false)
   const [pendingOpenInquiry, setPendingOpenInquiry] = useState<string | null>(null)
   const [pendingOpenPO, setPendingOpenPO] = useState<string | null>(null)
@@ -14344,13 +14344,16 @@ export default function App() {
     handleTabChange('po-monitoring')
   }
 
+  // Ligentia demo: only the PO Monitoring tab is exposed in the nav. The other
+  // views still mount via the conditionals below (so direct links keep working),
+  // they're just hidden from the tab bar.
   const tabs: { id: Tab; label: string; count: number }[] = [
-    { id: 'alerts',        label: 'Overview',                count: ALL_POS.filter(p => p.status === 'Ex-factory delay' || p.status === 'Date change required').length + STATIC_KANBAN_ITEMS.length },
-    { id: 'inventory',     label: 'All Inventory',           count: INVENTORY_PRODUCTS.length },
-    { id: 'reorder',         label: 'Reorder',               count: REORDER_RECOMMENDATIONS.length },
-    { id: 'reorder-manager', label: 'Reorder - Manager View', count: REORDER_RECOMMENDATIONS.filter(r => r.approvalStatus === 'Pending Approval').length },
     { id: 'po-monitoring',  label: 'PO Monitoring',   count: ALL_POS.length },
-    // Replenishment tab hidden — route still mounts via the conditional below so direct links keep working.
+    // Hidden for the Ligentia prototype:
+    // { id: 'alerts',        label: 'Overview',                count: ALL_POS.filter(p => p.status === 'Ex-factory delay' || p.status === 'Date change required').length + STATIC_KANBAN_ITEMS.length },
+    // { id: 'inventory',     label: 'All Inventory',           count: INVENTORY_PRODUCTS.length },
+    // { id: 'reorder',         label: 'Reorder',               count: REORDER_RECOMMENDATIONS.length },
+    // { id: 'reorder-manager', label: 'Reorder - Manager View', count: REORDER_RECOMMENDATIONS.filter(r => r.approvalStatus === 'Pending Approval').length },
     // { id: 'replenishment',  label: 'Replenishment',   count: REPLEN_PRODUCTS.filter(p => p.suggestedReplen > 0).length },
   ]
   void REPLEN_PRODUCTS
