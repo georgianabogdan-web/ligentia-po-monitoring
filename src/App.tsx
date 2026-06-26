@@ -10750,6 +10750,10 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
   const [poRiskFilter,     setPoRiskFilter]     = useState('all')
   const [poRiskSort,       setPoRiskSort]       = useState(false)
   const [poGroupBy,        setPoGroupBy]        = useState<'none' | 'supplier'>('none')
+  const [poPage,           setPoPage]           = useState(0)
+  const PO_PAGE_SIZE = 100
+  // Full Ligentia dataset is ~4.7k POs — reset to page 1 whenever filters change.
+  useEffect(() => { setPoPage(0) }, [poSearch, poStatusFilter, poSupFilter, poRiskFilter, poRiskSort])
   const [settingsAccordion, setSettingsAccordion] = useState<string | null>(null)
   // Actions queue state
   const [drawerCardKey,    setDrawerCardKey]    = useState<string | null>(initialOpenAction ?? null)
@@ -13136,7 +13140,12 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                 <div className="bg-white border border-gray-100 rounded-2xl shadow-sm text-center text-xs text-gray-400 py-10">No POs match the selected filters</div>
               ) : poGroupBy === 'supplier' ? (
                 <div className="space-y-3">
-                  {poSupplierOrder.map(supId => {
+                  {poSupplierOrder.length > 25 && (
+                    <div className="text-[11px] text-gray-500 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
+                      Showing the first 25 of {poSupplierOrder.length.toLocaleString()} suppliers. Use the filters above to narrow, or switch to <span className="font-semibold">Individual</span> for the full paged list.
+                    </div>
+                  )}
+                  {poSupplierOrder.slice(0, 25).map(supId => {
                     const ps = poBySupplier.get(supId)!
                     const nm = getSupplier(supId)?.name ?? supId
                     const val = ps.reduce((s, po) => s + parseOrderVal(po.orderValue), 0)
@@ -13147,11 +13156,26 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                     )
                   })}
                 </div>
-              ) : (
-                <div className="bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden">
-                  <table className="w-full text-xs">{poThead}<tbody className="divide-y divide-gray-50">{ordered.map(renderPoRow)}</tbody></table>
-                </div>
-              )}
+              ) : (() => {
+                const pageCount = Math.max(1, Math.ceil(ordered.length / PO_PAGE_SIZE))
+                const page = Math.min(poPage, pageCount - 1)
+                const pageRows = ordered.slice(page * PO_PAGE_SIZE, page * PO_PAGE_SIZE + PO_PAGE_SIZE)
+                return (
+                  <div className="bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden">
+                    <table className="w-full text-xs">{poThead}<tbody className="divide-y divide-gray-50">{pageRows.map(renderPoRow)}</tbody></table>
+                    {pageCount > 1 && (
+                      <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100 text-xs text-gray-500">
+                        <span>Showing {page * PO_PAGE_SIZE + 1}–{Math.min((page + 1) * PO_PAGE_SIZE, ordered.length)} of {ordered.length.toLocaleString()} POs</span>
+                        <div className="flex items-center gap-2">
+                          <button disabled={page === 0} onClick={() => setPoPage(page - 1)} className="h-7 px-3 rounded-lg border border-gray-200 disabled:opacity-40 hover:bg-gray-50 font-semibold">Prev</button>
+                          <span>Page {page + 1} / {pageCount}</span>
+                          <button disabled={page >= pageCount - 1} onClick={() => setPoPage(page + 1)} className="h-7 px-3 rounded-lg border border-gray-200 disabled:opacity-40 hover:bg-gray-50 font-semibold">Next</button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )
+              })()}
             </div>
           )
         })()}
