@@ -49,7 +49,8 @@ jobs:
             # workflow files, and the Ligentia repo owns its own .github/.
             # Restore .github to this repo's pre-merge state, so the pushed
             # merge leaves workflow files byte-identical (no rejected push).
-            git checkout ORIG_HEAD -- .github 2>/dev/null || true
+            git rm -rq --ignore-unmatch -- .github
+            git checkout ORIG_HEAD -- .github
             git commit -q --amend --no-edit
             git push origin main
           else
