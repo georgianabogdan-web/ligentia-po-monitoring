@@ -6079,6 +6079,188 @@ function BulkNegotiationsView({
   )
 }
 
+// ── Shared view-shaping control: Individual ⇄ By supplier ────────────────────
+// ONE segmented control used identically on All POs, Actions, and Reorder. It
+// reshapes the view (individual rows ⇄ supplier groups), so it lives with the
+// primary view-shaping controls on the left, separated from refine/filters.
+// Pages map their own grouping state onto a single boolean (`bySupplier`).
+// Light gray-track style: where it sits beside the solid filled mode segment on
+// Actions, it reads as the subordinate peer (mode = the more fundamental cut),
+// while on All POs / Reorder it stands alone as the lead view control.
+function GroupBySegment({ bySupplier, onChange }: { bySupplier: boolean; onChange: (bySupplier: boolean) => void }) {
+  return (
+    <div className="inline-flex items-center rounded-lg bg-gray-100 p-0.5 gap-0.5">
+      {([[false, 'Individual'], [true, 'By supplier']] as const).map(([val, label]) => (
+        <button
+          key={label}
+          onClick={() => onChange(val)}
+          className={`h-8 px-3.5 rounded-md text-xs font-semibold transition-colors ${
+            bySupplier === val ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ── Shared inbox-icon button ─────────────────────────────────────────────────
+// ONE affordance for an INBOX of ongoing supplier conversations — distinct from
+// the analytical view tabs. Used identically by PO Monitoring (post-purchase
+// chases/pre-empts) and Reorder (pre-purchase price negotiations); each passes
+// its OWN scoped active count and open handler. Same look, separate inboxes.
+function InboxIconButton({ count, onClick, title }: { count: number; onClick: () => void; title: string }) {
+  return (
+    <button onClick={onClick} title={title} aria-label={title}
+      className="relative w-8 h-8 flex items-center justify-center rounded-lg border border-gray-200 text-gray-400 hover:text-violet-600 hover:bg-gray-50 transition-colors">
+      <Mail className="w-4 h-4" />
+      {count > 0 && (
+        <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 px-1 flex items-center justify-center rounded-full bg-violet-600 text-white text-[9px] font-bold leading-none">{count}</span>
+      )}
+    </button>
+  )
+}
+
+// ── Manual line edits — ONE canonical "edited vs suggested" model ────────────
+// When a buyer edits a recommended order (supplier capped qty / pushed ex-factory),
+// the edit is STAGED on the detail page and, on Save, persisted here. This store
+// is module-level so it survives navigation and is shared identically by the
+// buyer Reorder view AND the Manager Reorder view — no forked per-view state.
+// Components re-render by bumping a local version counter after a save/discard.
+interface LineEdit { qty: number; costPrice: number; exFactory: string; by: string; date: string }
+const _lineEdits: Record<string, LineEdit> = {}
+const EDIT_USER = 'Emma (Merchandiser)'
+
+const savedQtyOf       = (p: ReorderRecommendation) => _lineEdits[p.id]?.qty       ?? p.recommendedReorderQty
+const savedCostOf      = (p: ReorderRecommendation) => _lineEdits[p.id]?.costPrice ?? p.costPrice
+const savedExFactoryOf = (p: ReorderRecommendation) => _lineEdits[p.id]?.exFactory ?? p.exFactoryDate
+const isLineEdited     = (p: ReorderRecommendation) => {
+  const e = _lineEdits[p.id]
+  return !!e && (e.qty !== p.recommendedReorderQty || e.costPrice !== p.costPrice || e.exFactory !== p.exFactoryDate)
+}
+const isQtyEdited = (p: ReorderRecommendation) => (_lineEdits[p.id]?.qty ?? p.recommendedReorderQty) !== p.recommendedReorderQty
+
+// Largest-remainder disaggregation: split `total` across `weights` so each part
+// is proportional to its weight AND the parts sum EXACTLY to `total` (integers).
+function disaggregate(total: number, weights: number[]): number[] {
+  const sum = weights.reduce((s, w) => s + w, 0)
+  if (sum <= 0 || total <= 0) return weights.map(() => 0)
+  const raw   = weights.map(w => (total * w) / sum)
+  const out   = raw.map(Math.floor)
+  let rem     = total - out.reduce((s, n) => s + n, 0)
+  const order = raw.map((r, i) => ({ i, frac: r - Math.floor(r) })).sort((a, b) => b.frac - a.frac)
+  for (let k = 0; rem > 0 && order.length > 0; k++, rem--) out[order[k % order.length].i]++
+  return out
+}
+
+// Canonical inline "edited primary + suggested secondary" display. Used identically
+// on the editable field, the size table's Edited-order column, and the Reorder list.
+function EditedValue({ edited, suggested, prefix = '', fmt = (n: number) => n.toLocaleString(),
+  align = 'center', primaryCls = 'text-xs font-bold text-gray-900' }: {
+  edited: number; suggested: number; prefix?: string; fmt?: (n: number) => string
+  align?: 'left' | 'center' | 'right'; primaryCls?: string
+}) {
+  const changed = edited !== suggested
+  const a = align === 'right' ? 'text-right' : align === 'left' ? 'text-left' : 'text-center'
+  return (
+    <div className={a}>
+      <div className={primaryCls}>{prefix}{fmt(edited)}</div>
+      {changed && <div className="text-[9px] text-gray-400 leading-tight">Suggested: {prefix}{fmt(suggested)}</div>}
+    </div>
+  )
+}
+
+// Small "Edited" marker + mocked attribution ("edited by [user] · [date]").
+// Mirrors the BuyStatusChip/SupplierStatusChip badge idiom.
+function EditedBadge({ by, date, compact = false }: { by: string; date: string; compact?: boolean }) {
+  return (
+    <span className="inline-flex items-center gap-1 flex-wrap">
+      <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wide bg-amber-100 text-amber-700">
+        <Pencil className="w-2 h-2" />Edited
+      </span>
+      {!compact && <span className="text-[8px] text-gray-400">edited by {by} · {date}</span>}
+    </span>
+  )
+}
+
+// Sticky save-bar for STAGED line edits — appears while a detail-page draft differs
+// from the saved state. Nothing recomputes until Save. Shared by both detail pages.
+function EditSaveBar({ pending, saving, onSave, onDiscard }: {
+  pending: string[]; saving: boolean; onSave: () => void; onDiscard: () => void
+}) {
+  return (
+    <div className="fixed bottom-0 left-0 right-0 z-40 px-5 py-3 bg-white/95 backdrop-blur border-t border-indigo-200 shadow-[0_-4px_14px_rgba(0,0,0,0.07)] flex items-center gap-4 flex-wrap">
+      <div className="flex-1 min-w-[200px]">
+        <div className="text-xs font-semibold text-gray-900 flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-amber-400 inline-block shrink-0" />
+          {saving ? 'Recomputing…' : `Unsaved edits — ${pending.join(' · ')}`}
+        </div>
+        <div className="text-[10px] text-gray-400 mt-0.5">Saving will recompute: size curve, stock cover, total cost, receipt date.</div>
+      </div>
+      <button disabled={saving} onClick={onDiscard}
+        className="h-8 px-4 rounded-lg border border-gray-200 text-xs font-semibold text-gray-600 hover:bg-gray-50 disabled:opacity-50 transition-colors">
+        Discard
+      </button>
+      <button disabled={saving} onClick={onSave}
+        className="h-8 px-5 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 disabled:opacity-60 transition-colors flex items-center gap-1.5">
+        {saving && <span className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />}
+        {saving ? 'Saving' : 'Save'}
+      </button>
+    </div>
+  )
+}
+
+// "Why this quantity?" explainability modal for a reorder line. The explanation
+// always reflects our ORIGINAL recommendation; when the line has been manually
+// edited a one-line override banner is prepended (req D).
+function WhyQtyModal({ p, onClose }: { p: ReorderRecommendation; onClose: () => void }) {
+  const edited      = isQtyEdited(p)
+  const suggested   = p.recommendedReorderQty
+  const editedQty   = savedQtyOf(p)
+  const coverWeeks  = p.avgReorderCoverWeeks || 4
+  const weekly      = p.weeklySales
+  const demandCover = Math.round(weekly * coverWeeks)
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/30" onClick={onClose} />
+      <div className="relative bg-white rounded-2xl shadow-xl w-full max-w-md max-h-[85vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100">
+          <div className="text-sm font-bold text-gray-900 flex items-center gap-1.5"><HelpCircle className="w-4 h-4 text-indigo-500" />Why this quantity?</div>
+          <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-gray-100"><X className="w-4 h-4 text-gray-500" /></button>
+        </div>
+        <div className="p-5 space-y-3">
+          {edited && (
+            <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-[11px] text-amber-800 leading-relaxed">
+              <span className="font-semibold">Manually edited {suggested.toLocaleString()} → {editedQty.toLocaleString()}.</span>{' '}
+              The explanation below reflects our original recommendation, not your edited quantity.
+            </div>
+          )}
+          <div className="text-xs text-gray-700 leading-relaxed">
+            We recommended <span className="font-bold text-indigo-700">{suggested.toLocaleString()} units</span> to hold{' '}
+            <span className="font-semibold">{coverWeeks} weeks</span> of forward cover at the current sell-through of{' '}
+            <span className="font-semibold">{weekly.toLocaleString()}/week</span>.
+          </div>
+          <div className="rounded-lg border border-gray-100 divide-y divide-gray-50 text-[11px]">
+            {([
+              ['Weekly sell-through', `${weekly.toLocaleString()} units/wk`],
+              ['Target forward cover', `${coverWeeks} weeks`],
+              ['Demand over cover window', `${demandCover.toLocaleString()} units`],
+              ['Safety stock', `${p.safetyStock.toLocaleString()} units`],
+              ['Recommended order', `${suggested.toLocaleString()} units`],
+            ] as const).map(([k, v]) => (
+              <div key={k} className="flex items-center justify-between px-3 py-1.5">
+                <span className="text-gray-500">{k}</span><span className="font-semibold text-gray-800">{v}</span>
+              </div>
+            ))}
+          </div>
+          <div className="text-[10px] text-gray-400">Stockout risk: {p.stockoutRisk} · lead time {p.leadTime}</div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Shared "By supplier" group shell ─────────────────────────────────────────
 // ONE grouping pattern used by BOTH the Reorder "By supplier" view and the PO
 // Monitoring Actions "Group by supplier" view: a supplier card with a header
@@ -6216,8 +6398,8 @@ function ReorderBySupplier({
                       </td>
                       <td className="px-2 py-2"><BuyStatusChip status={buyStatusOf(st)} /></td>
                       <td className="px-2 py-2"><SupplierStatusChip status={p.supplierStatus} /></td>
-                      <td className="px-2 py-2 text-right font-bold text-indigo-700">{p.recommendedReorderQty.toLocaleString()}</td>
-                      <td className="px-2 py-2 text-right font-semibold text-gray-700">£{p.totalCost.toLocaleString()}</td>
+                      <td className="px-2 py-2 text-right"><EditedValue edited={savedQtyOf(p)} suggested={p.recommendedReorderQty} align="right" primaryCls="font-bold text-indigo-700" /></td>
+                      <td className="px-2 py-2 text-right"><EditedValue edited={Math.round(savedQtyOf(p) * savedCostOf(p))} suggested={p.totalCost} prefix="£" align="right" primaryCls="font-semibold text-gray-700" /></td>
                       <td className={`px-2 py-2 text-right font-semibold ${grossMargin > 25 ? 'text-green-700' : grossMargin >= 10 ? 'text-amber-700' : 'text-red-600'}`}>{grossMargin}%</td>
                       <td className="px-2 py-2">
                         <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold border ${rec.actionable ? 'bg-indigo-50 text-indigo-700 border-indigo-200' : 'bg-gray-50 text-gray-400 border-gray-200'}`}>{rec.label}</span>
@@ -6737,7 +6919,7 @@ function Toast({ message, onDone }: { message: string; onDone: () => void }) {
 }
 
 // ── Stock Levels Chart (30-week inventory model) ─────────────────────────────
-function StockLevelsChart({ productId, timeRange }: { productId: string; timeRange: '1m' | '6m' | '1y' }) {
+function StockLevelsChart({ productId, timeRange, intakeOverride }: { productId: string; timeRange: '1m' | '6m' | '1y'; intakeOverride?: number | null }) {
   const [chartUnit, setChartUnit] = useState<'units' | 'value' | 'cover'>('units')
   const TODAY = 18, TOTAL = 52
 
@@ -6765,11 +6947,17 @@ function StockLevelsChart({ productId, timeRange }: { productId: string; timeRan
 
   // POs every FWC weeks, each placed LT weeks before delivery
   // placed<0 = pre-chart history; only placed>=0 show ↑ORD markers
-  const POS = Array.from({ length: 13 }, (_, k) => ({
-    placed:    (k - 2) * FWC,
-    delivered: k * FWC,
-    qty:       INTAKE,
-  }))
+  // Future intakes reflect a saved manual edit to the order qty (intakeOverride);
+  // already-delivered (historical) intakes are left at the modelled INTAKE.
+  const POS = Array.from({ length: 13 }, (_, k) => {
+    const delivered = k * FWC
+    const future    = delivered > TODAY
+    return {
+      placed:    (k - 2) * FWC,
+      delivered,
+      qty:       future && intakeOverride && intakeOverride > 0 ? intakeOverride : INTAKE,
+    }
+  })
 
   const BASE = new Date('2026-04-21').getTime()
   const MO   = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
@@ -7615,7 +7803,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
   // Single Reorder working list. One global view toggle (the only one in the
   // whole Reorder experience): per-line vs grouped-by-supplier. Negotiation is
   // no longer a separate destination — it's a conversation attached to a line.
-  const [reorderView, setReorderView] = useState<'individual' | 'by_supplier'>('by_supplier')
+  const [reorderView, setReorderView] = useState<'individual' | 'by_supplier'>('individual')
   const [openLineId, setOpenLineId]   = useState<string | null>(null)
   // Multi-line negotiation: one supplier, N lines (same workspace, N>1).
   const [openSession, setOpenSession] = useState<SupplierSession | null>(null)
@@ -7684,9 +7872,14 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
     if (session) setOpenSession(session)
     else setOpenLineId(recId)
   }
-  const [editQty, setEditQty]                   = useState(0)
-  const [editExFactory, setEditExFactory]       = useState('')
-  const [editCostPrice, setEditCostPrice]       = useState(0)
+  // Staged draft of the editable fields — req C: nothing recomputes on keystroke;
+  // derived values read from the saved store (_lineEdits) until the user hits Save.
+  const [draftQty, setDraftQty]                 = useState<number>(0)
+  const [draftCost, setDraftCost]               = useState<number>(0)
+  const [draftExFactory, setDraftExFactory]     = useState('')
+  const [saving, setSaving]                     = useState(false)
+  const [, setEditsVersion]                     = useState(0)
+  const [showWhy, setShowWhy]                   = useState(false)
   const [sendMgrModalIds, setSendMgrModalIds]   = useState<string[]>([])
   const [sendMgrMsg, setSendMgrMsg]             = useState('')
   const [pushModalIds, setPushModalIds]         = useState<string[]>([])
@@ -7717,15 +7910,51 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
   const allSelected  = rows.length > 0 && rows.every(r => selectedIds.has(r.id))
   const someSelected = rows.some(r => selectedIds.has(r.id))
 
+  // Seed the staged draft from the saved edit (or the suggested values) whenever a
+  // line opens. useLayoutEffect so inputs never flash a stale value before paint.
+  useLayoutEffect(() => {
+    if (!selectedProduct) return
+    setDraftQty(savedQtyOf(selectedProduct))
+    setDraftCost(savedCostOf(selectedProduct))
+    setDraftExFactory(savedExFactoryOf(selectedProduct))
+    setSaving(false); setShowWhy(false)
+  }, [selectedProduct])
+
+  // Commit staged drafts → persisted store after a brief simulated recompute.
+  const saveLineEdits = (p: ReorderRecommendation) => {
+    setSaving(true)
+    setTimeout(() => {
+      _lineEdits[p.id] = {
+        qty: draftQty, costPrice: draftCost, exFactory: draftExFactory,
+        by: EDIT_USER, date: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }),
+      }
+      setSaving(false)
+      setEditsVersion(v => v + 1)
+      showToast(`${p.name} updated — size curve, cover, total cost and receipt date recomputed.`)
+    }, 1200)
+  }
+  const discardLineEdits = (p: ReorderRecommendation) => {
+    setDraftQty(savedQtyOf(p)); setDraftCost(savedCostOf(p)); setDraftExFactory(savedExFactoryOf(p))
+  }
+
   if (selectedProduct) {
     const p = selectedProduct
     const curStatus  = effStatus(p)
     const curFreight = effFreight(p)
     const riskCls = p.stockoutRisk === 'Low' ? 'bg-green-100 text-green-700' : p.stockoutRisk === 'High' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'
-    const qty = editQty > 0 ? editQty : p.recommendedReorderQty
-    const exFact = editExFactory || p.exFactoryDate
-    const costPr = editCostPrice > 0 ? editCostPrice : p.costPrice
-    const editTotalCost = Math.round(qty * costPr)
+    // Saved (persisted) values drive every DERIVED display; drafts drive only the inputs.
+    const savedQty = savedQtyOf(p), savedCost = savedCostOf(p), savedExFactory = savedExFactoryOf(p)
+    const qty = savedQty
+    const editTotalCost = Math.round(savedQty * savedCost)
+    const dirty = draftQty !== savedQty || draftCost !== savedCost || draftExFactory !== savedExFactory
+    const pendingEdits: string[] = []
+    if (draftQty !== savedQty)             pendingEdits.push(`Qty ${savedQty.toLocaleString()} → ${draftQty.toLocaleString()}`)
+    if (draftCost !== savedCost)           pendingEdits.push(`Cost £${savedCost} → £${draftCost}`)
+    if (draftExFactory !== savedExFactory) pendingEdits.push(`Ex-factory ${savedExFactory} → ${draftExFactory}`)
+    const lineEditMeta = _lineEdits[p.id]
+    const qtyChanged  = savedQty !== p.recommendedReorderQty
+    const exfChanged  = savedExFactory !== p.exFactoryDate
+    const costChanged = savedCost !== p.costPrice
 
     // Freight option helpers
     const addD = (base: string, days: number) => {
@@ -7829,9 +8058,9 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                           showToast('Please add a reason for the freight override before sending.'); return
                         }
                         const changes: string[] = []
-                        if (editQty > 0 && editQty !== p.recommendedReorderQty) changes.push(`Qty: ${p.recommendedReorderQty} → ${editQty}`)
-                        if (editCostPrice > 0 && editCostPrice !== p.costPrice) changes.push(`Cost price: £${p.costPrice} → £${editCostPrice}`)
-                        if (editExFactory && editExFactory !== p.exFactoryDate) changes.push(`Ex-Factory: ${p.exFactoryDate} → ${editExFactory}`)
+                        if (savedQty !== p.recommendedReorderQty) changes.push(`Qty: ${p.recommendedReorderQty} → ${savedQty}`)
+                        if (savedCost !== p.costPrice) changes.push(`Cost price: £${p.costPrice} → £${savedCost}`)
+                        if (savedExFactory !== p.exFactoryDate) changes.push(`Ex-Factory: ${p.exFactoryDate} → ${savedExFactory}`)
                         const changeStr = changes.length > 0 ? changes.join(', ') : 'no fields changed'
                         const today = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
                         setStatusOverrides(o => ({ ...o, [p.id]: 'Pending Approval' }))
@@ -7920,42 +8149,55 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
             )
           })()}
 
-          {/* Editable fields */}
+          {/* Editable fields — drafts stage here; derived values reflect the SAVED state */}
           <div className="bg-white border border-gray-100 rounded-xl px-5 py-4 shadow-sm space-y-2">
-            <div className="text-[9px] font-semibold text-indigo-500 uppercase tracking-wide flex items-center gap-1">
-              <span className="w-3 h-px bg-indigo-300 inline-block" />Editable<span className="w-3 h-px bg-indigo-300 inline-block" />
+            <div className="flex items-center gap-2">
+              <div className="text-[9px] font-semibold text-indigo-500 uppercase tracking-wide flex items-center gap-1">
+                <span className="w-3 h-px bg-indigo-300 inline-block" />Editable<span className="w-3 h-px bg-indigo-300 inline-block" />
+              </div>
+              {isLineEdited(p) && lineEditMeta && <EditedBadge by={lineEditMeta.by} date={lineEditMeta.date} />}
+              <button onClick={() => setShowWhy(true)}
+                className="ml-auto inline-flex items-center gap-1 text-[10px] font-semibold text-indigo-600 hover:text-indigo-800">
+                <HelpCircle className="w-3 h-3" /> Why this qty?
+              </button>
             </div>
             <div className="grid grid-cols-6 gap-2">
               <div className="bg-indigo-50/50 border border-indigo-100 rounded-lg px-3 py-2 text-center col-span-2">
-                <input type="number" value={editQty > 0 ? editQty : p.recommendedReorderQty}
-                  onChange={e => setEditQty(Number(e.target.value))}
+                <input type="number" value={draftQty}
+                  onChange={e => setDraftQty(Number(e.target.value))}
                   className="text-xs font-bold text-gray-900 bg-transparent border-b border-indigo-300 focus:outline-none focus:border-indigo-600 w-full text-center" />
                 <div className="text-[10px] text-gray-400 mt-0.5">Order Qty</div>
-                <div className="text-[9px] text-indigo-400 mt-0.5">updates next Monday</div>
+                {qtyChanged
+                  ? <div className="text-[9px] text-gray-400 mt-0.5">Suggested: {p.recommendedReorderQty.toLocaleString()}</div>
+                  : <div className="text-[9px] text-indigo-400 mt-0.5">updates next Monday</div>}
               </div>
               <div className="bg-indigo-50/50 border border-indigo-100 rounded-lg px-3 py-2 text-center col-span-2">
                 <div className="flex items-center justify-center">
                   <span className="text-xs font-bold text-gray-900 mr-0.5">£</span>
-                  <input type="number" step="0.01" value={editCostPrice > 0 ? editCostPrice : p.costPrice}
-                    onChange={e => setEditCostPrice(Number(e.target.value))}
+                  <input type="number" step="0.01" value={draftCost}
+                    onChange={e => setDraftCost(Number(e.target.value))}
                     className="text-xs font-bold text-gray-900 bg-transparent border-b border-indigo-300 focus:outline-none focus:border-indigo-600 w-16 text-center" />
                 </div>
                 <div className="text-[10px] text-gray-400 mt-0.5">Cost Price</div>
+                {costChanged && <div className="text-[9px] text-gray-400 mt-0.5">Suggested: £{p.costPrice.toFixed(2)}</div>}
               </div>
               <div className="bg-indigo-50/50 border border-indigo-100 rounded-lg px-3 py-2 text-center col-span-2">
-                <input type="date" value={exFact} onChange={e => setEditExFactory(e.target.value)}
+                <input type="date" value={draftExFactory} onChange={e => setDraftExFactory(e.target.value)}
                   className="text-xs font-bold text-gray-900 bg-transparent border-b border-indigo-300 focus:outline-none focus:border-indigo-600 w-full text-center" />
                 <div className="text-[10px] text-gray-400 mt-0.5">Ex-Factory</div>
+                {exfChanged && <div className="text-[9px] text-gray-400 mt-0.5">Suggested: {p.exFactoryDate}</div>}
               </div>
             </div>
             <div className="grid grid-cols-3 gap-2">
               <div className="bg-gray-50 rounded-lg px-3 py-2 text-center">
                 <div className="text-xs font-bold text-gray-900">£{editTotalCost.toLocaleString()}</div>
                 <div className="text-[10px] text-gray-400 mt-0.5">Total Cost</div>
+                {(qtyChanged || costChanged) && <div className="text-[9px] text-gray-400 mt-0.5">Suggested: £{Math.round(p.recommendedReorderQty * p.costPrice).toLocaleString()}</div>}
               </div>
               <div className="bg-gray-50 rounded-lg px-3 py-2 text-center">
-                <div className="text-xs font-bold text-gray-900">{p.receiptDate}</div>
+                <div className="text-xs font-bold text-gray-900">{exfChanged ? addD(savedExFactory, (parseInt(p.leadTime) || 21) + 14) : p.receiptDate}</div>
                 <div className="text-[10px] text-gray-400 mt-0.5">Receipt Date</div>
+                {exfChanged && <div className="text-[9px] text-gray-400 mt-0.5">Suggested: {p.receiptDate}</div>}
               </div>
               <div className="bg-gray-50 rounded-lg px-3 py-2 text-center">
                 <div className="text-xs font-bold text-gray-900">£{p.sellingPrice.toFixed(2)}</div>
@@ -8328,7 +8570,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
               )}
             </div>
 
-            {chartTab === 'stock' && <StockLevelsChart productId={p.id} timeRange={timeRange} />}
+            {chartTab === 'stock' && <StockLevelsChart productId={p.id} timeRange={timeRange} intakeOverride={qtyChanged ? savedQty : null} />}
 
             {chartTab === 'availability' && (
               <p className="text-sm text-gray-400 mt-4">Coming soon</p>
@@ -8363,6 +8605,12 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                 targetMin:   rawMin   > 0 ? Math.round(row.targetMin   / rawMin   * modelMin)    : 0,
                 targetMax:   rawMax   > 0 ? Math.round(row.targetMax   / rawMax   * modelMax)    : 0,
               }))
+
+              // Disaggregate the (saved) edited top-line across the recommended size
+              // shares — largest-remainder so size rows sum EXACTLY to the order qty.
+              const sizeWeights  = p.sizeCurve.map((r: SizeCurveEntry) => r.recommended)
+              const editedSplit  = disaggregate(savedQty, sizeWeights)
+              const suggestSplit = disaggregate(p.recommendedReorderQty, sizeWeights)
 
               return (
                 <>
@@ -8406,6 +8654,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                           <th className="px-3 py-2 text-right font-semibold text-gray-500">Available stock<br/><span className="font-normal text-gray-400">Units</span></th>
                           <th className="px-3 py-2 text-right font-semibold text-gray-500">On order stock</th>
                           <th className="px-3 py-2 text-right font-semibold text-indigo-700 bg-indigo-50 border-x border-indigo-100">Recommended order</th>
+                          <th className={`px-3 py-2 text-right font-semibold border-x ${qtyChanged ? 'text-amber-700 bg-amber-50 border-amber-100' : 'text-gray-500 border-gray-100'}`}>Edited order</th>
                           <th className="px-3 py-2 text-right font-semibold text-gray-500">Avail. stock cover<br/><span className="font-normal text-gray-400">Weeks</span></th>
                           <th className="px-3 py-2 text-right font-semibold text-gray-500">Target stock range</th>
                           <th className="px-3 py-2 text-right font-semibold text-gray-500">Sales this week<br/><span className="font-normal text-gray-400">Units</span></th>
@@ -8420,6 +8669,10 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                               <td className="px-3 py-1.5 text-right text-gray-700">{row.available.toLocaleString()}</td>
                               <td className="px-3 py-1.5 text-right text-gray-700">{row.onOrder.toLocaleString()}</td>
                               <td className="px-3 py-1.5 text-right font-bold text-indigo-700 bg-indigo-50/50 border-x border-indigo-100">{row.recommended.toLocaleString()}</td>
+                              <td className={`px-3 py-1.5 text-right border-x ${qtyChanged ? 'bg-amber-50/50 border-amber-100' : 'border-gray-100'}`}>
+                                <EditedValue edited={editedSplit[i]} suggested={suggestSplit[i]} align="right"
+                                  primaryCls={`text-[10px] font-bold ${qtyChanged ? 'text-amber-700' : 'text-gray-700'}`} />
+                              </td>
                               <td className="px-3 py-1.5 text-right text-amber-600 font-semibold">{cover}</td>
                               <td className="px-3 py-1.5 text-right text-gray-500">{row.targetMin.toLocaleString()}–{row.targetMax.toLocaleString()}</td>
                               <td className="px-3 py-1.5 text-right text-gray-700">{row.sales.toLocaleString()}</td>
@@ -8481,6 +8734,11 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
         )}
 
         {toast && <Toast message={toast} onDone={() => setToast(null)} />}
+        {showWhy && <WhyQtyModal p={p} onClose={() => setShowWhy(false)} />}
+        {(dirty || saving) && (
+          <EditSaveBar pending={pendingEdits} saving={saving}
+            onSave={() => saveLineEdits(p)} onDiscard={() => discardLineEdits(p)} />
+        )}
       </div>
     )
   }
@@ -8611,6 +8869,13 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
       <div ref={listScrollRef} className="flex-1 overflow-y-auto">
         <div className="p-6">
 
+        {/* Persistent inbox of ongoing supplier price negotiations — its own home,
+            top-right, same affordance as PO Monitoring's conversations inbox. */}
+        <div className="flex items-center justify-end mb-3">
+          <InboxIconButton count={activeNegCount} onClick={openInbox}
+            title="Active Negotiations — supplier price conversations" />
+        </div>
+
         {/* KPI cards */}
         <div className="grid grid-cols-5 gap-4 mb-5">
           <div className="bg-white border border-gray-100 rounded-xl px-4 py-3 shadow-sm">
@@ -8645,27 +8910,10 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
           ))}
         </div>
 
-        {/* View toggle — the ONE global control for the whole Reorder list — and
-            a separate doorway to the Active Negotiations conversation inbox. */}
-        <div className="flex items-center justify-between gap-3 flex-wrap mb-5">
-          <div className="flex items-center bg-gray-100 rounded-xl p-1 w-fit gap-0.5">
-            {([
-              { k: 'individual',  lbl: 'Individual',  hint: 'One row per SKU/line' },
-              { k: 'by_supplier', lbl: 'By supplier', hint: 'Lines grouped under each supplier' },
-            ] as const).map(opt => (
-              <button key={opt.k} onClick={() => setReorderView(opt.k)} title={opt.hint}
-                className={`h-8 px-5 rounded-lg text-xs font-semibold transition-colors ${
-                  reorderView === opt.k ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'
-                }`}>
-                {opt.lbl}
-              </button>
-            ))}
-          </div>
-          <button onClick={openInbox} title="All live supplier conversations"
-            className="h-9 inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-semibold text-gray-700 hover:bg-gray-50 transition-colors">
-            <Mail className="w-3.5 h-3.5 text-violet-500" /> Active Negotiations
-            {activeNegCount > 0 && <span className="ml-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700">{activeNegCount}</span>}
-          </button>
+        {/* View toggle — the ONE global control for the whole Reorder list.
+            (Active Negotiations now lives in the inbox icon, top-right.) */}
+        <div className="flex items-center gap-3 flex-wrap mb-5">
+          <GroupBySegment bySupplier={reorderView === 'by_supplier'} onChange={b => setReorderView(b ? 'by_supplier' : 'individual')} />
         </div>
 
         {/* Single working list — filters apply to both views */}
@@ -8853,11 +9101,11 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                           </div>
                         </td>
                         <td className="sticky z-10 px-3 py-2 text-gray-600 whitespace-nowrap" style={{ left: 236, backgroundColor: stickyBg }}>{p.category}</td>
-                        <td className="sticky z-10 px-3 py-2 text-right font-bold text-indigo-700 text-sm" style={{ left: 340, backgroundColor: stickyBg }}>
-                          {p.recommendedReorderQty.toLocaleString()}
+                        <td className="sticky z-10 px-3 py-2 text-right text-sm" style={{ left: 340, backgroundColor: stickyBg }}>
+                          <EditedValue edited={savedQtyOf(p)} suggested={p.recommendedReorderQty} align="right" primaryCls="font-bold text-indigo-700 text-sm" />
                         </td>
-                        <td className="sticky z-10 px-3 py-2 text-right font-bold text-indigo-700 text-sm" style={{ left: 440, backgroundColor: stickyBg, boxShadow: '2px 0 4px -1px rgba(0,0,0,0.06)' }}>
-                          £{p.totalCost.toLocaleString()}
+                        <td className="sticky z-10 px-3 py-2 text-right text-sm" style={{ left: 440, backgroundColor: stickyBg, boxShadow: '2px 0 4px -1px rgba(0,0,0,0.06)' }}>
+                          <EditedValue edited={Math.round(savedQtyOf(p) * savedCostOf(p))} suggested={p.totalCost} prefix="£" align="right" primaryCls="font-bold text-indigo-700 text-sm" />
                         </td>
                         <td className="px-3 py-2"><BuyStatusChip status={buyStatusOf(curSt)} /></td>
                         <td className="px-3 py-2"><SupplierStatusChip status={p.supplierStatus} /></td>
@@ -8931,7 +9179,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                                 : `Rejected — "${reason}"`
                               return (
                                 <button
-                                  onClick={() => { setEditQty(0); setEditExFactory(''); setEditCostPrice(0); setSelectedProduct(p) }}
+                                  onClick={() => setSelectedProduct(p)}
                                   title={tooltip}
                                   className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors">
                                   Review &amp; resubmit
@@ -8989,7 +9237,6 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
             onClose={() => setDetailSheetRecId(null)}
             onOpenFullDetail={() => {
               setDetailSheetRecId(null)
-              setEditQty(0); setEditExFactory(''); setEditCostPrice(0)
               setSelectedProduct(dp)
             }}
           />
@@ -9128,9 +9375,13 @@ function ManagerReorderView() {
   const [selectedProduct, setSelectedProduct] = useState<typeof REORDER_RECOMMENDATIONS[0] | null>(null)
   const [chartTab, setChartTab] = useState<'stock' | 'availability'>('stock')
   const [timeRange, setTimeRange] = useState<'1m' | '6m' | '1y'>('6m')
-  const [editQty, setEditQty] = useState(0)
-  const [editExFactory, setEditExFactory] = useState('')
-  const [editCostPrice, setEditCostPrice] = useState(0)
+  // Staged drafts — same model as the buyer Reorder view (shared _lineEdits store).
+  const [draftQty, setDraftQty] = useState<number>(0)
+  const [draftCost, setDraftCost] = useState<number>(0)
+  const [draftExFactory, setDraftExFactory] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [, setEditsVersion] = useState(0)
+  const [showWhy, setShowWhy] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [mgrToast, setMgrToast] = useState<string | null>(null)
   const [inquiries,     setInquiries]     = useState<Record<string, InquiryThread>>(() => ({ ...SEEDED_THREADS }))
@@ -9201,16 +9452,49 @@ function ManagerReorderView() {
     showMgrToast(`${eligible.length} line${eligible.length !== 1 ? 's' : ''} rejected.`)
   }
 
+  // Seed staged drafts from the saved edit (shared store) when a line opens.
+  useLayoutEffect(() => {
+    if (!selectedProduct) return
+    setDraftQty(savedQtyOf(selectedProduct))
+    setDraftCost(savedCostOf(selectedProduct))
+    setDraftExFactory(savedExFactoryOf(selectedProduct))
+    setSaving(false); setShowWhy(false)
+  }, [selectedProduct])
+
+  const saveLineEdits = (p: ReorderRecommendation) => {
+    setSaving(true)
+    setTimeout(() => {
+      _lineEdits[p.id] = {
+        qty: draftQty, costPrice: draftCost, exFactory: draftExFactory,
+        by: EDIT_USER, date: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }),
+      }
+      setSaving(false); setEditsVersion(v => v + 1)
+      showMgrToast(`${p.name} updated — size curve, cover, total cost and receipt date recomputed.`)
+    }, 1200)
+  }
+  const discardLineEdits = (p: ReorderRecommendation) => {
+    setDraftQty(savedQtyOf(p)); setDraftCost(savedCostOf(p)); setDraftExFactory(savedExFactoryOf(p))
+  }
+
   // ── Detail view ──────────────────────────────────────────────────────────────
   if (selectedProduct) {
     const p = selectedProduct
     const status = effStatus(p)
     const comment = effComment(p)
     const rCls = p.stockoutRisk === 'Low' ? 'bg-green-100 text-green-700' : p.stockoutRisk === 'High' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'
-    const qty = editQty > 0 ? editQty : p.recommendedReorderQty
-    const exFact = editExFactory || p.exFactoryDate
-    const costPr = editCostPrice > 0 ? editCostPrice : p.costPrice
-    const editTotalCost = Math.round(qty * costPr)
+    const addD = (base: string, days: number) => { const d = new Date(base); d.setDate(d.getDate() + days); return d.toISOString().slice(0, 10) }
+    // Saved (persisted) values drive every DERIVED display; drafts drive only the inputs.
+    const savedQty = savedQtyOf(p), savedCost = savedCostOf(p), savedExFactory = savedExFactoryOf(p)
+    const editTotalCost = Math.round(savedQty * savedCost)
+    const dirty = draftQty !== savedQty || draftCost !== savedCost || draftExFactory !== savedExFactory
+    const pendingEdits: string[] = []
+    if (draftQty !== savedQty)             pendingEdits.push(`Qty ${savedQty.toLocaleString()} → ${draftQty.toLocaleString()}`)
+    if (draftCost !== savedCost)           pendingEdits.push(`Cost £${savedCost} → £${draftCost}`)
+    if (draftExFactory !== savedExFactory) pendingEdits.push(`Ex-factory ${savedExFactory} → ${draftExFactory}`)
+    const lineEditMeta = _lineEdits[p.id]
+    const qtyChanged  = savedQty !== p.recommendedReorderQty
+    const exfChanged  = savedExFactory !== p.exFactoryDate
+    const costChanged = savedCost !== p.costPrice
     return (
       <div className="flex-1 overflow-y-auto">
         <div className="p-6 space-y-4">
@@ -9332,39 +9616,47 @@ function ManagerReorderView() {
               <div className="flex items-center gap-1.5">
                 <div className="h-px flex-1 bg-indigo-100" />
                 <span className="text-[9px] font-semibold text-indigo-500 tracking-wide uppercase">Editable</span>
+                {isLineEdited(p) && lineEditMeta && <EditedBadge by={lineEditMeta.by} date={lineEditMeta.date} compact />}
+                <button onClick={() => setShowWhy(true)} className="inline-flex items-center gap-1 text-[9px] font-semibold text-indigo-600 hover:text-indigo-800"><HelpCircle className="w-3 h-3" />Why?</button>
                 <div className="h-px flex-1 bg-indigo-100" />
               </div>
               <div className="grid grid-cols-3 gap-2">
                 <div className="bg-indigo-50/50 border border-indigo-100 rounded-lg px-3 py-2 text-center min-w-[88px]">
-                  <input type="number" value={editQty > 0 ? editQty : p.recommendedReorderQty}
-                    onChange={e => setEditQty(Number(e.target.value))}
+                  <input type="number" value={draftQty}
+                    onChange={e => setDraftQty(Number(e.target.value))}
                     className="text-xs font-bold text-gray-900 bg-transparent border-b border-indigo-300 focus:outline-none focus:border-indigo-600 w-full text-center" />
                   <div className="text-[10px] text-gray-400 mt-0.5">Order Qty</div>
-                  <div className="text-[9px] text-indigo-400 mt-0.5">updates next Monday</div>
+                  {qtyChanged
+                    ? <div className="text-[9px] text-gray-400 mt-0.5">Suggested: {p.recommendedReorderQty.toLocaleString()}</div>
+                    : <div className="text-[9px] text-indigo-400 mt-0.5">updates next Monday</div>}
                 </div>
                 <div className="bg-indigo-50/50 border border-indigo-100 rounded-lg px-3 py-2 text-center min-w-[88px]">
                   <div className="flex items-center justify-center">
                     <span className="text-xs font-bold text-gray-900 mr-0.5">£</span>
-                    <input type="number" step="0.01" value={editCostPrice > 0 ? editCostPrice : p.costPrice}
-                      onChange={e => setEditCostPrice(Number(e.target.value))}
+                    <input type="number" step="0.01" value={draftCost}
+                      onChange={e => setDraftCost(Number(e.target.value))}
                       className="text-xs font-bold text-gray-900 bg-transparent border-b border-indigo-300 focus:outline-none focus:border-indigo-600 w-16 text-center" />
                   </div>
                   <div className="text-[10px] text-gray-400 mt-0.5">Cost Price</div>
+                  {costChanged && <div className="text-[9px] text-gray-400 mt-0.5">Suggested: £{p.costPrice.toFixed(2)}</div>}
                 </div>
                 <div className="bg-indigo-50/50 border border-indigo-100 rounded-lg px-3 py-2 text-center min-w-[88px]">
-                  <input type="date" value={exFact} onChange={e => setEditExFactory(e.target.value)}
+                  <input type="date" value={draftExFactory} onChange={e => setDraftExFactory(e.target.value)}
                     className="text-xs font-bold text-gray-900 bg-transparent border-b border-indigo-300 focus:outline-none focus:border-indigo-600 w-full text-center" />
                   <div className="text-[10px] text-gray-400 mt-0.5">Ex-Factory</div>
+                  {exfChanged && <div className="text-[9px] text-gray-400 mt-0.5">Suggested: {p.exFactoryDate}</div>}
                 </div>
               </div>
               <div className="grid grid-cols-3 gap-2">
                 <div className="bg-gray-50 rounded-lg px-3 py-2 text-center min-w-[88px]">
                   <div className="text-xs font-bold text-gray-900">£{editTotalCost.toLocaleString()}</div>
                   <div className="text-[10px] text-gray-400 mt-0.5">Total Cost</div>
+                  {(qtyChanged || costChanged) && <div className="text-[9px] text-gray-400 mt-0.5">Suggested: £{Math.round(p.recommendedReorderQty * p.costPrice).toLocaleString()}</div>}
                 </div>
                 <div className="bg-gray-50 rounded-lg px-3 py-2 text-center min-w-[88px]">
-                  <div className="text-xs font-bold text-gray-900">{p.receiptDate}</div>
+                  <div className="text-xs font-bold text-gray-900">{exfChanged ? addD(savedExFactory, (parseInt(p.leadTime) || 21) + 14) : p.receiptDate}</div>
                   <div className="text-[10px] text-gray-400 mt-0.5">Receipt Date</div>
+                  {exfChanged && <div className="text-[9px] text-gray-400 mt-0.5">Suggested: {p.receiptDate}</div>}
                 </div>
                 <div className="bg-gray-50 rounded-lg px-3 py-2 text-center min-w-[88px]">
                   <div className="text-xs font-bold text-gray-900">£{p.sellingPrice.toFixed(2)}</div>
@@ -9459,10 +9751,16 @@ function ManagerReorderView() {
                 ))}
               </div>
             </div>
-            {chartTab === 'stock' && <StockLevelsChart productId={p.id} timeRange={timeRange} />}
+            {chartTab === 'stock' && <StockLevelsChart productId={p.id} timeRange={timeRange} intakeOverride={qtyChanged ? savedQty : null} />}
             {chartTab === 'availability' && <p className="text-sm text-gray-400 mt-4">Coming soon</p>}
           </div>
         </div>
+        {mgrToast && <Toast message={mgrToast} onDone={() => setMgrToast(null)} />}
+        {showWhy && <WhyQtyModal p={p} onClose={() => setShowWhy(false)} />}
+        {(dirty || saving) && (
+          <EditSaveBar pending={pendingEdits} saving={saving}
+            onSave={() => saveLineEdits(p)} onDiscard={() => discardLineEdits(p)} />
+        )}
       </div>
     )
   }
@@ -9700,7 +9998,7 @@ function ManagerReorderView() {
                 return (
                   <>
                     <tr key={p.id}
-                      onClick={() => { setEditQty(0); setEditExFactory(''); setEditCostPrice(0); setSelectedProduct(p) }}
+                      onClick={() => setSelectedProduct(p)}
                       className={`border-b border-gray-50 hover:bg-indigo-50/40 cursor-pointer transition-colors ${i % 2 !== 0 ? 'bg-gray-50/20' : ''} ${isOpen ? 'bg-red-50/30' : ''}`}>
                       {/* Checkbox */}
                       <td className="sticky z-10 px-3 py-2 border-r border-gray-100" style={{ left: 0, backgroundColor: stickyBg }} onClick={e => e.stopPropagation()}>
@@ -9731,12 +10029,12 @@ function ManagerReorderView() {
                       {/* Category */}
                       <td className="sticky z-10 px-3 py-2 text-gray-600 whitespace-nowrap" style={{ left: 236, backgroundColor: stickyBg }}>{p.category}</td>
                       {/* Reorder qty */}
-                      <td className="sticky z-10 px-3 py-2 text-right font-bold text-indigo-700 text-sm" style={{ left: 340, backgroundColor: stickyBg }}>
-                        {p.recommendedReorderQty.toLocaleString()}
+                      <td className="sticky z-10 px-3 py-2 text-right text-sm" style={{ left: 340, backgroundColor: stickyBg }}>
+                        <EditedValue edited={savedQtyOf(p)} suggested={p.recommendedReorderQty} align="right" primaryCls="font-bold text-indigo-700 text-sm" />
                       </td>
                       {/* Total reorder cost */}
-                      <td className="sticky z-10 px-3 py-2 text-right font-bold text-indigo-700 text-sm" style={{ left: 440, backgroundColor: stickyBg, boxShadow: '2px 0 4px -1px rgba(0,0,0,0.06)' }}>
-                        £{p.totalCost.toLocaleString()}
+                      <td className="sticky z-10 px-3 py-2 text-right text-sm" style={{ left: 440, backgroundColor: stickyBg, boxShadow: '2px 0 4px -1px rgba(0,0,0,0.06)' }}>
+                        <EditedValue edited={Math.round(savedQtyOf(p) * savedCostOf(p))} suggested={p.totalCost} prefix="£" align="right" primaryCls="font-bold text-indigo-700 text-sm" />
                       </td>
                       {/* Freight */}
                       <td className="px-3 py-2">
@@ -9928,7 +10226,6 @@ function ManagerReorderView() {
             onClose={() => setMgrDetailSheetRecId(null)}
             onOpenFullDetail={() => {
               setMgrDetailSheetRecId(null)
-              setEditQty(0); setEditExFactory(''); setEditCostPrice(0)
               setSelectedProduct(dp)
             }}
           />
@@ -10951,6 +11248,9 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
   // workspace can open them; the chase thread surfaces in the Supplier conversations
   // inbox. msgReturnTab remembers where the message was launched, for back-nav.
   const [messageGroups,    setMessageGroups]    = useState<ActionGroup[]>([])
+  // Per-supplier list of actions EXCLUDED from a bulk combined email (cancellations /
+  // internal-only) — surfaced in the workspace as "handle separately", never bundled.
+  const [bulkSeparate,     setBulkSeparate]     = useState<Record<string, { poIds: string[]; label: string }[]>>({})
   const [msgReturnTab,     setMsgReturnTab]      = useState<'allpos' | 'intake' | 'suppliers' | null>(null)
   const [expandedMsgIds,   setExpandedMsgIds]   = useState<Set<string>>(new Set()); void expandedMsgIds; void setExpandedMsgIds
   const [chaseDraftMap,    setChaseDraftMap]    = useState<Record<string, string>>({})
@@ -11305,6 +11605,59 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
     startMessage({ supplierId, type: 'message', pos, messageContext: context }, returnTab)
   }
 
+  // ── Supplier-group BULK message (Actions → By-supplier header) ─────────────────
+  // Unlike Reorder (all lines = same inquiry), a supplier's monitoring actions can
+  // be different kinds. Partition them: SUPPLIER-FACING & compatible (chase /
+  // date-change response / DC-booking confirm / pre-empt) go into ONE combined
+  // email; CANCELLATIONS and INTERNAL-only decisions are kept OUT and surfaced as
+  // "handle separately" — never silently dropped, never jammed into a chase email.
+  const partitionSupplierActions = (groups: ActionGroup[]) => {
+    const compatible: ActionGroup[] = []
+    const separate: { group: ActionGroup; reason: string }[] = []
+    groups.forEach(g => {
+      const sup = getSupplier(g.supplierId)
+      // An overdue action the agent recommends CANCELLING is a different register
+      // (cancellation + resourcing) — handle on its own, not in the combined chase.
+      if (g.type === 'overdue' && sup) {
+        const rec = getPORecommendation(g, sup, groupMaxOverdue(g), groupValue(g), 10)
+        if (rec.action === 'cancel') { separate.push({ group: g, reason: 'Cancellation — send separately' }); return }
+      }
+      compatible.push(g)
+    })
+    return { compatible, separate }
+  }
+
+  const startSupplierBulkMessage = (supplierId: string) => {
+    const groups = supplierEntries.find(e => e.supplierId === supplierId)?.groups
+      ?? actionGroups.filter(g => g.supplierId === supplierId)
+    const { compatible, separate } = partitionSupplierActions(groups)
+    if (compatible.length === 0) return
+    // Combined email scope = every PO across the compatible (supplier-facing) actions,
+    // MINUS any PO that belongs to a separate action (a cancellation PO must never
+    // land in the chase email even if it's also flagged by a compatible action).
+    const separatePoIds = new Set(separate.flatMap(s => s.group.pos.map(p => p.id)))
+    const pos = Array.from(new Map(
+      compatible.flatMap(g => g.pos).filter(p => !separatePoIds.has(p.id)).map(p => [p.id, p])
+    ).values())
+    if (pos.length === 0) return
+    // Stash the excluded actions so the workspace lists them as "handle separately".
+    setBulkSeparate(prev => ({
+      ...prev,
+      [supplierId]: separate.map(s => ({
+        poIds: s.group.pos.map(p => p.id),
+        label: `${s.reason}: ${s.group.pos.map(p => p.id).join(', ')}`,
+      })),
+    }))
+    // Reuse the EXISTING multi-line message workspace (combined email → conversations
+    // inbox). No new screen: same 'message' ActionGroup + handleStartThread path.
+    const g: ActionGroup = { supplierId, type: 'message', pos, messageContext: 'chase' }
+    setMessageGroups(prev => prev.some(x => cardKey(x) === cardKey(g)) ? prev.map(x => cardKey(x) === cardKey(g) ? g : x) : [...prev, g])
+    handleStartThread([g], buildMessageDraft(g))
+    setMsgReturnTab(null)   // launched from Actions → back returns to the action list
+    setSubTab('actions')
+    openActionCard(cardKey(g))
+  }
+
   const handleSimulateReply = (group: ActionGroup) => {
     const key = getThreadKey(group)
     const replyBody = generateSupplierReply(group)
@@ -11558,13 +11911,19 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
         {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center bg-gray-100 rounded-xl p-1 gap-0.5">
-            {([['actions','Actions'],['intake','Intake Forecast'],['allpos','All POs'],['suppliers','Supplier Health'],['agentlog','Agent Log'],['conversations','Active Supplier Conversations']] as const).map(([t, label]) => (
+            {([['actions','Actions'],['intake','Intake Forecast'],['allpos','All POs'],['suppliers','Supplier Health'],['agentlog','Agent Log']] as const).map(([t, label]) => (
               <button key={t} onClick={() => setSubTab(t)} className={`h-8 px-4 rounded-lg text-xs font-semibold transition-colors ${subTab === t ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>{label}</button>
             ))}
           </div>
+          <div className="flex items-center gap-2">
+          {/* Conversations live in their own home — a persistent inbox of ongoing
+              supplier conversations, not an analytical view of the PO population. */}
+          <InboxIconButton count={Object.keys(chaseThreads).length} onClick={() => setSubTab('conversations')}
+            title="Active supplier conversations — chases & pre-empts on live POs" />
           <button onClick={() => setSettingsOpen(true)} className="w-8 h-8 flex items-center justify-center rounded-lg border border-gray-200 text-gray-400 hover:text-gray-600 hover:bg-gray-50" title="Settings">
             <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
           </button>
+          </div>
         </div>
 
         {/* ── SUPPLIER CONVERSATIONS — monitoring-side inbox (mirror of Reorder's
@@ -11915,13 +12274,15 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           <>
             {!drawerOpen && (<>
             {actionToast && <Toast message={actionToast} onDone={() => setActionToast(null)} />}
-            {/* ── One control row, THREE distinct shapes (decreasing importance):
-                 TIER 2 mode = solid filled SEGMENTED control (heaviest) ‖ divider ‖
-                 TIER 3 filters/sort/group = recessive outline dropdowns. The pill
-                 sub-tabs (TIER 1) sit above. No two tiers share a shape. ── */}
+            {/* ── One control row. View-shaping controls (left): the MODE segment
+                 (solid filled, the more fundamental cut) followed by the
+                 Individual ⇄ By supplier grouping segment (lighter peer — same
+                 segmented type, subordinate weight). ‖ divider ‖ then the
+                 recessive refine controls: Type, Urgency, and Sort (outline
+                 dropdowns). The pill sub-tabs sit above. ── */}
             <div className="flex items-center gap-2 flex-wrap mb-1">
-              {/* TIER 2 — MODE: the lens. Solid, connected segmented switch, active
-                  segment filled — deliberately heavier than the outline filters. */}
+              {/* MODE: the lens. Solid, connected segmented switch, active
+                  segment filled — deliberately heavier than its grouping peer. */}
               <div className="inline-flex items-stretch rounded-lg border border-gray-300 overflow-hidden shadow-sm">
                 {([['now','Live issues'],['predicted','Predicted Issues'],['all','All']] as const).map(([k, label], i) => (
                   <button key={k} onClick={() => setActionMode(k)}
@@ -11929,7 +12290,11 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                 ))}
               </div>
 
-              {/* Firm vertical divider — separates the lens (tier 2) from refine (tier 3) */}
+              {/* GROUPING: the lighter segmented peer, immediately after mode.
+                  Same shared control as All POs and Reorder. */}
+              <GroupBySegment bySupplier={actionGroupBy === 'supplier'} onChange={b => setActionGroupBy(b ? 'supplier' : 'none')} />
+
+              {/* Firm vertical divider — separates the view-shaping controls from refine */}
               <div className="w-px h-7 bg-gray-300 mx-1.5 shrink-0" />
 
               {/* TIER 3 — refine within the lens. Recessive: light labels, outline dropdowns. */}
@@ -11953,7 +12318,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                   <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
                 </div>
               </div>
-              {/* Sort + Group — also recessive outline dropdowns, aligned right */}
+              {/* Sort — recessive outline dropdown, aligned right */}
               <div className="ml-auto flex items-center gap-3 flex-wrap">
                 <div className="flex items-center gap-1.5">
                   <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wide">Sort</span>
@@ -11961,16 +12326,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                     <select value={sortMode} onChange={e => setSortMode(e.target.value as 'missed_sales' | 'value' | 'overdue')}
                       className="h-8 pl-2.5 pr-7 rounded-lg border border-gray-200 bg-white text-xs text-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-300 appearance-none">
                       {[['missed_sales','Sales at risk'],['value','Value at risk'],['overdue','Most overdue']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-                    </select>
-                    <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
-                  </div>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wide">Group</span>
-                  <div className="relative">
-                    <select value={actionGroupBy} onChange={e => setActionGroupBy(e.target.value as 'none' | 'supplier')}
-                      className="h-8 pl-2.5 pr-7 rounded-lg border border-gray-200 bg-white text-xs text-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-300 appearance-none">
-                      {[['none','None'],['supplier','Supplier']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                     </select>
                     <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
                   </div>
@@ -12029,7 +12384,25 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                     const nm  = getSupplier(supId)?.name ?? supId
                     const val = gs.reduce((s, g) => s + g.pos.reduce((ss, p) => ss + parseOrderVal(p.orderValue), 0), 0)
                     return (
-                      <SupplierGroup key={supId} supplierName={nm} count={gs.length} unit="action" valueLabel={`£${val.toLocaleString()} at risk`}>
+                      <SupplierGroup key={supId} supplierName={nm} count={gs.length} unit="action" valueLabel={`£${val.toLocaleString()} at risk`}
+                        headerAction={(() => {
+                          const { compatible, separate } = partitionSupplierActions(gs)
+                          if (compatible.length === 0) {
+                            return separate.length > 0
+                              ? <span className="text-[10px] text-gray-400 italic" title="Every action here needs separate handling (e.g. a cancellation) — message individually">Handle individually</span>
+                              : null
+                          }
+                          return (
+                            <button
+                              onClick={e => { e.stopPropagation(); startSupplierBulkMessage(supId) }}
+                              title={`One combined email to ${nm} covering ${compatible.length} compatible action${compatible.length === 1 ? '' : 's'}${separate.length > 0 ? ` · ${separate.length} handled separately` : ''}`}
+                              className="inline-flex items-center gap-1.5 h-7 px-3 rounded-lg bg-violet-600 text-white text-[11px] font-semibold hover:bg-violet-700"
+                            >
+                              <Mail className="w-3 h-3" /> Message supplier ({compatible.length})
+                            </button>
+                          )
+                        })()}
+                      >
                         <div className="divide-y divide-gray-100">{gs.map(renderActionRow)}</div>
                       </SupplierGroup>
                     )
@@ -12128,6 +12501,21 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                         })}
                       </div>
                     </div>
+
+                    {/* ── Handled separately — actions deliberately EXCLUDED from this
+                         combined email (cancellations / internal-only). Honest about
+                         what's in the email vs what needs its own handling. ─── */}
+                    {drawerGroup.type === 'message' && (bulkSeparate[drawerGroup.supplierId]?.length ?? 0) > 0 && (
+                      <div className="border-b border-amber-100 bg-amber-50 px-6 py-3 shrink-0">
+                        <div className="text-[10px] font-bold text-amber-700 uppercase tracking-wide mb-1.5">Handled separately — not in this email</div>
+                        <ul className="space-y-1">
+                          {bulkSeparate[drawerGroup.supplierId].map((s, i) => (
+                            <li key={i} className="text-[11px] text-amber-800 flex items-start gap-1.5"><span className="mt-0.5 shrink-0">•</span><span>{s.label}</span></li>
+                          ))}
+                        </ul>
+                        <div className="text-[10px] text-amber-600 mt-1.5">Cancellations and internal decisions are kept out of the combined chase email — action them individually from the list.</div>
+                      </div>
+                    )}
 
                     {/* ── Supplier inbound message (always present; quiet empty state) ─── */}
                     {drawerTrigger ? (
@@ -13357,6 +13745,10 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           return (
             <div className="space-y-4">
               <div className="flex items-center gap-3 flex-wrap">
+                {/* Lead view-shaping control — reshapes POs ⇄ supplier groups.
+                    Sits left, separated from the refine/filter controls by a divider. */}
+                <GroupBySegment bySupplier={poGroupBy === 'supplier'} onChange={b => setPoGroupBy(b ? 'supplier' : 'none')} />
+                <div className="w-px h-7 bg-gray-300 shrink-0" />
                 <div className="relative">
                   <Search className="w-3.5 h-3.5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input value={poSearch} onChange={e => setPoSearch(e.target.value)} placeholder="Search PO or product…" className="pl-8 pr-3 h-8 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-indigo-200 w-52" />
@@ -13385,13 +13777,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                 >
                   <TrendingDown className="w-3.5 h-3.5" /> {poRiskSort ? 'Sorted by risk' : 'Sort by risk'}
                 </button>
-                {/* Individual ⇄ By supplier — same grouping concept as Reorder */}
-                <div className="inline-flex items-center bg-gray-100 rounded-lg p-0.5 gap-0.5">
-                  {([['none','Individual'],['supplier','By supplier']] as const).map(([k, label]) => (
-                    <button key={k} onClick={() => setPoGroupBy(k)}
-                      className={`h-7 px-3 rounded-md text-xs font-semibold transition-colors ${poGroupBy === k ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>{label}</button>
-                  ))}
-                </div>
                 <button className="ml-auto h-8 px-3 rounded-lg border border-gray-200 text-xs font-semibold text-gray-600 hover:bg-gray-50 flex items-center gap-1.5">
                   <Download className="w-3.5 h-3.5" /> Export Excel
                 </button>
