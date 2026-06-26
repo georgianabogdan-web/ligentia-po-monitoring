@@ -45,6 +45,12 @@ jobs:
           git remote add upstream https://github.com/georgianabogdan-web/PO-agent.git 2>/dev/null || true
           git fetch upstream main
           if git merge --no-edit upstream/main; then
+            # Never adopt upstream's CI workflows — GITHUB_TOKEN can't push
+            # workflow files, and the Ligentia repo owns its own .github/.
+            # Restore .github to this repo's pre-merge state, so the pushed
+            # merge leaves workflow files byte-identical (no rejected push).
+            git checkout ORIG_HEAD -- .github 2>/dev/null || true
+            git commit -q --amend --no-edit
             git push origin main
           else
             echo "::error::Upstream merge conflicts outside src/poData.ts — resolve manually."
