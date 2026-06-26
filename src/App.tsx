@@ -165,7 +165,7 @@ interface TriggerMessage {
   agentSummary?: string
   priorMessages?: { sender: string; timestamp: string; body: string; direction: 'inbound' | 'outbound' }[]
 }
-interface ActionGroup { supplierId: string; type: 'overdue' | 'at_risk' | 'late_dc' | 'predicted' | 'fill_risk'; pos: PO[]; triggerMessage?: TriggerMessage }
+interface ActionGroup { supplierId: string; type: 'overdue' | 'at_risk' | 'late_dc' | 'predicted' | 'fill_risk' | 'message'; pos: PO[]; triggerMessage?: TriggerMessage; messageContext?: 'chase' | 'preempt' | 'performance' }
 
 // ── Shared action-card primitives (used by PO Monitoring rail + Home overview) ──
 type ActionCardState = 'agent-drafted' | 'decision-needed' | 'awaiting-reply' | 'reply-received' | 'no-reply-overdue' | 'snoozed'
@@ -1374,6 +1374,7 @@ function deriveCardPills(group: ActionGroup, sup: Supplier | null): { status: Ca
   if (group.type === 'at_risk') return { status: 'agent-drafted', actionTypeLabel: 'Approve date change' }
   if (group.type === 'predicted') return { status: 'agent-drafted', actionTypeLabel: 'Pre-empt slip' }
   if (group.type === 'fill_risk') return { status: 'agent-drafted', actionTypeLabel: 'Pre-empt under-fulfilment' }
+  if (group.type === 'message') return { status: 'agent-drafted', actionTypeLabel: 'Supplier message' }
   return                                { status: 'agent-drafted', actionTypeLabel: 'Confirm DC booking' }
 }
 
@@ -2004,14 +2005,16 @@ function SupplierDetailView({
   supplier,
   onBack,
   onLogActivity,
+  onMessageSupplier,
   pos,
   onOpenPO,
 }: {
-  supplier:        Supplier
-  onBack:          () => void
-  onLogActivity?:  (kind: ActivityKind, text: string) => void
-  pos:             PO[]
-  onOpenPO?:       (poId: string) => void
+  supplier:           Supplier
+  onBack:             () => void
+  onLogActivity?:     (kind: ActivityKind, text: string) => void
+  onMessageSupplier?: () => void
+  pos:                PO[]
+  onOpenPO?:          (poId: string) => void
 }) {
   const journey = SUPPLIER_JOURNEY[supplier.id]
   const tierCfg = journey ? HEALTH_TIER_CFG[journey.tier] : null
@@ -2093,6 +2096,7 @@ function SupplierDetailView({
                   {journey.tier}
                 </span>
               )}
+              {onMessageSupplier && <button onClick={onMessageSupplier} title="Message this supplier about all their open POs (combined email)" className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-violet-600 text-white text-[11px] font-semibold hover:bg-violet-700"><Mail className="w-3.5 h-3.5" /> Message supplier</button>}
               {onLogActivity && <LogActivityButton onSave={onLogActivity} />}
             </div>
           </div>
@@ -4366,6 +4370,27 @@ Best regards,
 [Buyer Name]`
 }
 
+// ── Shared auto-reply mechanic (single source of truth) ───────────────────────
+// A sent supplier email turns into an inbound reply on its own — no operator/demo
+// action. This is the ONE place that defines the timing and the two-phase
+// transition, reused by every agentic thread (Reorder + PO Monitoring, single- and
+// multi-line):
+//   Phase 1 — the lifelike "Sent · awaiting reply" state is shown for AWAIT_MS
+//             (a calm, narratable window — never instantly skipped).
+//   Phase 2 — the reply lands LAND_MS later and flows into the normal inbound
+//             handling (parsed terms / per-line table / recommended next step).
+// onAwaiting is optional: some threads enter the awaiting state synchronously at
+// send (e.g. PO Monitoring chase threads), so they only need onReply.
+// Returns a cleanup that cancels any pending timers.
+const AUTO_REPLY_AWAIT_MS = 2200
+const AUTO_REPLY_LAND_MS  = 2600
+function scheduleAutoReply(opts: { onAwaiting?: () => void; onReply: () => void }): () => void {
+  const timers: ReturnType<typeof setTimeout>[] = []
+  if (opts.onAwaiting) timers.push(setTimeout(opts.onAwaiting, AUTO_REPLY_AWAIT_MS))
+  timers.push(setTimeout(opts.onReply, AUTO_REPLY_AWAIT_MS + AUTO_REPLY_LAND_MS))
+  return () => timers.forEach(clearTimeout)
+}
+
 function simulateSupplierReply(
   rec: typeof REORDER_RECOMMENDATIONS[0],
   round: InquiryRound,
@@ -4533,45 +4558,44 @@ function InquiryDrawer({
     })
   }, [rec.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // sent → awaiting_reply after 2s
+  // ── Auto-arriving reply (shared mechanic) ──────────────────────────────────
+  // Keyed on a stable send signature (round count + sentAt) so the Phase-1 status
+  // flip (sent → awaiting_reply) does NOT cancel the pending Phase-2 reply.
+  const lastRoundForReply = thread?.rounds[thread.rounds.length - 1]
+  const pendingSendKey = lastRoundForReply && !lastRoundForReply.supplierReply && (status === 'sent' || status === 'awaiting_reply')
+    ? `${thread!.rounds.length}:${lastRoundForReply.sentAt ?? ''}` : null
   useEffect(() => {
-    if (status !== 'sent') return
-    const t = setTimeout(() => {
-      const cur = latestThread.current
-      if (!cur || cur.status !== 'sent') return
-      onUpdate({ ...cur, status: 'awaiting_reply' })
-    }, 2000)
-    return () => clearTimeout(t)
-  }, [status]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // awaiting_reply → replied/escalated after 3s
-  useEffect(() => {
-    if (status !== 'awaiting_reply') return
-    const t = setTimeout(() => {
-      const cur = latestThread.current
-      if (!cur || cur.status !== 'awaiting_reply') return
-      const last  = cur.rounds[cur.rounds.length - 1]
-      const reply = simulateSupplierReply(rec, last, cur.scenario === 'uncertain' ? 'counter' : cur.scenario)
-      let nextStatus: NegotiationStatus = 'replied'
-      let flaggedReason: string | null  = null
-      if (reply.scenario === 'escalate') {
-        if (reply.moqOffered > rec.minOrderQty * ESCALATION_RULES.moqMaxMultiplier) {
-          nextStatus    = 'escalated'
-          flaggedReason = `Supplier MOQ (${reply.moqOffered.toLocaleString()}) exceeds limit (${Math.round(rec.minOrderQty * ESCALATION_RULES.moqMaxMultiplier).toLocaleString()})`
-        } else {
-          nextStatus    = 'escalated'
-          flaggedReason = `CP (£${reply.offeredCP.toFixed(2)}) above acceptable threshold`
+    if (!pendingSendKey) return
+    return scheduleAutoReply({
+      onAwaiting: () => {
+        const cur = latestThread.current
+        if (cur && cur.status === 'sent') onUpdate({ ...cur, status: 'awaiting_reply' })
+      },
+      onReply: () => {
+        const cur = latestThread.current
+        if (!cur || cur.status !== 'awaiting_reply') return
+        const last  = cur.rounds[cur.rounds.length - 1]
+        const reply = simulateSupplierReply(rec, last, cur.scenario === 'uncertain' ? 'counter' : cur.scenario)
+        let nextStatus: NegotiationStatus = 'replied'
+        let flaggedReason: string | null  = null
+        if (reply.scenario === 'escalate') {
+          if (reply.moqOffered > rec.minOrderQty * ESCALATION_RULES.moqMaxMultiplier) {
+            nextStatus    = 'escalated'
+            flaggedReason = `Supplier MOQ (${reply.moqOffered.toLocaleString()}) exceeds limit (${Math.round(rec.minOrderQty * ESCALATION_RULES.moqMaxMultiplier).toLocaleString()})`
+          } else {
+            nextStatus    = 'escalated'
+            flaggedReason = `CP (£${reply.offeredCP.toFixed(2)}) above acceptable threshold`
+          }
         }
-      }
-      onUpdate({
-        ...cur,
-        status:        nextStatus,
-        rounds:        [...cur.rounds.slice(0, -1), { ...last, supplierReply: reply }],
-        flaggedReason: flaggedReason ?? cur.flaggedReason,
-      })
-    }, 3000)
-    return () => clearTimeout(t)
-  }, [status]) // eslint-disable-line react-hooks/exhaustive-deps
+        onUpdate({
+          ...cur,
+          status:        nextStatus,
+          rounds:        [...cur.rounds.slice(0, -1), { ...last, supplierReply: reply }],
+          flaggedReason: flaggedReason ?? cur.flaggedReason,
+        })
+      },
+    })
+  }, [pendingSendKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // draftCpOverride → regenerate email body live
   useEffect(() => {
@@ -7029,16 +7053,18 @@ function ReorderLineWorkspace({
         onUpdateThread(base)
         return { l, base }
       })
-      setTimeout(() => {
-        sent.forEach(({ l, base }) => {
+      // Shared auto-reply mechanic: visible "awaiting" window, then the ONE combined reply lands.
+      scheduleAutoReply({
+        onAwaiting: () => sent.forEach(({ base }) => onUpdateThread({ ...base, status: 'awaiting_reply' })),
+        onReply: () => sent.forEach(({ l, base }) => {
           const last  = base.rounds[base.rounds.length - 1]
           const reply = simulateSupplierReply(l, last, base.scenario === 'uncertain' ? 'counter' : base.scenario)
           let nextStatus: NegotiationStatus = 'replied'
           let flaggedReason: string | null  = base.flaggedReason
           if (reply.scenario === 'escalate') { nextStatus = 'escalated'; flaggedReason = `CP (£${reply.offeredCP.toFixed(2)}) above acceptable threshold` }
           onUpdateThread({ ...base, status: nextStatus, rounds: [...base.rounds.slice(0, -1), { ...last, supplierReply: reply }], flaggedReason })
-        })
-      }, 1600)
+        }),
+      })
     }
 
     // The single combined reply email + AI summary, built from the per-line offers.
@@ -7107,14 +7133,14 @@ function ReorderLineWorkspace({
         return { l, updated }
       })
       setStaged({}); setCounterDraft(null)
-      // Supplier replies to the combined counter as ONE email → per-line offers.
-      setTimeout(() => {
-        advanced.forEach(({ l, updated }) => {
+      // Shared auto-reply mechanic: lines are already awaiting; the ONE combined reply lands on its own.
+      scheduleAutoReply({
+        onReply: () => advanced.forEach(({ l, updated }) => {
           const last  = updated.rounds[updated.rounds.length - 1]
           const reply = simulateSupplierReply(l, last, 'counter')
           onUpdateThread({ ...updated, status: 'replied', rounds: [...updated.rounds.slice(0, -1), { ...last, supplierReply: reply }] })
-        })
-      }, 1600)
+        }),
+      })
     }
 
     const multiHeader = (
@@ -10498,7 +10524,7 @@ function poIntakeKind(poId: string): 'New' | 'Rebuy' {
 // failure mode. So every week breaks out its AT-RISK portion (never just a net
 // total), and an always-visible exception strip ranks the worst lines by
 // missed-sales (commercial) impact regardless of how the aggregate looks.
-function IntakeForecastView({ onOpenPO }: { onOpenPO: (poId: string) => void }) {
+function IntakeForecastView({ onOpenPO, onMessagePO }: { onOpenPO: (poId: string) => void; onMessagePO?: (poId: string) => void }) {
   const WEEKS = 12
   const [catFilter, setCatFilter] = useState('all')
   const [openWeek, setOpenWeek] = useState<number | null>(null)
@@ -10634,7 +10660,9 @@ function IntakeForecastView({ onOpenPO }: { onOpenPO: (poId: string) => void }) 
                       </td>
                       <td className="px-3 py-2 text-right font-bold text-red-700 tabular-nums whitespace-nowrap">{daysLate}d</td>
                       <td className="px-3 py-2 text-right font-bold text-red-600 tabular-nums whitespace-nowrap">£{r.pred.missedSalesRisk.estimatedLostRevenue.toLocaleString('en-GB')}</td>
-                      <td className="px-3 py-2 text-right"><span className="inline-flex items-center gap-0.5 text-[11px] font-semibold text-indigo-600">Open <ArrowRight className="w-3 h-3" /></span></td>
+                      <td className="px-3 py-2 text-right" onClick={e => e.stopPropagation()}>
+                        {onMessagePO && <button onClick={() => onMessagePO(r.po.id)} title="Message supplier about this PO (pre-empt)" aria-label="Message supplier about this PO" className="inline-flex items-center justify-center h-6 w-6 rounded text-violet-700 hover:bg-violet-50"><Mail className="w-3.5 h-3.5" /></button>}
+                      </td>
                     </tr>
                   )
                 })}
@@ -10742,6 +10770,12 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
   const [emailDraft,       setEmailDraft]       = useState('')
   const [poSearch,         setPoSearch]         = useState('')
   const [chaseThreads,     setChaseThreads]     = useState<Record<string, ChaseThread>>({})
+  // Ad-hoc "Message supplier" conversations started from anywhere (All POs, Intake,
+  // Supplier Health). They become resolvable ActionGroups so the EXISTING action
+  // workspace can open them; the chase thread surfaces in the Supplier conversations
+  // inbox. msgReturnTab remembers where the message was launched, for back-nav.
+  const [messageGroups,    setMessageGroups]    = useState<ActionGroup[]>([])
+  const [msgReturnTab,     setMsgReturnTab]      = useState<'allpos' | 'intake' | 'suppliers' | null>(null)
   const [expandedMsgIds,   setExpandedMsgIds]   = useState<Set<string>>(new Set()); void expandedMsgIds; void setExpandedMsgIds
   const [chaseDraftMap,    setChaseDraftMap]    = useState<Record<string, string>>({})
   const [chaseHistoryOpen, setChaseHistoryOpen] = useState(false); void chaseHistoryOpen; void setChaseHistoryOpen
@@ -10909,7 +10943,9 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
   // ── Card helpers ────────────────────────────────────────────────────────────
   const parseOrderVal = (v: string) => parseInt(v.replace(/[^0-9]/g, '')) || 0
   const urgWt = (g: ActionGroup) => g.type === 'overdue' ? 3 : g.type === 'at_risk' ? 2 : 1
-  const cardKey = (g: ActionGroup) => `${g.supplierId}-${g.type}`
+  const cardKey = (g: ActionGroup) => g.type === 'message'
+    ? `msg-${g.supplierId}-${g.pos.length === 1 ? g.pos[0].id : 'all'}`   // per-PO vs per-supplier message
+    : `${g.supplierId}-${g.type}`
   const getCardState = (g: ActionGroup): 'agent-drafted' | 'decision-needed' | 'awaiting-reply' | 'reply-received' | 'no-reply-overdue' | 'snoozed' => {
     if (snoozedCards.has(cardKey(g))) return 'snoozed'
     const thread = chaseThreads[g.supplierId]
@@ -11063,6 +11099,38 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
     setChaseThreads(prev => ({ ...prev, [key]: thread }))
     setExpandedMsgIds(new Set())
     addPOEvent(primary.pos[0].id, { id: `ev-${Date.now()}`, type: 'chase_sent', timestamp: new Date().toISOString(), body: `Chase email sent to ${getSupplier(primary.supplierId)?.name}.`, author: 'agent' })
+    // Shared auto-reply mechanic: the thread is already in the visible "awaiting reply"
+    // state; after a calm, narratable window the supplier reply lands on its own.
+    scheduleAutoReply({ onReply: () => handleSimulateReply(primary) })
+  }
+
+  // ── "Message supplier" — start an agentic conversation from anywhere ──────────
+  // Builds an ad-hoc message group (single-PO or per-supplier), starts the chase
+  // thread via the SAME handleStartThread (→ surfaces in Supplier conversations),
+  // and opens the EXISTING action workspace. No new messaging screen.
+  const buildMessageDraft = (g: ActionGroup): string => {
+    const name = getSupplier(g.supplierId)?.name ?? g.supplierId
+    const nl = '\n'
+    const list = g.pos.map(p => `- ${p.id}: ${p.product} (due ${formatDate(p.expectedDelivery)}, ${p.quantity.toLocaleString('en-GB')} units)`).join(nl)
+    const closing = nl + nl + 'Kind regards,' + nl + 'Debenhams Buying Team'
+    const ctx = g.messageContext ?? 'chase'
+    if (ctx === 'preempt')     return `Dear ${name} Team,${nl}${nl}Ahead of delivery we'd like to confirm dates and the full ordered quantity on the following — please flag any risk to on-time, in-full delivery now:${nl}${nl}${list}${closing}`
+    if (ctx === 'performance') return `Dear ${name} Team,${nl}${nl}As part of a review of recent performance, please confirm your plan to deliver the following open orders on time and in full, and raise any concerns:${nl}${nl}${list}${closing}`
+    return `Dear ${name} Team,${nl}${nl}We're following up on the open order${g.pos.length === 1 ? '' : 's'} below. Please confirm current status and that delivery remains on the agreed date and full quantity:${nl}${nl}${list}${closing}`
+  }
+  const startMessage = (g: ActionGroup, returnTab: 'allpos' | 'intake' | 'suppliers') => {
+    setMessageGroups(prev => prev.some(x => cardKey(x) === cardKey(g)) ? prev.map(x => cardKey(x) === cardKey(g) ? g : x) : [...prev, g])
+    handleStartThread([g], buildMessageDraft(g))
+    setMsgReturnTab(returnTab)
+    setSubTab('actions')
+    openActionCard(cardKey(g))
+  }
+  const startMessageForPO = (po: PO, returnTab: 'allpos' | 'intake' | 'suppliers', context: ActionGroup['messageContext'] = 'chase') =>
+    startMessage({ supplierId: po.supplierId, type: 'message', pos: [po], messageContext: context }, returnTab)
+  const startMessageForSupplier = (supplierId: string, returnTab: 'allpos' | 'intake' | 'suppliers', context: ActionGroup['messageContext'] = 'chase') => {
+    const pos = ALL_POS.filter(p => p.supplierId === supplierId && p.status !== 'Delivered')
+    if (pos.length === 0) return
+    startMessage({ supplierId, type: 'message', pos, messageContext: context }, returnTab)
   }
 
   const handleSimulateReply = (group: ActionGroup) => {
@@ -11078,7 +11146,9 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
     const followMsg: ChaseThreadMsg = { id: followId, sender: 'agent', timestamp: new Date().toISOString(), body: followUpBody, status: cfg?.autoSend ? 'auto-sent' : 'awaiting-review', emailType }
     setChaseThreads(prev => {
       const cur = prev[key]
-      if (!cur) return prev
+      // Only land the auto-reply if the thread is still genuinely awaiting one
+      // (user hasn't already moved it on, snoozed, or it isn't already replied).
+      if (!cur || cur.status !== 'awaiting-reply') return prev
       return { ...prev, [key]: { ...cur, status: 'reply-received', messages: [...cur.messages, replyMsg, followMsg] } }
     })
     // Generate proposed PO mutations (push expected dates forward ~3-5 weeks)
@@ -11152,17 +11222,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
     })
     setProposedMutations(prev => { const n = { ...prev }; delete n[group.supplierId]; return n })
     setResolvedCards(prev => { const n = new Set(prev); n.add(cardKey); return n })
-  }
-
-  const handleNoReplyTrigger = (group: ActionGroup) => {
-    const key = getThreadKey(group)
-    const ts = new Date().toISOString()
-    setChaseThreads(prev => {
-      const cur = prev[key]
-      if (!cur) return prev
-      const sysEv: ThreadSystemEvent = { id: `sys-${Date.now()}`, timestamp: ts, body: 'No reply received after 3 days — action escalated to overdue' }
-      return { ...prev, [key]: { ...cur, status: 'no-reply-overdue', systemEvents: [...(cur.systemEvents ?? []), sysEv] } }
-    })
   }
 
   const handleDP3Action = (group: ActionGroup, action: string, draft: string, cardKey: string) => {
@@ -11327,7 +11386,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
         {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center bg-gray-100 rounded-xl p-1 gap-0.5">
-            {([['actions','Actions'],['conversations','Supplier conversations'],['intake','Intake Forecast'],['allpos','All POs'],['suppliers','Supplier Health'],['agentlog','Agent Log']] as const).map(([t, label]) => (
+            {([['actions','Actions'],['intake','Intake Forecast'],['allpos','All POs'],['suppliers','Supplier Health'],['agentlog','Agent Log'],['conversations','Active Supplier Conversations']] as const).map(([t, label]) => (
               <button key={t} onClick={() => setSubTab(t)} className={`h-8 px-4 rounded-lg text-xs font-semibold transition-colors ${subTab === t ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>{label}</button>
             ))}
           </div>
@@ -11356,7 +11415,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
             'awaiting-reply': 'Awaiting reply', 'reply-received': 'Reply received', 'no-reply-overdue': 'No reply — overdue', 'resolved': 'Resolved',
           }
           const entries: ConversationInboxEntry[] = Object.entries(chaseThreads).map(([supplierId, thread]) => {
-            const grps = actionGroups.filter(g => g.supplierId === supplierId)
+            const grps = [...actionGroups, ...messageGroups].filter(g => g.supplierId === supplierId)
             const grp  = grps[0]
             const sup  = getSupplier(supplierId)
             const poIds = Array.from(new Set(grps.flatMap(g => g.pos.map(p => p.id))))
@@ -11374,8 +11433,8 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
             <ConversationsInbox
               onBack={() => setSubTab('actions')}
               backLabel="Back to Actions"
-              breadcrumb={<>PO Monitoring · Supplier conversations</>}
-              title="Supplier conversations"
+              breadcrumb={<>PO Monitoring · Active Supplier Conversations</>}
+              title="Active Supplier Conversations"
               subtitle={`${entries.length} live post-purchase conversation${entries.length === 1 ? '' : 's'} · chase / fix / pre-empt on live POs · separate from Reorder's price negotiations`}
               emptyTitle="No supplier conversations yet."
               emptyHint="Start one from an action — chase a late PO, or pre-empt a predicted slip / under-fill — and it'll appear here as the single home for monitoring threads."
@@ -11385,7 +11444,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
         })()}
 
         {/* ── INTAKE FORECAST ── */}
-        {subTab === 'intake' && <IntakeForecastView onOpenPO={poId => setSelectedPOId(poId)} />}
+        {subTab === 'intake' && <IntakeForecastView onOpenPO={poId => setSelectedPOId(poId)} onMessagePO={poId => { const po = ALL_POS.find(p => p.id === poId); if (po) startMessageForPO(po, 'intake', 'preempt') }} />}
 
         {/* ── ACTIONS ── */}
         {subTab === 'actions' && (() => {
@@ -11527,9 +11586,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                 </div>
                 {/* 5 · action control (type-driven) + snooze */}
                 <div className="flex flex-col items-end gap-1" onClick={e => e.stopPropagation()}>
-                  {isJudgment
-                    ? <button onClick={() => openActionCard(ck)} className="h-7 px-3 text-[10px] font-semibold rounded-lg border border-indigo-200 text-indigo-700 hover:bg-indigo-50 inline-flex items-center gap-1">Open <ArrowRight className="w-3 h-3" /></button>
-                    : <button onClick={() => inlineApprove(g, ck, inlineLabel)} className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-green-600 text-white hover:bg-green-700">{inlineLabel}</button>}
+                  {!isJudgment && <button onClick={() => inlineApprove(g, ck, inlineLabel)} className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-green-600 text-white hover:bg-green-700">{inlineLabel}</button>}
                   <span onClick={() => setSnoozedCards(prev => { const n = new Set(prev); n.has(ck) ? n.delete(ck) : n.add(ck); return n })} className="text-[9px] text-gray-400 hover:text-gray-600 font-medium cursor-pointer">{snoozedCards.has(ck) ? 'Unsnooze' : 'Snooze 3d'}</span>
                 </div>
               </div>
@@ -11537,7 +11594,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           }
 
           // ── Drawer data ──────────────────────────────────────────────────
-          const drawerGroup    = actionGroups.find(g => cardKey(g) === drawerCardKey) ?? null
+          const drawerGroup    = [...actionGroups, ...messageGroups].find(g => cardKey(g) === drawerCardKey) ?? null
           const drawerSup      = drawerGroup ? getSupplier(drawerGroup.supplierId) : null
           const drawerThread   = drawerGroup ? chaseThreads[drawerGroup.supplierId] : null
           const drawerState    = drawerGroup ? getCardState(drawerGroup) : null
@@ -11818,8 +11875,8 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
 
             {drawerOpen && drawerGroup && drawerSup && (
               <DetailWorkspaceLayout
-                onBack={() => { if (drawerView === 'po-detail') { setDrawerView('action'); setDrawerViewPOId(null) } else setDrawerCardKey(null) }}
-                backLabel={drawerView === 'po-detail' ? drawerSup.name : 'Back to actions'}
+                onBack={() => { if (drawerView === 'po-detail') { setDrawerView('action'); setDrawerViewPOId(null) } else { setDrawerCardKey(null); if (msgReturnTab) { setSubTab(msgReturnTab); setMsgReturnTab(null) } } }}
+                backLabel={drawerView === 'po-detail' ? drawerSup.name : msgReturnTab === 'allpos' ? 'Back to All POs' : msgReturnTab === 'intake' ? 'Back to Intake Forecast' : msgReturnTab === 'suppliers' ? 'Back to Supplier Health' : 'Back to actions'}
                 breadcrumb={drawerView === 'po-detail' ? <span className="font-mono">{drawerViewPOId}</span> : <>PO Monitoring · Actions · {drawerSup.name}</>}
                 header={drawerView === 'action' ? (
                   <div className="bg-white border border-gray-200 rounded-2xl px-5 py-4">
@@ -11900,8 +11957,8 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                       </div>
                     </div>
 
-                    {/* ── Trigger context block ─────────────────────────── */}
-                    {drawerTrigger && (
+                    {/* ── Supplier inbound message (always present; quiet empty state) ─── */}
+                    {drawerTrigger ? (
                       <div className="border-b border-gray-100 px-6 py-4 shrink-0">
                         {(drawerUiState === 'A' || drawerUiState === 'B') ? (
                           <div className="bg-sky-50/70 border border-sky-100 rounded-xl px-4 py-3 space-y-2">
@@ -11965,7 +12022,33 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                           </div>
                         )}
                       </div>
+                    ) : (
+                      <div className="border-b border-gray-100 px-6 py-3 shrink-0">
+                        <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-0.5">Supplier inbound</div>
+                        <div className="text-[11px] text-gray-400">{drawerState === 'reply-received' ? 'Reply received — see the conversation below.' : 'No supplier reply yet.'}</div>
+                      </div>
                     )}
+
+                    {/* ── Date-change history (always present; quiet empty state) ─── */}
+                    {(() => {
+                      const anyDateChanges = drawerGroup.pos.some(p => (p.dateChanges?.length ?? 0) > 0)
+                      return (
+                        <div className="border-b border-gray-100 px-6 py-4 shrink-0">
+                          {anyDateChanges ? (
+                            <DateChangeAttribution
+                              pos={drawerGroup.pos}
+                              override={dateChangeOverrides}
+                              onChange={(id, causedBy, reasonCode) => setDateChangeOverrides(prev => ({ ...prev, [id]: { causedBy, reasonCode } }))}
+                            />
+                          ) : (
+                            <>
+                              <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-0.5">Date-change history</div>
+                              <div className="text-[11px] text-gray-400">No date changes recorded yet.</div>
+                            </>
+                          )}
+                        </div>
+                      )
+                    })()}
 
                     {/* ── Decision panel ──────────────────────────────────── */}
                     {/* DP1: Tier-1 action picker (recommendation-first, equal-weight cards). State A and B render the same picker. */}
@@ -11973,7 +12056,43 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                       <div className="border-b border-gray-100 px-6 py-4 shrink-0">
                         {true ? (
                           <>
-                            {drawerGroup.type === 'fill_risk' ? (() => {
+                            {drawerGroup.type === 'message' ? (() => {
+                              // Buyer-initiated outreach (chase / pre-empt / performance review).
+                              // Same Next-step scaffold as every other thread — the recommended
+                              // action is simply "send the message", context-adapted by intent.
+                              const ctx = drawerGroup.messageContext ?? 'chase'
+                              const copy = ctx === 'preempt'
+                                ? { rec: 'Pre-empt with supplier', label: 'Send pre-empt message', consequence: 'Agent-drafted note to confirm dates and the full ordered quantity before delivery', why: `${drawerSup.name} isn't late yet — confirming dates and quantity now is cheaper than reacting once an order slips.` }
+                                : ctx === 'performance'
+                                ? { rec: 'Request a delivery plan', label: 'Send performance-review note', consequence: 'Agent-drafted note requesting an on-time, in-full delivery plan as part of a performance review', why: `Part of an active review of ${drawerSup.name}'s recent performance (OTR ${drawerSup.onTimeRate}%, avg delay ${drawerSup.avgDelayDays}d).` }
+                                : { rec: 'Chase supplier', label: 'Send chase message', consequence: 'Agent-drafted follow-up asking the supplier to confirm current status, date and full quantity', why: `Direct outreach to ${drawerSup.name} on the open order${drawerGroup.pos.length === 1 ? '' : 's'} in this conversation.` }
+                              return (
+                                <>
+                                  <div className="mb-3">
+                                    <div className="text-[13px] font-semibold text-gray-900">Next step</div>
+                                    <div className="text-[11px] text-gray-500 mt-0.5">Recommended: {copy.rec}</div>
+                                    <p className="text-[12px] text-gray-700 leading-relaxed mt-2">{copy.why}</p>
+                                  </div>
+                                  <ActionRecommendationRow
+                                    recommendedKey="chase"
+                                    selectedKey="chase"
+                                    options={[
+                                      { key: 'chase', label: copy.label, consequence: copy.consequence, onClick: () => { if (drawerCardKey) setSelectedActionPill(prev => ({ ...prev, [drawerCardKey]: 'chase' })) } },
+                                    ]}
+                                  />
+                                  <div className="flex items-center gap-3 mt-3">
+                                    {isSnoozeConfirm ? (
+                                      <span className="text-[11px] text-gray-600">Reappear in 3 days?
+                                        <button onClick={() => { setSnoozedCards(prev => { const n = new Set(prev); n.add(drawerCardKey!); return n }); setDrawerCardKey(null) }} className="ml-1.5 font-semibold text-indigo-600 hover:text-indigo-800">Confirm</button>
+                                        <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: false }))} className="ml-1.5 text-gray-400 hover:text-gray-600">Cancel</button>
+                                      </span>
+                                    ) : (
+                                      <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors">Snooze 3 days</button>
+                                    )}
+                                  </div>
+                                </>
+                              )
+                            })() : drawerGroup.type === 'fill_risk' ? (() => {
                               // Predicted under-fulfilment. The ONLY recommended action is a
                               // pre-emptive supplier comms to confirm the full quantity — we do
                               // NOT re-spec or gross up the order. Inferred from history.
@@ -12120,11 +12239,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                     const selectedKey = drawerCurrentPill === 'chase' ? 'chase' : drawerDecChoice
                                     return (
                                       <>
-                                        <DateChangeAttribution
-                                          pos={drawerGroup.pos}
-                                          override={dateChangeOverrides}
-                                          onChange={(id, causedBy, reasonCode) => setDateChangeOverrides(prev => ({ ...prev, [id]: { causedBy, reasonCode } }))}
-                                        />
                                         <div className="mb-3">
                                           <div className="text-[13px] font-semibold text-gray-900">Next step</div>
                                           <div className="text-[11px] text-gray-500 mt-0.5">Recommended: {recLbl}</div>
@@ -12247,11 +12361,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                         : ''
                                       return (
                                         <>
-                                          <DateChangeAttribution
-                                            pos={drawerGroup.pos}
-                                            override={dateChangeOverrides}
-                                            onChange={(id, causedBy, reasonCode) => setDateChangeOverrides(prev => ({ ...prev, [id]: { causedBy, reasonCode } }))}
-                                          />
                                           <div className="mb-3">
                                             <div className="text-[13px] font-semibold text-gray-900">Next step</div>
                                             <div className="text-[11px] text-gray-500 mt-0.5">Recommended: {recLbl}</div>
@@ -12405,30 +12514,9 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                       </div>
                     )}
 
-                    {/* DP2: State D — reply received decision panel */}
+                    {/* DP2: State D — reply received. Folded into the standard Next-step pattern. */}
                     {drawerUiState === 'D' && (
                       <div className="border-b border-gray-100 px-6 py-4 shrink-0 space-y-3">
-                        <p className="text-[11px] font-semibold text-gray-700">Supplier replied — what would you like to do?</p>
-                        <div className="grid grid-cols-2 gap-2">
-                          {([
-                            { key: 'apply_changes'   as const, label: 'Apply proposed changes', sub: 'Accept & confirm in writing',  cls: 'border-green-200 hover:border-green-400 hover:bg-green-50',   selCls: 'border-green-500 bg-green-50 ring-2 ring-green-200'   },
-                            { key: 'counter_propose' as const, label: 'Counter-propose',         sub: 'Push back with alternative',   cls: 'border-amber-200 hover:border-amber-400 hover:bg-amber-50',   selCls: 'border-amber-500 bg-amber-50 ring-2 ring-amber-200'   },
-                            { key: 'reject_escalate' as const, label: 'Reject and escalate',    sub: 'Refuse, escalate internally',  cls: 'border-red-200 hover:border-red-400 hover:bg-red-50',         selCls: 'border-red-500 bg-red-50 ring-2 ring-red-200'         },
-                            { key: 'reply_question'  as const, label: 'Reply with question',    sub: 'Need more info first',         cls: 'border-indigo-200 hover:border-indigo-400 hover:bg-indigo-50', selCls: 'border-indigo-500 bg-indigo-50 ring-2 ring-indigo-200' },
-                          ]).map(opt => (
-                            <button
-                              key={opt.key}
-                              onClick={() => {
-                                setDp2Action(prev => ({ ...prev, [drawerCardKey!]: opt.key }))
-                                setDp2Draft(prev => { const n = { ...prev }; delete n[drawerCardKey!]; return n })
-                              }}
-                              className={`border-2 rounded-xl p-3 text-left transition-all ${currentDp2Action === opt.key ? opt.selCls : opt.cls}`}
-                            >
-                              <div className="text-[12px] font-bold text-gray-800 leading-tight">{opt.label}</div>
-                              <div className="text-[10px] text-gray-500 mt-0.5 leading-tight">{opt.sub}</div>
-                            </button>
-                          ))}
-                        </div>
                         {drawerMuts.length > 0 && (
                           <div className="bg-blue-50/70 border border-blue-100 rounded-xl px-3 py-2.5 space-y-1.5">
                             <div className="flex items-center gap-1.5">
@@ -12448,6 +12536,24 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                             </div>
                           </div>
                         )}
+                        <div>
+                          <div className="text-[13px] font-semibold text-gray-900">Next step</div>
+                          <div className="text-[11px] text-gray-500 mt-0.5">Recommended: Apply proposed changes</div>
+                          <p className="text-[12px] text-gray-700 leading-relaxed mt-2">{drawerSup.name} has replied{drawerMuts.length > 0 ? ' with proposed changes' : ''}. Applying is the fastest route to a confirmed commitment; counter-propose only if it erodes cover or margin, and reserve escalation for an unacceptable response.</p>
+                        </div>
+                        <ActionRecommendationRow
+                          recommendedKey="apply_changes"
+                          selectedKey={currentDp2Action}
+                          options={([
+                            { key: 'apply_changes',   label: 'Apply proposed changes', consequence: 'Accept the proposed dates/terms and confirm in writing' },
+                            { key: 'counter_propose', label: 'Counter-propose',         consequence: 'Push back with an alternative — protects cover / margin' },
+                            { key: 'reject_escalate', label: 'Reject and escalate',     consequence: 'Refuse and escalate internally — for an unacceptable proposal' },
+                            { key: 'reply_question',  label: 'Reply with question',     consequence: 'Ask for missing detail before deciding' },
+                          ] as const).map(o => ({
+                            key: o.key, label: o.label, consequence: o.consequence,
+                            onClick: () => { setDp2Action(prev => ({ ...prev, [drawerCardKey!]: o.key })); setDp2Draft(prev => { const n = { ...prev }; delete n[drawerCardKey!]; return n }) },
+                          }))}
+                        />
                         <div className="flex items-center gap-3">
                           <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors">Snooze 3 days</button>
                         </div>
@@ -12460,30 +12566,27 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                       </div>
                     )}
 
-                    {/* DP3: State F — no reply overdue decision panel */}
+                    {/* DP3: State F — no reply overdue. Folded into the standard Next-step pattern. */}
                     {drawerUiState === 'F' && (
                       <div className="border-b border-amber-100 bg-amber-50/40 px-6 py-4 shrink-0 space-y-3">
-                        <p className="text-[11px] font-semibold text-amber-800">No reply from {drawerSup.name} after {Math.max(daysSinceChase, 3)} days — what would you like to do?</p>
-                        <div className="grid grid-cols-2 gap-2">
-                          {([
-                            { key: 'followup_chase'   as const, label: 'Send follow-up chase',    sub: 'Second, more urgent chase',    cls: 'border-amber-200 hover:border-amber-400 hover:bg-amber-50',   selCls: 'border-amber-500 bg-amber-50 ring-2 ring-amber-200'   },
-                            { key: 'escalate_manager' as const, label: 'Escalate to manager',     sub: 'Draft internal notification',  cls: 'border-red-200 hover:border-red-400 hover:bg-red-50',         selCls: 'border-red-500 bg-red-50 ring-2 ring-red-200'         },
-                            { key: 'switch_phone'     as const, label: 'Switch to phone',         sub: 'Log a call instead',           cls: 'border-indigo-200 hover:border-indigo-400 hover:bg-indigo-50', selCls: 'border-indigo-500 bg-indigo-50 ring-2 ring-indigo-200' },
-                            { key: 'accept_silence'   as const, label: 'Accept silence & close',  sub: 'Close with a note',            cls: 'border-gray-200 hover:border-gray-400 hover:bg-gray-50',       selCls: 'border-gray-500 bg-gray-50 ring-2 ring-gray-200'       },
-                          ]).map(opt => (
-                            <button
-                              key={opt.key}
-                              onClick={() => {
-                                setDp3Action(prev => ({ ...prev, [drawerCardKey!]: opt.key }))
-                                setDp3Draft(prev => { const n = { ...prev }; delete n[drawerCardKey!]; return n })
-                              }}
-                              className={`border-2 rounded-xl p-3 text-left transition-all ${currentDp3Action === opt.key ? opt.selCls : opt.cls}`}
-                            >
-                              <div className="text-[12px] font-bold text-gray-800 leading-tight">{opt.label}</div>
-                              <div className="text-[10px] text-gray-500 mt-0.5 leading-tight">{opt.sub}</div>
-                            </button>
-                          ))}
+                        <div>
+                          <div className="text-[13px] font-semibold text-gray-900">Next step</div>
+                          <div className="text-[11px] text-amber-700 mt-0.5">Recommended: Send follow-up chase</div>
+                          <p className="text-[12px] text-gray-700 leading-relaxed mt-2">No reply from {drawerSup.name} after {Math.max(daysSinceChase, 3)} days. A firmer follow-up usually lands; escalate to a manager if it stays silent, switch to phone for urgent cover, or accept the silence and close if it no longer matters.</p>
                         </div>
+                        <ActionRecommendationRow
+                          recommendedKey="followup_chase"
+                          selectedKey={currentDp3Action}
+                          options={([
+                            { key: 'followup_chase',   label: 'Send follow-up chase',   consequence: 'A second, more urgent chase to the supplier' },
+                            { key: 'escalate_manager', label: 'Escalate to manager',    consequence: 'Draft an internal notification to your manager' },
+                            { key: 'switch_phone',     label: 'Switch to phone',        consequence: 'Log a call instead of waiting on email' },
+                            { key: 'accept_silence',   label: 'Accept silence & close', consequence: 'Close the action with a note recording the silence' },
+                          ] as const).map(o => ({
+                            key: o.key, label: o.label, consequence: o.consequence,
+                            onClick: () => { setDp3Action(prev => ({ ...prev, [drawerCardKey!]: o.key })); setDp3Draft(prev => { const n = { ...prev }; delete n[drawerCardKey!]; return n }) },
+                          }))}
+                        />
                       </div>
                     )}
 
@@ -12581,7 +12684,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
 
                           /* ── Type B: inbound email ──────────────────────── */
                           if (entry.kind === 'inbound') return (
-                            <div key={entry.id} className="flex justify-start">
+                            <div key={entry.id} className="flex justify-start animate-reply-in">
                               <div className="max-w-[82%] space-y-1.5">
                                 <div className="flex items-center gap-1.5 text-[10px] text-gray-400">
                                   <span className="font-semibold text-gray-700">{entry.sender}</span>
@@ -12597,7 +12700,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
 
                           /* ── Type C: agent summary ──────────────────────── */
                           if (entry.kind === 'agent_summary') return (
-                            <div key={entry.id} className="border-l-2 border-blue-300 bg-blue-50/50 rounded-r-xl px-3.5 py-3 space-y-1.5">
+                            <div key={entry.id} className="border-l-2 border-blue-300 bg-blue-50/50 rounded-r-xl px-3.5 py-3 space-y-1.5 animate-reply-in">
                               <div className="flex items-center gap-1.5 text-[10px] text-blue-600">
                                 <Bot className="w-3 h-3 shrink-0" />
                                 <span className="font-bold">✦ Agent summary</span>
@@ -12675,9 +12778,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                           </div>
                           <pre className="text-[11px] text-gray-600 whitespace-pre-wrap font-sans leading-relaxed p-3.5 bg-gray-50/40 select-text">{actionDraftBody}</pre>
                         </div>
-                        <div className="flex items-center justify-end">
-                          <button onClick={() => handleSimulateReply(drawerGroup)} className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-gray-500 transition-colors"><MessageSquare className="w-3 h-3" />Simulate reply (demo)</button>
-                        </div>
                       </div>
                     )}
 
@@ -12753,21 +12853,28 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                         </button>
                         <div className="flex items-center justify-between text-[11px] text-gray-400">
                           <button className="hover:text-gray-600 transition-colors">Save draft</button>
-                          <button onClick={() => handleSimulateReply(drawerGroup)} className="flex items-center gap-1 hover:text-gray-500 transition-colors"><MessageSquare className="w-3 h-3" />Simulate reply (demo)</button>
                         </div>
                       </div>
                     )}
 
-                    {/* State C: awaiting reply — status banner + secondary actions */}
+                    {/* State C: awaiting reply — lifelike sent + auto-arriving reply (no demo controls) */}
                     {drawerUiState === 'C' && (
                       <div className="shrink-0 border-t border-gray-100 px-6 py-4 bg-white space-y-3">
-                        <div className="flex items-center justify-center gap-2 text-[11px] text-gray-400 bg-gray-50 rounded-xl py-3">
-                          <Clock className="w-3.5 h-3.5 shrink-0 text-gray-300" />
-                          <span>Sent {drawerThread ? new Date(drawerThread.startedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'} · awaiting supplier reply</span>
+                        <div className="flex flex-col items-center justify-center gap-2 bg-gray-50 rounded-xl py-3.5">
+                          <div className="flex items-center gap-2 text-[11px] text-gray-500">
+                            <Check className="w-3.5 h-3.5 shrink-0 text-green-500" />
+                            <span>Sent {drawerThread ? new Date(drawerThread.startedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5 text-[11px] text-gray-400">
+                            <span>{drawerSup.name} is replying</span>
+                            <span className="flex items-end gap-0.5 h-3">
+                              <span className="typing-dot w-1 h-1 rounded-full bg-gray-400" />
+                              <span className="typing-dot w-1 h-1 rounded-full bg-gray-400" />
+                              <span className="typing-dot w-1 h-1 rounded-full bg-gray-400" />
+                            </span>
+                          </div>
                         </div>
-                        <div className="flex items-center justify-center gap-4">
-                          <button onClick={() => handleNoReplyTrigger(drawerGroup)} className="text-[11px] text-amber-600 hover:text-amber-800 font-medium transition-colors">Mark: no reply (demo)</button>
-                          <span className="text-gray-200">·</span>
+                        <div className="flex items-center justify-center">
                           <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: true }))} className="text-[11px] text-gray-500 hover:text-gray-700 font-medium transition-colors">Snooze 3 days</button>
                         </div>
                         {isSnoozeConfirm && (
@@ -12776,9 +12883,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                             <button onClick={() => setSnoozeConfirmOpen(prev => ({ ...prev, [drawerCardKey!]: false }))} className="ml-1.5 text-gray-400 hover:text-gray-600">Cancel</button>
                           </div>
                         )}
-                        <button onClick={() => handleSimulateReply(drawerGroup)} className="w-full h-7 rounded-lg border border-dashed border-gray-200 text-[10px] font-medium text-gray-400 hover:text-gray-500 hover:bg-gray-50 transition-colors flex items-center justify-center gap-1.5">
-                          <MessageSquare className="w-3 h-3" />Simulate reply (demo)
-                        </button>
                       </div>
                     )}
 
@@ -13028,7 +13132,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
             : filtered
           const poThead = (
             <thead className="bg-gray-50 border-b border-gray-100">
-              <tr>{['PO Number','Supplier','Product','Status','Risk','Delivery','Predicted landing','Value','Freight'].map(h => <th key={h} className="px-4 py-3 text-left font-semibold text-gray-500 whitespace-nowrap">{h}</th>)}</tr>
+              <tr>{['PO Number','Supplier','Product','Status','Risk','Delivery','Predicted landing','Value','Freight',''].map((h, i) => <th key={h || i} className="px-4 py-3 text-left font-semibold text-gray-500 whitespace-nowrap">{h}</th>)}</tr>
             </thead>
           )
           const renderPoRow = (po: PO) => {
@@ -13067,6 +13171,9 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                 </td>
                 <td className="px-4 py-3 text-gray-700 font-medium">{po.orderValue}</td>
                 <td className="px-4 py-3"><span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${po.freight === 'Air' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>{po.freight}</span></td>
+                <td className="px-4 py-3 text-right" onClick={e => e.stopPropagation()}>
+                  <button onClick={() => startMessageForPO(po, 'allpos')} title="Message supplier about this PO" aria-label="Message supplier about this PO" className="inline-flex items-center justify-center h-7 w-7 rounded-lg border border-indigo-200 text-indigo-700 hover:bg-indigo-50"><Mail className="w-3.5 h-3.5" /></button>
+                </td>
               </tr>
             )
           }
@@ -13150,7 +13257,11 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                     const nm = getSupplier(supId)?.name ?? supId
                     const val = ps.reduce((s, po) => s + parseOrderVal(po.orderValue), 0)
                     return (
-                      <SupplierGroup key={supId} supplierName={nm} count={ps.length} unit="PO" valueLabel={`£${Math.round(val).toLocaleString('en-GB')}`}>
+                      <SupplierGroup key={supId} supplierName={nm} count={ps.length} unit="PO" valueLabel={`£${Math.round(val).toLocaleString('en-GB')}`}
+                        headerAction={
+                          <button onClick={() => startMessageForSupplier(supId, 'allpos')} title="Message this supplier about all their open POs (combined email)" className="inline-flex items-center gap-1.5 h-7 px-3 rounded-lg bg-violet-600 text-white text-[11px] font-semibold hover:bg-violet-700"><Mail className="w-3 h-3" /> Message supplier</button>
+                        }
+                      >
                         <table className="w-full text-xs">{poThead}<tbody className="divide-y divide-gray-50">{ps.map(renderPoRow)}</tbody></table>
                       </SupplierGroup>
                     )
@@ -13190,6 +13301,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                 supplier={sup}
                 onBack={() => setSelectedSupplierId(null)}
                 pos={ALL_POS}
+                onMessageSupplier={() => { setSelectedSupplierId(null); startMessageForSupplier(sup.id, 'suppliers', 'performance') }}
                 onOpenPO={poId => { setSelectedPOId(poId); setSelectedSupplierId(null) }}
                 onLogActivity={(kind, text) => {
                   // Prototype stub: log against the supplier's first PO so it surfaces in events.
