@@ -1,0 +1,28 @@
+# On every push to main, tell the Ligentia PO Monitoring demo to pull these
+# changes and redeploy (near-instant, instead of waiting for its weekly sync).
+# Uses a repository_dispatch into georgianabogdan-web/ligentia-po-monitoring,
+# authenticated with the LIGENTIA_SYNC_TOKEN repo secret (a token with write
+# access to that repo). No untrusted input is used in any run step.
+name: Notify Ligentia demo
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Ligentia sync + deploy
+        env:
+          TOKEN: ${{ secrets.LIGENTIA_SYNC_TOKEN }}
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/georgianabogdan-web/ligentia-po-monitoring/dispatches \
+            -d '{"event_type":"upstream-updated"}'
