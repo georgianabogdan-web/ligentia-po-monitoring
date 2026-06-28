@@ -1233,12 +1233,7 @@ function ActionQueueCard({
   const today = new Date()
 
   // Same classification rule as POMonitoringView — single source of truth on ALL_POS.
-  const classifyForOverview = (po: PO): 'overdue' | 'at_risk' | 'late_dc' | 'on_track' => {
-    if (po.status === 'Ex-factory delay')     return 'overdue'
-    if (po.status === 'Date change required') return 'at_risk'
-    if (po.status === 'Late DC booking')      return 'late_dc'
-    return 'on_track'
-  }
+  const classifyForOverview = severityOf
   const overduePOs     = ALL_POS.filter(p => classifyForOverview(p) === 'overdue')
   const atRiskPOs      = ALL_POS.filter(p => classifyForOverview(p) === 'at_risk')
   const preDispatchPOs = ALL_POS.filter(p => classifyForOverview(p) === 'late_dc')
@@ -6085,6 +6080,109 @@ function WhyQtyModal({ p, onClose }: { p: ReorderRecommendation; onClose: () => 
   )
 }
 
+// ── Shared severity summary bar ──────────────────────────────────────────────
+// ONE triage headline for PO Monitoring tabs: a loud hero £-at-risk + reconciled
+// denominator, plus the severity tiers as colour-coded CLICKABLE segments. The
+// tiers double as the at-a-glance severity picture AND the primary severity
+// filter — so "how big is the problem" is never buried, and drilling in is one
+// click. Prototyped on All POs; designed to be reused on Actions / Intake too.
+type SeverityTone = 'red' | 'orange' | 'amber' | 'green' | 'blue' | 'violet'
+interface SeverityTier { key: string; label: string; count: number; value: number; tone: SeverityTone; active: boolean }
+const SEVERITY_TONE: Record<SeverityTone, { idle: string; active: string; dot: string; sub: string }> = {
+  red:    { idle: 'bg-red-50 border-red-200 hover:border-red-300',       active: 'bg-red-600 border-red-600 text-white',       dot: 'bg-red-500',    sub: 'text-red-600' },
+  orange: { idle: 'bg-orange-50 border-orange-200 hover:border-orange-300', active: 'bg-orange-500 border-orange-500 text-white', dot: 'bg-orange-400', sub: 'text-orange-600' },
+  amber:  { idle: 'bg-amber-50 border-amber-200 hover:border-amber-300',  active: 'bg-amber-500 border-amber-500 text-white',   dot: 'bg-amber-400',  sub: 'text-amber-600' },
+  green:  { idle: 'bg-green-50 border-green-200 hover:border-green-300',   active: 'bg-green-600 border-green-600 text-white',   dot: 'bg-green-500',  sub: 'text-green-600' },
+  blue:   { idle: 'bg-blue-50 border-blue-200 hover:border-blue-300',     active: 'bg-blue-600 border-blue-600 text-white',     dot: 'bg-blue-500',   sub: 'text-blue-600' },
+  violet: { idle: 'bg-violet-50 border-violet-200 hover:border-violet-300', active: 'bg-violet-600 border-violet-600 text-white', dot: 'bg-violet-500', sub: 'text-violet-600' },
+}
+// ── Single source of truth for severity + the hero money metric ──────────────
+// One classifier feeds the SeverityBar tiers, the All POs filter, the Actions
+// population AND the row pills, so counts and labels never disagree across tabs.
+type SeverityKey = 'overdue' | 'at_risk' | 'late_dc' | 'on_track'
+function severityOf(po: PO): SeverityKey {
+  if (po.status === 'Ex-factory delay')     return 'overdue'
+  if (po.status === 'Date change required') return 'at_risk'
+  if (po.status === 'Late DC booking')      return 'late_dc'
+  return 'on_track'
+}
+const SEVERITY_META: Record<SeverityKey, { label: string; tone: SeverityTone }> = {
+  overdue:  { label: 'Overdue',  tone: 'red' },
+  at_risk:  { label: 'At risk',  tone: 'orange' },
+  late_dc:  { label: 'Late DC',  tone: 'amber' },
+  on_track: { label: 'On track', tone: 'green' },
+}
+// £ predicted sales-at-risk across a set of POs — the ONE hero metric everywhere.
+const salesAtRiskOf = (pos: PO[]) => pos.reduce((s, p) => s + (PO_PREDICTIONS[p.id]?.missedSalesRisk.estimatedLostRevenue ?? 0), 0)
+
+function SeverityBar({ heroValue, heroLabel, denominator, tiers, onTier }: {
+  heroValue: number; heroLabel: string; denominator: React.ReactNode
+  tiers: SeverityTier[]; onTier: (key: string) => void
+}) {
+  return (
+    <div className="bg-white border border-gray-100 rounded-2xl shadow-sm p-5 flex items-center gap-6 flex-wrap">
+      {/* Hero — the single number that answers "how bad is it" */}
+      <div className="shrink-0">
+        <div className="text-3xl font-bold text-red-600 leading-none">£{heroValue.toLocaleString()}</div>
+        <div className="text-[11px] font-bold text-gray-500 uppercase tracking-wide mt-1.5">{heroLabel}</div>
+        <div className="text-[11px] text-gray-400 mt-1">{denominator}</div>
+      </div>
+      <div className="w-px self-stretch bg-gray-200" />
+      {/* Severity tiers — the at-a-glance breakdown AND the primary filter */}
+      <div className="flex items-stretch gap-2 flex-1 flex-wrap min-w-[280px]">
+        {tiers.map(t => {
+          const tone = SEVERITY_TONE[t.tone]
+          return (
+            <button key={t.key} onClick={() => onTier(t.key)} aria-pressed={t.active}
+              title={`${t.active ? 'Clear filter' : `Filter to ${t.label}`} · ${t.count} PO${t.count === 1 ? '' : 's'}`}
+              className={`flex-1 min-w-[118px] text-left rounded-xl border px-3 py-2.5 transition-all ${t.active ? tone.active : `${tone.idle} text-gray-800`}`}>
+              <div className="flex items-center gap-1.5">
+                {!t.active && <span className={`w-1.5 h-1.5 rounded-full ${tone.dot}`} />}
+                <span className={`text-[10px] font-bold uppercase tracking-wide ${t.active ? 'text-white/90' : 'text-gray-500'}`}>{t.label}</span>
+              </div>
+              <div className="text-2xl font-bold mt-0.5 leading-none">{t.count.toLocaleString()}</div>
+              <div className={`text-[11px] font-semibold mt-1 ${t.active ? 'text-white/90' : tone.sub}`}>
+                {t.value > 0 ? `£${t.value.toLocaleString()} at risk` : '—'}
+              </div>
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ── Shared facet chips ───────────────────────────────────────────────────────
+// Compact, clickable filter chips (count + label) for a SECONDARY facet — the
+// reusable generalisation of the old PO-health chip row. Same control type used
+// wherever a quick multi-option filter is needed, so we stop mixing dropdowns
+// and chips for the same job. `null` = the "all / cleared" state.
+interface FacetOption { key: string; label: string; count: number; tone?: SeverityTone }
+function FacetChips({ label, options, value, onChange }: {
+  label?: string; options: FacetOption[]; value: string | null; onChange: (key: string | null) => void
+}) {
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap">
+      {label && <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wide mr-0.5">{label}</span>}
+      {options.map(o => {
+        const active = value === o.key
+        const tone = o.tone ? SEVERITY_TONE[o.tone] : null
+        return (
+          <button key={o.key} onClick={() => onChange(active ? null : o.key)} aria-pressed={active}
+            title={active ? 'Clear filter' : `Filter to ${o.label}`}
+            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold border transition-colors ${
+              active
+                ? (tone ? tone.active + ' text-white' : 'bg-indigo-600 text-white border-indigo-600')
+                : (tone ? `${tone.idle} text-gray-700` : 'bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100')
+            }`}>
+            <span className="font-bold">{o.count}</span> {o.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 // ── Shared "By supplier" group shell ─────────────────────────────────────────
 // ONE grouping pattern used by BOTH the Reorder "By supplier" view and the PO
 // Monitoring Actions "Group by supplier" view: a supplier card with a header
@@ -10824,6 +10922,7 @@ function poIntakeKind(poId: string): 'New' | 'Rebuy' {
 function IntakeForecastView({ onOpenPO, onMessagePO }: { onOpenPO: (poId: string) => void; onMessagePO?: (poId: string) => void }) {
   const WEEKS = 12
   const [catFilter, setCatFilter] = useState('all')
+  const [intakeRisk, setIntakeRisk] = useState<string | null>(null)   // severity-tier filter
   const [openWeek, setOpenWeek] = useState<number | null>(null)
   // Top at-risk table sort — the title + header indicator reflect this.
   const [exSort, setExSort] = useState<'sales' | 'days'>('sales')
@@ -10844,7 +10943,9 @@ function IntakeForecastView({ onOpenPO, onMessagePO }: { onOpenPO: (poId: string
 
   // Each open PO → its predicted landing week index (overdue/past → week 0).
   type Row = { po: PO; pred: PoPrediction; kind: 'New' | 'Rebuy'; weekIdx: number; atRisk: boolean }
-  const rows: Row[] = ALL_POS
+  // Base set = category scope (drives the SeverityBar tier counts); `rows` then
+  // narrows to the selected severity tier so the whole view drills in together.
+  const baseRows: Row[] = ALL_POS
     .filter(po => po.status !== 'Delivered')
     .filter(po => catFilter === 'all' || po.category === catFilter)
     .map(po => {
@@ -10856,6 +10957,7 @@ function IntakeForecastView({ onOpenPO, onMessagePO }: { onOpenPO: (poId: string
       return { po, pred, kind: poIntakeKind(po.id), weekIdx: idx, atRisk }
     })
     .filter((r): r is Row => r !== null)
+  const rows: Row[] = intakeRisk ? baseRows.filter(r => r.pred.riskBand === intakeRisk) : baseRows
 
   // Per-week aggregation. Anything landing beyond the window collapses into a
   // final "12+" bucket so far-out slippage is still visible, never dropped.
@@ -10892,26 +10994,40 @@ function IntakeForecastView({ onOpenPO, onMessagePO }: { onOpenPO: (poId: string
   }
   const sortArrow = (col: 'sales' | 'days') => exSort === col ? (exDir === 'desc' ? ' ↓' : ' ↑') : ''
 
-  const totalAtRisk = rows.filter(r => r.atRisk).length
-  const totalLostRev = rows.reduce((s, r) => s + r.pred.missedSalesRisk.estimatedLostRevenue, 0)
+  // Severity headline — risk-band tiers over the category scope (baseRows).
+  const baseAtRisk  = baseRows.filter(r => r.atRisk).length
+  const baseLostRev = baseRows.reduce((s, r) => s + r.pred.missedSalesRisk.estimatedLostRevenue, 0)
+  const bandRows = (b: string) => baseRows.filter(r => r.pred.riskBand === b)
+  const intakeTiers: SeverityTier[] = ([
+    ['Critical', 'red'], ['High', 'orange'], ['Medium', 'amber'], ['Low', 'green'],
+  ] as [string, SeverityTone][]).map(([b, tone]) => {
+    const rs = bandRows(b)
+    return { key: b, label: b, tone, count: rs.length, value: rs.reduce((s, r) => s + r.pred.missedSalesRisk.estimatedLostRevenue, 0), active: intakeRisk === b }
+  })
 
   return (
     <div className="space-y-4">
-      {/* Summary header — net totals, but immediately paired with the at-risk count */}
+      {/* Summary header — title + category scope; the loud numbers live in the bar */}
       <div className="flex items-end justify-between flex-wrap gap-3">
         <div>
           <div className="text-sm font-bold text-gray-900">Intake Forecast — next {WEEKS} weeks</div>
-          <div className="text-[11px] text-gray-500 mt-0.5">
-            Predicted landings (not stated dates). {rows.length} open POs ·{' '}
-            <span className="font-semibold text-red-600">{totalAtRisk} at risk</span> ·{' '}
-            <span className="font-semibold text-red-600">£{totalLostRev.toLocaleString('en-GB')}</span> sales at risk
-          </div>
+          <div className="text-[11px] text-gray-500 mt-0.5">Predicted landings (not stated dates) across the next {WEEKS} weeks.</div>
         </div>
         <select value={catFilter} onChange={e => { setCatFilter(e.target.value); setOpenWeek(null) }} className="h-8 border border-gray-200 rounded-lg text-xs px-2 focus:outline-none">
           <option value="all">All categories</option>
           {categories.map(c => <option key={c} value={c}>{c}</option>)}
         </select>
       </div>
+
+      {/* Severity headline — loud £ sales-at-risk + clickable risk-band tiers that
+          drill the whole forecast (exception strip, weekly bars, week detail). */}
+      <SeverityBar
+        heroValue={baseLostRev}
+        heroLabel="Sales at risk"
+        denominator={<><span className="font-bold text-gray-600">{baseAtRisk.toLocaleString()}</span> at risk · of <span className="font-bold text-gray-600">{baseRows.length.toLocaleString()}</span> open POs landing in {WEEKS}w</>}
+        tiers={intakeTiers}
+        onTier={key => setIntakeRisk(intakeRisk === key ? null : key)}
+      />
 
       {/* Exception strip — worst lines by missed-sales impact, ALWAYS visible.
           This is the anti-smoothing guardrail: the worst lines surface even when
@@ -11108,7 +11224,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
   const [snoozedCards,     setSnoozedCards]     = useState<Set<string>>(new Set())
   const [selectedSupplierId, setSelectedSupplierId] = useState<string | null>(null)
   const [actTypeFilter,    setActTypeFilter]    = useState('all')
-  const [urgencyFilter,    setUrgencyFilter]    = useState('all')
   const [sortMode,         setSortMode]         = useState<'missed_sales' | 'value' | 'overdue'>('missed_sales')
   // Actions: top-level mode (reactive vs pre-emptive) + grouping + optimistic toast.
   const [actionMode,       setActionMode]       = useState<'now' | 'predicted' | 'all'>('now')
@@ -11148,12 +11263,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
   const selectedPO = selectedPOId ? ALL_POS.find(p => p.id === selectedPOId) ?? null : null
   const today = new Date()
 
-  const classifyPO = (po: PO): 'overdue' | 'at_risk' | 'late_dc' | 'on_track' => {
-    if (po.status === 'Ex-factory delay')     return 'overdue'
-    if (po.status === 'Date change required') return 'at_risk'
-    if (po.status === 'Late DC booking')      return 'late_dc'
-    return 'on_track'
-  }
+  const classifyPO = severityOf
 
   const overduePOs     = ALL_POS.filter(p => classifyPO(p) === 'overdue')
   const atRiskPOs      = ALL_POS.filter(p => classifyPO(p) === 'at_risk')
@@ -11817,18 +11927,29 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           )
           const modePredicted  = actionMode === 'predicted'
 
-          const filtered = modeGroups.filter(g => {
-            if (actedCards.has(cardKey(g))) return false   // optimistic clear after inline approve
-            if (actTypeFilter === 'chase'       && g.type !== 'overdue')  return false
-            if (actTypeFilter === 'date_change' && g.type !== 'at_risk')  return false
-            if (actTypeFilter === 'dc_booking'  && g.type !== 'late_dc')  return false
-            if (actTypeFilter === 'fill_risk'   && g.type !== 'fill_risk') return false
-            if (actTypeFilter === 'decision'    && getCardState(g) !== 'decision-needed') return false
-            if (urgencyFilter  === 'overdue'    && g.type !== 'overdue')  return false
-            if (urgencyFilter  === 'at_risk'    && g.type !== 'at_risk')  return false
-            if (urgencyFilter  === 'routine'    && g.type !== 'late_dc')  return false
-            return true
+          // Issue-type facet — ONE filter axis (the old Type + Urgency dropdowns were
+          // two names for the same thing). Each tier is a predicate that drives BOTH
+          // the SeverityBar count and the filter, so they can never disagree.
+          const ACT_TIER_META: Record<string, { label: string; tone: SeverityTone; pred: (g: ActionGroup) => boolean }> = {
+            decision:    { label: 'Decisions',     tone: 'red',    pred: g => getCardState(g) === 'decision-needed' },
+            chase:       { label: 'Overdue chase', tone: 'orange', pred: g => g.type === 'overdue' },
+            date_change: { label: 'Date change',   tone: 'amber',  pred: g => g.type === 'at_risk' },
+            dc_booking:  { label: 'DC booking',    tone: 'blue',   pred: g => g.type === 'late_dc' },
+            predicted:   { label: 'Predicted slip', tone: 'violet', pred: g => g.type === 'predicted' },
+            fill_risk:   { label: 'Fill risk',     tone: 'violet', pred: g => g.type === 'fill_risk' },
+          }
+          const tierKeys = actionMode === 'predicted' ? ['predicted', 'fill_risk']
+            : actionMode === 'now' ? ['decision', 'chase', 'date_change', 'dc_booking']
+            : ['decision', 'chase', 'date_change', 'dc_booking', 'predicted', 'fill_risk']
+          const liveGroups = modeGroups.filter(g => !actedCards.has(cardKey(g)))   // optimistic clear after inline approve
+          const filtered = liveGroups.filter(g => actTypeFilter === 'all' || (ACT_TIER_META[actTypeFilter]?.pred(g) ?? true))
+          const actionTiers: SeverityTier[] = tierKeys.map(k => {
+            const m = ACT_TIER_META[k]
+            const gs = liveGroups.filter(m.pred)
+            return { key: k, label: m.label, tone: m.tone, count: gs.length, value: salesAtRiskOf(gs.flatMap(g => g.pos)), active: actTypeFilter === k }
           })
+          const actionHeroValue = salesAtRiskOf(liveGroups.flatMap(g => g.pos))
+          const actionSuppliers = new Set(liveGroups.map(g => g.supplierId)).size
           const sorted = [...filtered].sort((a, b) => {
             if (sortMode === 'value')   return groupValue(b) - groupValue(a)
             if (sortMode === 'overdue') return groupMaxOverdue(b) - groupMaxOverdue(a)
@@ -12102,12 +12223,10 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           <>
             {!drawerOpen && (<>
             {actionToast && <Toast message={actionToast} onDone={() => setActionToast(null)} />}
-            {/* ── One control row. View-shaping controls (left): the MODE segment
-                 (solid filled, the more fundamental cut) followed by the
-                 Individual ⇄ By supplier grouping segment (lighter peer — same
-                 segmented type, subordinate weight). ‖ divider ‖ then the
-                 recessive refine controls: Type, Urgency, and Sort (outline
-                 dropdowns). The pill sub-tabs sit above. ── */}
+            {/* ── Control row. View-shaping (left): MODE lens segment + Individual ⇄
+                 By-supplier grouping. ‖ divider ‖ Sort (right). The issue-type facet
+                 lives in the SeverityBar below — one axis, not the old Type+Urgency
+                 dropdowns (which were two names for the same thing). ── */}
             <div className="flex items-center gap-2 flex-wrap mb-1">
               {/* MODE: the lens. Solid, connected segmented switch, active
                   segment filled — deliberately heavier than its grouping peer. */}
@@ -12125,27 +12244,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
               {/* Firm vertical divider — separates the view-shaping controls from refine */}
               <div className="w-px h-7 bg-gray-300 mx-1.5 shrink-0" />
 
-              {/* TIER 3 — refine within the lens. Recessive: light labels, outline dropdowns. */}
-              <div className="flex items-center gap-1.5">
-                <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wide">Type</span>
-                <div className="relative">
-                  <select value={actTypeFilter} onChange={e => setActTypeFilter(e.target.value)}
-                    className="h-8 pl-2.5 pr-7 rounded-lg border border-gray-200 bg-white text-xs text-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-300 appearance-none">
-                    {[['all','All'],['chase','Chase'],['date_change','Date change'],['dc_booking','DC booking'],['fill_risk','Fill risk'],['decision','Decision']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-                  </select>
-                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
-                </div>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wide">Urgency</span>
-                <div className="relative">
-                  <select value={urgencyFilter} onChange={e => setUrgencyFilter(e.target.value)}
-                    className="h-8 pl-2.5 pr-7 rounded-lg border border-gray-200 bg-white text-xs text-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-300 appearance-none">
-                    {[['all','Any'],['overdue','Overdue'],['at_risk','At risk'],['routine','Routine']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-                  </select>
-                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
-                </div>
-              </div>
               {/* Sort — recessive outline dropdown, aligned right */}
               <div className="ml-auto flex items-center gap-3 flex-wrap">
                 <div className="flex items-center gap-1.5">
@@ -12161,32 +12259,23 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
               </div>
             </div>
 
-            {/* ── Header: ONE slim stat strip (numbers) + orienting sentence
-                 (pointer). Mode-reactive; zero-value stats dropped. The four KPI
-                 cards and the PO-population pills were removed — the pills now
-                 live on All POs, and per-row problem chips carry severity. ── */}
-            {sorted.length > 0 && (() => {
+            {/* ── Severity headline — loud £-at-risk + clickable issue-type tiers
+                 (the at-a-glance size of the problem AND the primary filter), plus
+                 the "Start with" pointer. Replaces the old faint stat strip. ── */}
+            {liveGroups.length > 0 && (() => {
               const decisions = sorted.filter(g => getCardState(g) === 'decision-needed').length
-              const awaiting  = sorted.filter(g => getCardState(g) === 'awaiting-reply').length
-              const predVal = (g: ActionGroup) => g.type === 'fill_risk'
-                ? g.pos.reduce((s, p) => { const fr = FILL_PREDICTIONS[p.id]; const unit = p.quantity > 0 ? parseOrderVal(p.orderValue) / p.quantity : 0; return s + (fr ? Math.round(fr.predictedShortfallUnits * unit) : 0) }, 0)
-                : g.pos.reduce((s, p) => s + (PO_PREDICTIONS[p.id]?.missedSalesRisk.estimatedLostRevenue ?? 0), 0)
-              const totalVal = modePredicted
-                ? sorted.reduce((s, g) => s + predVal(g), 0)
-                : sorted.reduce((s, g) => s + g.pos.reduce((ss, p) => ss + parseOrderVal(p.orderValue), 0), 0)
-              const topSup = getSupplier(sorted[0].supplierId)
-              const stats: React.ReactNode[] = []
-              stats.push(<span key="a"><span className="font-bold text-gray-900">{sorted.length}</span> {sorted.length === 1 ? 'action' : 'actions'}</span>)
-              if (decisions > 0) stats.push(<span key="d"><span className="font-bold text-red-700">{decisions}</span> decision{decisions === 1 ? '' : 's'} pending</span>)
-              if (totalVal > 0) stats.push(<span key="v"><span className={`font-bold ${modePredicted ? 'text-amber-600' : 'text-red-600'}`}>{modePredicted ? '~£' : '£'}{totalVal.toLocaleString()}</span> {modePredicted ? 'at risk if it slips' : 'at risk'}</span>)
-              if (awaiting > 0) stats.push(<span key="w"><span className="font-bold text-gray-700">{awaiting}</span> awaiting reply</span>)
+              const topSup = sorted.length > 0 ? getSupplier(sorted[0].supplierId) : null
               return (
-                <div>
-                  <div className="flex items-center gap-x-2 gap-y-1 flex-wrap text-[12px] text-gray-500">
-                    {stats.map((s, i) => <Fragment key={i}>{i > 0 && <span className="text-gray-300">·</span>}{s}</Fragment>)}
-                  </div>
+                <div className="space-y-2">
+                  <SeverityBar
+                    heroValue={actionHeroValue}
+                    heroLabel={modePredicted ? 'Sales at risk if it slips' : 'Sales at risk'}
+                    denominator={<><span className="font-bold text-gray-600">{liveGroups.length.toLocaleString()}</span> action{liveGroups.length === 1 ? '' : 's'} · <span className="font-bold text-gray-600">{actionSuppliers}</span> supplier{actionSuppliers === 1 ? '' : 's'}</>}
+                    tiers={actionTiers}
+                    onTier={key => setActTypeFilter(actTypeFilter === key ? 'all' : key)}
+                  />
                   {topSup && (
-                    <div className="text-[13px] font-semibold text-gray-800 mt-1">
+                    <div className="text-[13px] font-semibold text-gray-800">
                       Start with {topSup.name}{decisions > 0 ? ' — overdue decisions are most urgent' : modePredicted ? ' — pre-empt before it’s late' : ''}
                     </div>
                   )}
@@ -12198,8 +12287,20 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
             {sorted.length === 0 ? (
               <div className="bg-white border border-gray-200 rounded-2xl flex flex-col items-center justify-center py-20 text-gray-400 px-4">
                 <Check className="w-8 h-8 mb-2 text-green-300" />
-                <p className="text-xs font-semibold text-center">No actions match the current filters</p>
-                <p className="text-[10px] mt-1 text-center">Switch mode, adjust filters, or check back later</p>
+                {liveGroups.length === 0 ? (
+                  <>
+                    <p className="text-xs font-semibold text-center text-gray-500">No {modePredicted ? 'predicted' : 'live'} issues — all clear</p>
+                    <p className="text-[10px] mt-1 text-center">Switch the lens above or check back later</p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-xs font-semibold text-center text-gray-500">No actions in this tier</p>
+                    <p className="text-[11px] mt-1 text-center">
+                      <span className="font-semibold text-gray-600">{liveGroups.length.toLocaleString()}</span> action{liveGroups.length === 1 ? '' : 's'} in this lens — pick another tier above or{' '}
+                      <button onClick={() => setActTypeFilter('all')} className="text-indigo-600 font-semibold hover:text-indigo-800 underline">show all</button>.
+                    </p>
+                  </>
+                )}
               </div>
             ) : actionGroupBy === 'supplier' ? (
               <div className="space-y-3">
@@ -13501,15 +13602,18 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
         {/* ── ALL POs ── */}
         {subTab === 'allpos' && (() => {
           const RISK_RANK: Record<string, number> = { Critical: 0, High: 1, Medium: 2, Low: 3 }
-          const filtered = ALL_POS.filter(po => {
-            const cl = classifyPO(po)
-            const statusOk   = poStatusFilter === 'all' || cl === poStatusFilter
+          // Pre-risk set (status + supplier + search) so the Risk chips show contextual counts.
+          const preRisk = ALL_POS.filter(po => {
+            const statusOk   = poStatusFilter === 'all' || classifyPO(po) === poStatusFilter
             const supplierOk = poSupFilter     === 'all' || po.supplierId === poSupFilter
             const searchOk   = !poSearch || po.id.toLowerCase().includes(poSearch.toLowerCase()) || po.product.toLowerCase().includes(poSearch.toLowerCase())
-            const pred       = PO_PREDICTIONS[po.id]
-            const riskOk     = poRiskFilter === 'all' || (pred && pred.riskBand === poRiskFilter)
-            return statusOk && supplierOk && searchOk && riskOk
+            return statusOk && supplierOk && searchOk
           })
+          const filtered = preRisk.filter(po => {
+            const pred = PO_PREDICTIONS[po.id]
+            return poRiskFilter === 'all' || (pred && pred.riskBand === poRiskFilter)
+          })
+          const riskCount = (band: string) => preRisk.filter(po => PO_PREDICTIONS[po.id]?.riskBand === band).length
           const ordered = poRiskSort
             ? [...filtered].sort((a, b) => {
                 const pa = PO_PREDICTIONS[a.id], pb = PO_PREDICTIONS[b.id]
@@ -13570,8 +13674,25 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           const poSupplierOrder: string[] = []
           const poBySupplier = new Map<string, PO[]>()
           ordered.forEach(po => { if (!poBySupplier.has(po.supplierId)) { poBySupplier.set(po.supplierId, []); poSupplierOrder.push(po.supplierId) } poBySupplier.get(po.supplierId)!.push(po) })
+          // Severity headline data — built from the shared severityOf buckets + helper.
+          const tierBuckets: Record<SeverityKey, PO[]> = { overdue: overduePOs, at_risk: atRiskPOs, late_dc: preDispatchPOs, on_track: onTrackPOs }
+          const needAttention = overduePOs.length + atRiskPOs.length + preDispatchPOs.length
+          const severityTiers: SeverityTier[] = (['overdue', 'at_risk', 'late_dc', 'on_track'] as SeverityKey[]).map(k => ({
+            key: k, label: SEVERITY_META[k].label, tone: SEVERITY_META[k].tone,
+            count: tierBuckets[k].length, value: k === 'on_track' ? 0 : salesAtRiskOf(tierBuckets[k]),
+            active: poStatusFilter === k,
+          }))
           return (
             <div className="space-y-4">
+              {/* Severity headline — loud £-at-risk + clickable tiers (replaces the
+                  faint "PO health" chip row and the redundant Status dropdown). */}
+              <SeverityBar
+                heroValue={salesAtRiskOf([...overduePOs, ...atRiskPOs, ...preDispatchPOs])}
+                heroLabel="Sales at risk"
+                denominator={<><span className="font-bold text-gray-600">{needAttention.toLocaleString()}</span> POs need attention · of <span className="font-bold text-gray-600">{ALL_POS.length.toLocaleString()}</span> total</>}
+                tiers={severityTiers}
+                onTier={key => setPoStatusFilter(poStatusFilter === key ? 'all' : key)}
+              />
               <div className="flex items-center gap-3 flex-wrap">
                 {/* Lead view-shaping control — reshapes POs ⇄ supplier groups.
                     Sits left, separated from the refine/filter controls by a divider. */}
@@ -13581,24 +13702,21 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                   <Search className="w-3.5 h-3.5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input value={poSearch} onChange={e => setPoSearch(e.target.value)} placeholder="Search PO or product…" className="pl-8 pr-3 h-8 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-indigo-200 w-52" />
                 </div>
-                <select value={poStatusFilter} onChange={e => setPoStatusFilter(e.target.value)} className="h-8 border border-gray-200 rounded-lg text-xs px-2 focus:outline-none">
-                  <option value="all">All Statuses</option>
-                  <option value="overdue">Ex-factory delay</option>
-                  <option value="at_risk">Date change required</option>
-                  <option value="late_dc">Late DC booking</option>
-                  <option value="on_track">On track</option>
-                </select>
                 <select value={poSupFilter} onChange={e => setPoSupFilter(e.target.value)} className="h-8 border border-gray-200 rounded-lg text-xs px-2 focus:outline-none">
                   <option value="all">All Suppliers</option>
                   {SUPPLIERS.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
-                <select value={poRiskFilter} onChange={e => setPoRiskFilter(e.target.value)} className="h-8 border border-gray-200 rounded-lg text-xs px-2 focus:outline-none">
-                  <option value="all">All Risk</option>
-                  <option value="Critical">Critical risk</option>
-                  <option value="High">High risk</option>
-                  <option value="Medium">Medium risk</option>
-                  <option value="Low">Low risk</option>
-                </select>
+                <FacetChips
+                  label="Risk"
+                  value={poRiskFilter === 'all' ? null : poRiskFilter}
+                  onChange={k => setPoRiskFilter(k ?? 'all')}
+                  options={[
+                    { key: 'Critical', label: 'Critical', count: riskCount('Critical'), tone: 'red' },
+                    { key: 'High',     label: 'High',     count: riskCount('High'),     tone: 'orange' },
+                    { key: 'Medium',   label: 'Medium',   count: riskCount('Medium'),   tone: 'amber' },
+                    { key: 'Low',      label: 'Low',      count: riskCount('Low'),      tone: 'green' },
+                  ]}
+                />
                 <button
                   onClick={() => setPoRiskSort(s => !s)}
                   className={`h-8 px-3 rounded-lg border text-xs font-semibold flex items-center gap-1.5 transition-colors ${poRiskSort ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}
@@ -13609,27 +13727,19 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                   <Download className="w-3.5 h-3.5" /> Export Excel
                 </button>
               </div>
-              {/* PO health — portfolio breakdown of ALL POs (relocated here from
-                  Actions, where it described the wrong population). Click to filter. */}
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wide mr-0.5">PO health</span>
-                {([
-                  { key: 'on_track', label: 'On track', count: onTrackPOs.length,     cls: 'bg-green-50 text-green-700 border-green-200',   active: 'bg-green-600 text-white border-green-600' },
-                  { key: 'late_dc',  label: 'Late DC',  count: preDispatchPOs.length,  cls: 'bg-amber-50 text-amber-700 border-amber-200',   active: 'bg-amber-500 text-white border-amber-500' },
-                  { key: 'at_risk',  label: 'At risk',  count: atRiskPOs.length,       cls: 'bg-orange-50 text-orange-700 border-orange-200',active: 'bg-orange-500 text-white border-orange-500' },
-                  { key: 'overdue',  label: 'Overdue',  count: overduePOs.length,      cls: 'bg-red-50 text-red-700 border-red-200',         active: 'bg-red-600 text-white border-red-600' },
-                ] as const).map(ph => {
-                  const on = poStatusFilter === ph.key
-                  return (
-                    <button key={ph.key} onClick={() => setPoStatusFilter(on ? 'all' : ph.key)} title={`Filter to ${ph.label} POs`}
-                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold border transition-colors ${on ? ph.active : ph.cls}`}>
-                      <span className="font-bold">{ph.count}</span> {ph.label}
-                    </button>
-                  )
-                })}
-              </div>
               {ordered.length === 0 ? (
-                <div className="bg-white border border-gray-100 rounded-2xl shadow-sm text-center text-xs text-gray-400 py-10">No POs match the selected filters</div>
+                <div className="bg-white border border-gray-100 rounded-2xl shadow-sm text-center py-10 px-4">
+                  <p className="text-xs font-semibold text-gray-500">No POs match these filters</p>
+                  <p className="text-[11px] text-gray-400 mt-1">
+                    {needAttention > 0
+                      ? <>But <span className="font-semibold text-gray-600">{needAttention.toLocaleString()}</span> POs need attention overall — try a severity tier above{poRiskFilter !== 'all' ? ' or clear the Risk filter' : ''}{poSupFilter !== 'all' ? ' or All Suppliers' : ''}.</>
+                      : 'Adjust the filters above or clear them to see the full portfolio.'}
+                  </p>
+                  {(poStatusFilter !== 'all' || poRiskFilter !== 'all' || poSupFilter !== 'all' || poSearch) && (
+                    <button onClick={() => { setPoStatusFilter('all'); setPoRiskFilter('all'); setPoSupFilter('all'); setPoSearch('') }}
+                      className="mt-3 h-7 px-3 rounded-lg border border-gray-200 text-[11px] font-semibold text-gray-600 hover:bg-gray-50">Clear all filters</button>
+                  )}
+                </div>
               ) : poGroupBy === 'supplier' ? (
                 <div className="space-y-3">
                   {poSupplierOrder.length > 25 && (
