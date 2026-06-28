@@ -11248,7 +11248,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
   const [poPage,           setPoPage]           = useState(0)
   const PO_PAGE_SIZE = 100
   // Full Ligentia dataset is ~4.7k POs — reset to page 1 whenever filters change.
-  useEffect(() => { setPoPage(0) }, [poSearch, poStatusFilter, poSupFilter, poRiskFilter, poRiskSort])
+  useEffect(() => { setPoPage(0) }, [poSearch, poLens, poPriorityFilter, poTypeFilter, poSupFilter])
   const [settingsAccordion, setSettingsAccordion] = useState<string | null>(null)
   // Actions queue state
   const [drawerCardKey,    setDrawerCardKey]    = useState<string | null>(initialOpenAction ?? null)
