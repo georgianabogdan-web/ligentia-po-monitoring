@@ -3117,17 +3117,30 @@ export function PORegister({
 
 // ── Suppliers View ─────────────────────────────────────────────────────────────
 export function SuppliersView() {
+  // Surface the worst-trending suppliers from the data (no hardcoded names) so
+  // a downstream client fork inherits the right names without editing App.tsx.
+  const underperformers = [...SUPPLIERS]
+    .filter(s => s.trend === 'deteriorating')
+    .sort((a, b) => a.onTimeRate - b.onTimeRate)
+    .slice(0, 2)
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="p-6">
+        {underperformers.length > 0 && (
         <div className="flex items-start gap-3 bg-orange-50 border border-orange-100 rounded-xl p-4 mb-6">
           <AlertTriangle className="w-4 h-4 text-orange-500 mt-0.5 shrink-0" />
           <p className="text-sm text-orange-800">
-            <strong>Eastern Textiles Co</strong> (54%, deteriorating) and{' '}
-            <strong>Summer Styles Ltd</strong> (68%, deteriorating) are underperforming.
+            {underperformers.map((s, i) => (
+              <Fragment key={s.id}>
+                {i > 0 && ' and '}
+                <strong>{s.name}</strong> ({s.onTimeRate}%, {s.trend})
+              </Fragment>
+            ))}
+            {underperformers.length === 1 ? ' is' : ' are'} underperforming.
             Consider reviewing open commitments and building contingency plans.
           </p>
         </div>
+        )}
 
         <div className="grid grid-cols-2 gap-4">
           {[...SUPPLIERS].sort((a, b) => a.onTimeRate - b.onTimeRate).map(supplier => {
