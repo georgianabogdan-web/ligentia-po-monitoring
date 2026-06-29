@@ -13625,15 +13625,8 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
               />
             )
           }
-          const underperforming = SUPPLIERS.filter(s => s.onTimeRate < 75 || s.trend === 'deteriorating')
           return (
             <div className="space-y-4">
-              {underperforming.length > 0 && (
-                <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 flex items-start gap-3">
-                  <AlertTriangle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-                  <div><span className="text-xs font-bold text-red-700">Performance Alert — </span><span className="text-xs text-red-600">{underperforming.length} supplier{underperforming.length > 1 ? 's' : ''} ({underperforming.map(s => s.name).join(', ')}) are underperforming. Review forward commitments.</span></div>
-                </div>
-              )}
               <div className="bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden">
                 <table className="w-full text-xs">
                   <thead className="bg-gray-50 border-b border-gray-100">
