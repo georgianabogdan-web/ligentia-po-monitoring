@@ -13417,7 +13417,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           // why the old status-based chip read 0 while rows screamed overdue. The chips are
           // INDEPENDENT filters (a PO can be both Overdue and Late DC), so each stays
           // meaningful: Overdue selects past-due, Late DC/Date change select by status.
-          const isPastDue    = (po: PO) => po.status !== 'Delivered' && new Date(po.expectedDelivery).getTime() < today.getTime()
+          const isPastDue    = (po: PO) => po.status !== 'Delivered' && Math.ceil((new Date(po.expectedDelivery).getTime() - today.getTime()) / 86400000) < 0
           const matchesType  = (po: PO, key: string) =>
             key === 'overdue'        ? isPastDue(po)
             : key === 'predicted_slip' ? poTemporality(po) === 'predicted'
