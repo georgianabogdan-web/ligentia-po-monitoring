@@ -13399,7 +13399,17 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           const inLens   = (po: PO) => poLens === 'all' ? true : poTemporality(po) === poLens
           const scopeOk  = (po: PO) => (poSupFilter === 'all' || po.supplierId === poSupFilter) &&
             (!poSearch || po.id.toLowerCase().includes(poSearch.toLowerCase()) || po.product.toLowerCase().includes(poSearch.toLowerCase()))
-          const typeMatch = (po: PO) => !poTypeFilter || (poTypeFilter === 'predicted_slip' ? poTemporality(po) === 'predicted' : severityOf(po) === poTypeFilter)
+          // "Overdue" = genuinely past its due date (the SAME date math the row uses for
+          // its "X days overdue" label), NOT the rare 'Ex-factory delay' status — which is
+          // why the old status-based chip read 0 while rows screamed overdue. The chips are
+          // INDEPENDENT filters (a PO can be both Overdue and Late DC), so each stays
+          // meaningful: Overdue selects past-due, Late DC/Date change select by status.
+          const isPastDue    = (po: PO) => po.status !== 'Delivered' && new Date(po.expectedDelivery).getTime() < today.getTime()
+          const matchesType  = (po: PO, key: string) =>
+            key === 'overdue'        ? isPastDue(po)
+            : key === 'predicted_slip' ? poTemporality(po) === 'predicted'
+            : severityOf(po) === key
+          const typeMatch = (po: PO) => !poTypeFilter || matchesType(po, poTypeFilter)
           const lensPop  = ALL_POS.filter(po => scopeOk(po) && inLens(po))   // drives tiers + chips
           const filtered = lensPop.filter(po => (poPriorityFilter === 'all' || poPriority(po) === poPriorityFilter) && typeMatch(po))
           const ordered  = poImpactSort ? [...filtered].sort((a, b) => salesAtRiskOf([b]) - salesAtRiskOf([a])) : filtered
@@ -13420,9 +13430,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           const attentionPop = lensPop.filter(po => poPriority(po) !== 'on_track')
           const heroValue    = salesAtRiskOf(attentionPop)
           const needAttention = attentionPop.length
-          const typeCount = (key: string) => key === 'predicted_slip'
-            ? lensPop.filter(p => poTemporality(p) === 'predicted').length
-            : lensPop.filter(p => severityOf(p) === key).length
+          const typeCount = (key: string) => lensPop.filter(p => matchesType(p, key)).length
           const poThead = (
             <thead className="bg-gray-50 border-b border-gray-100">
               <tr>{['PO Number','Supplier','Product','Status','Risk','Delivery','Predicted landing','Value','Freight',''].map((h, i) => <th key={h || i} className="px-4 py-3 text-left font-semibold text-gray-500 whitespace-nowrap">{h}</th>)}</tr>
