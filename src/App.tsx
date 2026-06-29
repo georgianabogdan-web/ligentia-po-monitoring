@@ -19,7 +19,8 @@ import {
   computeFillRisk, supplierFillHistory, computeFillOutcome, fillConsistency,
 } from './predict'
 import type { JourneyStageKey, StagePerf, PoPrediction, FillPrediction } from './predict'
-import { SUPPLIERS, SUPPLIER_EMAILS, ALL_POS, PO_PRODUCT_MAP, NEG_PO_MAP, SEED_PO_EVENTS, STATIC_KANBAN_ITEMS } from './poData'
+import { SUPPLIERS, SUPPLIER_EMAILS, ALL_POS, PO_PRODUCT_MAP, NEG_PO_MAP, SEED_PO_EVENTS, STATIC_KANBAN_ITEMS, SEEDED_PROMO_PCT, SEEDED_INV_AUDIT, SEEDED_THREADS, SEEDED_SUPPLIER_SESSIONS, TRIGGER_MESSAGES, AGENT_LOG } from './poData'
+import { BUYER, EDIT_USER, TEAM } from './clientConfig'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 type POStatus =
@@ -157,7 +158,7 @@ interface ChaseThread {
   messages:     ChaseThreadMsg[]
   systemEvents?: ThreadSystemEvent[]
 }
-interface TriggerMessage {
+export interface TriggerMessage {
   sender: string
   senderEmail: string
   timestamp: string
@@ -469,7 +470,7 @@ export interface POEvent {
 }
 
 
-interface AgentLogEntry {
+export interface AgentLogEntry {
   time: string
   type: 'scan' | 'scorecard' | 'date_change' | 'at_risk' | 'escalation' | 'chase_draft' | 'low_confidence'
   message: string
@@ -483,40 +484,17 @@ interface ProductOverride {
   promoPct?: number
 }
 
-// Only a handful of products have a seeded Promo % — others show "—"
-const SEEDED_PROMO_PCT: Record<string, number> = {
-  'INV-001': 22,  // Hydrating Face Serum (Beauty)
-  'INV-003': 14,  // Vitamin C Moisturiser (Beauty)
-  'INV-007': 35,  // Floral Midi Dress (Clothing)
-  'INV-010': 28,  // Jersey Maxi Dress (Clothing)
-  'INV-013': 20,  // Block Heel Ankle Boots (Footwear)
-  'INV-018': 12,  // Leather Crossbody Bag (Accessories)
-}
 function getBasePromoPct(p: { id: string; category: string }): number | null {
   return SEEDED_PROMO_PCT[p.id] ?? null
 }
 
-interface InvAuditEntry {
+export interface InvAuditEntry {
   id: string
   user: string
   initial: string
   date: string
   changes: { field: string; oldVal: string; newVal: string }[]
   reason: string
-}
-
-const SEEDED_INV_AUDIT: Record<string, InvAuditEntry[]> = {
-  'INV-001': [
-    { id: 'sa1', user: 'Sarah Chen', initial: 'SC', date: '2026-04-10T14:30:00Z', changes: [{ field: 'MOQ Qty', oldVal: '400 units', newVal: '500 units' }], reason: 'Q2 supplier renegotiation with L\'Oréal UK — new MOQ agreed.' },
-    { id: 'sa2', user: 'James Wright', initial: 'JW', date: '2026-03-22T09:15:00Z', changes: [{ field: 'FWC Range', oldVal: '3–6 wks', newVal: '4–8 wks' }], reason: 'Increased cover target ahead of peak season.' },
-  ],
-  'INV-005': [
-    { id: 'sa3', user: 'Priya Sharma', initial: 'PS', date: '2026-04-18T11:00:00Z', changes: [{ field: 'MOQ Grouping', oldVal: 'SKU', newVal: 'Style × Colour' }], reason: 'Consolidating orders by colour to reduce freight cost.' },
-    { id: 'sa4', user: 'Sarah Chen', initial: 'SC', date: '2026-04-02T10:30:00Z', changes: [{ field: 'MOQ Qty', oldVal: '200 units', newVal: '300 units' }], reason: 'Footwear buyer aligned with supplier on new pack size.' },
-  ],
-  'INV-009': [
-    { id: 'sa5', user: 'James Wright', initial: 'JW', date: '2026-04-20T16:00:00Z', changes: [{ field: 'FWC Range', oldVal: '2–5 wks', newVal: '3–7 wks' }, { field: 'MOQ Qty', oldVal: '150 units', newVal: '200 units' }], reason: 'Menswear Q2 restock ahead of summer — extended cover window agreed with buyer.' },
-  ],
 }
 
 // ── Inquiry & Negotiation Types ───────────────────────────────────────────────
@@ -549,7 +527,7 @@ interface ActivityLogEntry {
   timestamp: string
   content:   string
 }
-interface InquiryThread {
+export interface InquiryThread {
   recId:          string
   supplierId:     string
   status:         NegotiationStatus
@@ -587,7 +565,7 @@ interface SessionRound {
     perThreadResponses:   SessionRoundResponse[]
   } | null
 }
-interface SupplierSession {
+export interface SupplierSession {
   id:          string
   supplierId:  string  // human-readable supplier name (matches REORDER_RECOMMENDATIONS[].supplier)
   threadIds:   string[]
@@ -731,187 +709,6 @@ const ESCALATION_RULES = {
 
 type CpRulesState = { openingAskPct: number; escalateIfPct: number; maxRounds: number }
 const DEFAULT_CP_RULES: CpRulesState = { openingAskPct: 6, escalateIfPct: 8, maxRounds: 3 }
-
-const SEED_R1_HYALURONIC = `Subject: CP Inquiry – Hyaluronic Acid Toner – Wk 18
-
-Dear Unilever Ltd team,
-
-We are reviewing our reorder position for Hyaluronic Acid Toner (SKU: SKU-REC002) and would like to discuss cost price for the upcoming replenishment.
-
-Current agreed CP: £9.50 per unit
-
-Given the 2,840-unit commitment and our forward plan for this line, we'd like to align on £8.93 per unit for this order.
-
-Please confirm your best CP and any MOQ conditions by 5 May 2026.
-
-Best regards,
-[Buyer Name]`
-
-const SEED_R1_COTTONTEE = `Subject: CP Inquiry – Striped Cotton Tee – Wk 18
-
-Dear Next Sourcing team,
-
-We are reviewing our reorder position for Striped Cotton Tee (SKU: SKU-REC006) and would like to discuss cost price for the upcoming replenishment.
-
-Current agreed CP: £14.50 per unit
-
-Given the 3,130-unit commitment and our forward plan for this line, we'd like to align on £13.63 per unit for this order.
-
-Delivery required by ex-factory date: 27 May 2026
-
-Please confirm your best CP and any MOQ conditions by 5 May 2026.
-
-Best regards,
-[Buyer Name]`
-
-const SEEDED_THREADS: Record<string, InquiryThread> = {
-  'REC-002': {
-    recId: 'REC-002', supplierId: 'Unilever Ltd', status: 'replied', scenario: 'accepted',
-    rounds: [{
-      roundNumber: 1, sentAt: '2026-04-29',
-      emailBody: SEED_R1_HYALURONIC, requestedCP: 8.93,
-      supplierReply: {
-        receivedAt: '2026-04-29', offeredCP: 8.97, moqOffered: 500,
-        leadTimeWeeks: 4, deliveryWindow: '28 May – 11 Jun 2026',
-        accepted: true, scenario: 'accepted',
-        rawText: `Dear Buying Team,\n\nThank you for your inquiry regarding Hyaluronic Acid Toner.\n\nWe are pleased to confirm acceptance of your terms:\n• CP: £8.97 per unit\n• MOQ: 500 units\n• Lead time: 4 weeks\n• Delivery: 28 May – 11 Jun 2026\n\nPlease proceed with the order and we will prioritise production scheduling.\n\nBest regards,\nUnilever Ltd`,
-      },
-    }],
-    agreedCP: null, agreedMOQ: null, flaggedReason: null, internalNotes: '',
-  },
-  'REC-006': {
-    recId: 'REC-006', supplierId: 'Next Sourcing', status: 'replied', scenario: 'counter',
-    rounds: [{
-      roundNumber: 1, sentAt: '2026-04-30',
-      emailBody: SEED_R1_COTTONTEE, requestedCP: 13.63,
-      supplierReply: {
-        receivedAt: '2026-05-01', offeredCP: 14.20, moqOffered: 300,
-        leadTimeWeeks: 5, deliveryWindow: '2 Jun – 16 Jun 2026',
-        accepted: false, scenario: 'counter',
-        rawText: `Dear Buying Team,\n\nThank you for your inquiry regarding Striped Cotton Tee (SKU-REC006).\n\nWe appreciate our ongoing partnership and have reviewed your CP request carefully. Given current cotton market conditions and raw material costs, we are unfortunately unable to meet the target of £13.63 at this time.\n\nWe are pleased to offer the following:\n• CP: £14.20 per unit\n• MOQ: 300 units\n• Lead time: 5 weeks\n• Delivery: 2 Jun – 16 Jun 2026\n\nWe believe this reflects a fair position given current input costs, and we remain open to discussing volume commitments that could help us move closer to your target.\n\nBest regards,\nNext Sourcing`,
-      },
-    }],
-    agreedCP: null, agreedMOQ: null, flaggedReason: null, internalNotes: '',
-  },
-}
-
-// ── Seeded supplier sessions (bulk negotiations across multiple SKUs) ────────
-const SEEDED_SUPPLIER_SESSIONS: SupplierSession[] = [
-  // Next Sourcing — 3 lines, round 1 reply received (mostly counter)
-  {
-    id: 'session-next-001',
-    supplierId: 'Next Sourcing',
-    threadIds: ['REC-004', 'REC-006', 'REC-008'],
-    status: 'open',
-    createdAt: '2026-05-12T09:00:00Z',
-    rounds: [{
-      id: 'sr-next-r1',
-      roundNumber: 1,
-      outbound: {
-        sentAt:  '2026-05-12T09:30:00Z',
-        subject: 'Rebuy proposal — 3 SKUs · Week 20',
-        body: `Dear Next Sourcing Team,\n\nWe're proposing the following rebuys for 30 Jun ex-fty:\n\n• REC-004 Wrap Midi Dress — 3,200 units · £20.84 · MOQ 250 · ex-fty 30 Jun\n• REC-006 Striped Cotton Tee — 4,800 units · £13.63 · MOQ 300 · ex-fty 30 Jun\n• REC-008 Ruched Bodycon Dress — 2,400 units · £18.27 · MOQ 250 · ex-fty 30 Jun\n\nPlease confirm acceptance or respond with revised terms by Fri 16 May.\n\nBest regards,\nDebenhams Buying`,
-        recipients: ['orders@nextsourcing.co.uk'],
-      },
-      inbound: {
-        receivedAt: '2026-05-15T14:20:00Z',
-        summary:    'Next Sourcing accepted 1 of 3 lines at proposed CP. 2 lines countered with average +£0.55 citing cotton market pressure. Ex-fty held at 30 Jun across all.',
-        fullReply:  `Dear Buying Team,\n\nThank you for the consolidated rebuy proposal. Our position per line:\n\n• Wrap Midi Dress — accepted at £20.84 · MOQ 250 · ex-fty 30 Jun confirmed\n• Striped Cotton Tee — unable to meet £13.63; offering £14.20 (firm) · MOQ 300 · ex-fty 30 Jun\n• Ruched Bodycon Dress — unable to meet £18.27; offering £18.95 · MOQ 250 · ex-fty 30 Jun\n\nCotton input costs have risen ~4% since our last quote; we've absorbed where possible. Happy to discuss further on the two countered lines.\n\nBest regards,\nNext Sourcing`,
-        perThreadResponses: [
-          { threadId: 'REC-004', offered: { cp: 20.84, moq: 250, exFty: '2026-06-30' }, status: 'accepted' },
-          { threadId: 'REC-006', offered: { cp: 14.20, moq: 300, exFty: '2026-06-30' }, status: 'countered', notes: 'Cotton input pressure' },
-          { threadId: 'REC-008', offered: { cp: 18.95, moq: 250, exFty: '2026-06-30' }, status: 'countered', notes: 'Cotton input pressure' },
-        ],
-      },
-    }],
-  },
-  // ASOS Brands — 3 lines, round 2 in progress (we counter-proposed; awaiting reply)
-  {
-    id: 'session-asos-001',
-    supplierId: 'ASOS Brands',
-    threadIds: ['REC-005', 'REC-007', 'REC-009'],
-    status: 'open',
-    createdAt: '2026-05-06T11:00:00Z',
-    rounds: [
-      {
-        id: 'sr-asos-r1',
-        roundNumber: 1,
-        outbound: {
-          sentAt:  '2026-05-06T11:15:00Z',
-          subject: 'Rebuy proposal — 3 SKUs · Week 19',
-          body:    'Round 1 proposal sent — see consolidated rebuy.',
-          recipients: ['wholesale@asosbrands.co.uk'],
-        },
-        inbound: {
-          receivedAt: '2026-05-08T16:40:00Z',
-          summary:    'ASOS accepted 2 of 3 lines. 1 line countered +£0.70.',
-          fullReply:  `Dear Buying Team,\n\nThank you for the rebuy. Tailored Suit Jacket and Oversized Linen Shirt accepted at proposed terms. Bamboo Lounge Set — we cannot hold £15.04 at the requested 2,200 units; offering £15.74 firm.\n\nBest regards,\nASOS Brands`,
-          perThreadResponses: [
-            { threadId: 'REC-005', offered: { cp: 31.78, moq: 200, exFty: '2026-07-05' }, status: 'accepted' },
-            { threadId: 'REC-007', offered: { cp: 16.43, moq: 200, exFty: '2026-07-05' }, status: 'accepted' },
-            { threadId: 'REC-009', offered: { cp: 15.74, moq: 250, exFty: '2026-07-05' }, status: 'countered' },
-          ],
-        },
-      },
-      {
-        id: 'sr-asos-r2',
-        roundNumber: 2,
-        outbound: {
-          sentAt:  '2026-05-15T10:00:00Z',
-          subject: 'Counter offer — 1 line · 15 May',
-          body:    `Dear ASOS Brands Team,\n\nThanks for confirming the two accepted lines. On Bamboo Lounge Set: we can meet you at £15.39 (midpoint of your £15.74 and our original £15.04) — please confirm by Tue 19 May so we can lock the 5 Jul ex-fty.\n\nBest regards,\nDebenhams Buying`,
-          recipients: ['wholesale@asosbrands.co.uk'],
-        },
-        inbound: null,
-      },
-    ],
-  },
-  // L'Oréal UK — 2 lines, round 1 sent, awaiting reply
-  {
-    id: 'session-loreal-001',
-    supplierId: "L'Oréal UK",
-    threadIds: ['REC-001', 'REC-003'],
-    status: 'open',
-    createdAt: '2026-05-18T08:30:00Z',
-    rounds: [{
-      id: 'sr-loreal-r1',
-      roundNumber: 1,
-      outbound: {
-        sentAt:  '2026-05-18T09:00:00Z',
-        subject: 'Rebuy proposal — 2 SKUs · Week 21',
-        body: `Dear L'Oréal UK Team,\n\nWe're proposing the following rebuys for 28 Jun ex-fty:\n\n• REC-001 Retinol Night Cream — 3,060 units · £11.09 · MOQ 500 · ex-fty 28 Jun\n• REC-003 Brightening Eye Cream — 2,980 units · £10.15 · MOQ 500 · ex-fty 28 Jun\n\nPlease confirm acceptance or respond with revised terms by Thu 22 May.\n\nBest regards,\nDebenhams Buying`,
-        recipients: ['orders@loreal.co.uk'],
-      },
-      inbound: null,
-    }],
-  },
-  // Unilever Ltd — single-SKU session, awaiting reply
-  {
-    id: 'session-unilever-001',
-    supplierId: 'Unilever Ltd',
-    threadIds: ['REC-002'],
-    status: 'open',
-    createdAt: '2026-04-29T08:00:00Z',
-    rounds: [{
-      id: 'sr-unilever-r1',
-      roundNumber: 1,
-      outbound: {
-        sentAt:  '2026-04-29T08:30:00Z',
-        subject: 'Rebuy proposal — 1 SKU · Week 18',
-        body:    `Dear Unilever Ltd Team,\n\nWe're proposing 2,840 units of Hyaluronic Acid Toner at £8.93 CP, MOQ 500, ex-fty 28 May.\n\nBest regards,\nDebenhams Buying`,
-        recipients: ['orders@unilever.co.uk'],
-      },
-      inbound: {
-        receivedAt: '2026-04-29T15:00:00Z',
-        summary:    'Unilever accepted at £8.97 (very slight uplift). Terms confirmed.',
-        fullReply:  `Dear Buying Team,\n\nThank you for your inquiry regarding Hyaluronic Acid Toner.\n\nWe are pleased to confirm acceptance of your terms:\n• CP: £8.97 per unit\n• MOQ: 500 units\n• Lead time: 4 weeks\n• Delivery: 28 May – 11 Jun 2026\n\nPlease proceed with the order and we will prioritise production scheduling.\n\nBest regards,\nUnilever Ltd`,
-        perThreadResponses: [
-          { threadId: 'REC-002', offered: { cp: 8.97, moq: 500, exFty: '2026-05-28' }, status: 'accepted' },
-        ],
-      },
-    }],
-  },
-]
 
 // ── Fit Families ──────────────────────────────────────────────────────────────
 const FIT_FAMILIES = [
@@ -1684,12 +1481,12 @@ function SupplierSessionWorkspace({
       const mid = +((l.rec.costPrice + offered) / 2).toFixed(2)
       return `• ${l.rec.id} ${l.rec.name} — ${l.rec.recommendedReorderQty.toLocaleString()} units · £${mid.toFixed(2)} (midpoint)`
     }).join('\n')
-    return `Dear ${supplierName} Team,\n\nThanks for your response on round ${latestRound?.roundNumber ?? 1}. Counter-proposing:\n\n${list}\n\nPlease confirm by end of week.\n\nBest regards,\nDebenhams Buying`
+    return `Dear ${supplierName} Team,\n\nThanks for your response on round ${latestRound?.roundNumber ?? 1}. Counter-proposing:\n\n${list}\n\nPlease confirm by end of week.\n\nBest regards,\n${BUYER.buyingTeamShort}`
   }
   // Round-1 outbound proposal (combined, one table of SKUs) for a fresh inquiry.
   const buildRound1Draft = () => {
     const list = lines.map(l => `• ${l.rec.id} ${l.rec.name} — ${l.rec.recommendedReorderQty.toLocaleString()} units · £${l.rec.costPrice.toFixed(2)} CP`).join('\n')
-    return `Dear ${supplierName} Team,\n\nWe'd like to propose the following rebuys across ${lines.length} line${lines.length === 1 ? '' : 's'}:\n\n${list}\n\nPlease confirm acceptance or respond with revised terms.\n\nBest regards,\nDebenhams Buying`
+    return `Dear ${supplierName} Team,\n\nWe'd like to propose the following rebuys across ${lines.length} line${lines.length === 1 ? '' : 's'}:\n\n${list}\n\nPlease confirm acceptance or respond with revised terms.\n\nBest regards,\n${BUYER.buyingTeamShort}`
   }
   // The combined draft composer shows after a reply (follow-up round) OR for a
   // brand-new inquiry whose latest round is still an unsent draft (round 1).
@@ -3597,7 +3394,7 @@ function InventoryView({ configMode, setConfigMode }: { configMode: boolean; set
   // products that cannot be updated (mocked)
   const LOCKED_IDS = new Set(['INV-003', 'INV-008'])
   const LOCK_REASON: Record<string, string> = {
-    'INV-003': 'locked by Sarah Chen',
+    'INV-003': `locked by ${TEAM.manager1}`,
     'INV-008': 'invalid grouping for this product type',
   }
   const updatableSelected   = [...selectedIds].filter(id => !LOCKED_IDS.has(id))
@@ -5949,7 +5746,6 @@ function InboxIconButton({ count, onClick, title }: { count: number; onClick: ()
 // Components re-render by bumping a local version counter after a save/discard.
 interface LineEdit { qty: number; costPrice: number; exFactory: string; by: string; date: string }
 const _lineEdits: Record<string, LineEdit> = {}
-const EDIT_USER = 'Emma (Merchandiser)'
 
 const savedQtyOf       = (p: ReorderRecommendation) => _lineEdits[p.id]?.qty       ?? p.recommendedReorderQty
 const savedCostOf      = (p: ReorderRecommendation) => _lineEdits[p.id]?.costPrice ?? p.costPrice
@@ -6810,8 +6606,8 @@ const PIPELINE_STAGE_LABELS: Record<PipelineStage, string> = {
 
 // Seeded rejection metadata for pre-rejected POs in demo data
 const REJECTION_META: Record<string, { manager: string; date: string }> = {
-  'REC-003': { manager: 'Sarah Chen', date: '21 Apr 2026' },
-  'REC-008': { manager: 'Sarah Chen', date: '24 Apr 2026' },
+  'REC-003': { manager: TEAM.manager1, date: '21 Apr 2026' },
+  'REC-008': { manager: TEAM.manager1, date: '24 Apr 2026' },
 }
 
 // Module-level set so the manager view (separate component) sees a "Resubmitted" pill
@@ -6820,8 +6616,8 @@ const _sharedResubmits = new Set<string>()
 
 // Shared rejection history — populated by manager rejections, read by buyer view
 const _sharedRejectionHistory: Record<string, Array<{ date: string; manager: string; comment: string }>> = {
-  'REC-003': [{ date: '21 Apr 2026', manager: 'Sarah Chen', comment: 'Stock levels still too high at DC. Come back when cover drops below 8w.' }],
-  'REC-008': [{ date: '24 Apr 2026', manager: 'Sarah Chen', comment: 'Margin too thin at this price point. Need supplier discount first.' }],
+  'REC-003': [{ date: '21 Apr 2026', manager: TEAM.manager1, comment: 'Stock levels still too high at DC. Come back when cover drops below 8w.' }],
+  'REC-008': [{ date: '24 Apr 2026', manager: TEAM.manager1, comment: 'Margin too thin at this price point. Need supplier discount first.' }],
 }
 
 // Helper: lead time band for Inventory filters
@@ -7361,7 +7157,7 @@ function ReorderLineWorkspace({
     const buildCombinedBody = () =>
       `Dear ${session.supplierId} Team,\n\nWe'd like to propose the following rebuys across ${sessionLines.length} line${sessionLines.length === 1 ? '' : 's'}:\n\n` +
       sessionLines.map(l => `• ${l.id}  ${l.name} — ${l.recommendedReorderQty.toLocaleString()} units · £${l.costPrice.toFixed(2)} CP`).join('\n') +
-      `\n\nPlease confirm acceptance or respond per line with revised terms.\n\nBest regards,\nDebenhams Buying`
+      `\n\nPlease confirm acceptance or respond per line with revised terms.\n\nBest regards,\n${BUYER.buyingTeamShort}`
     const draftValue = combinedDraft ?? buildCombinedBody()
 
     const lastReplyOf = (l: ReorderRecommendation) => {
@@ -7403,7 +7199,7 @@ function ReorderLineWorkspace({
     // The single combined reply email + AI summary, built from the per-line offers.
     const replyVerb = (r: SupplierNegReply) => r.scenario === 'accepted' ? `accepted at £${r.offeredCP.toFixed(2)}` : r.scenario === 'escalate' ? `can only hold £${r.offeredCP.toFixed(2)} (firm)` : `offering £${r.offeredCP.toFixed(2)}`
     const combinedReplyEmail =
-      `Dear Debenhams Buying Team,\n\nThank you for the consolidated rebuy proposal across ${repliedLines.length} line${repliedLines.length === 1 ? '' : 's'}. Our position per line:\n\n` +
+      `Dear ${BUYER.buyingTeam},\n\nThank you for the consolidated rebuy proposal across ${repliedLines.length} line${repliedLines.length === 1 ? '' : 's'}. Our position per line:\n\n` +
       repliedLines.map(l => { const r = lastReplyOf(l)!; return `• ${l.id} ${l.name} — ${replyVerb(r)}, MOQ ${r.moqOffered.toLocaleString()}, lead time ${r.leadTimeWeeks}w, delivery ${r.deliveryWindow}` }).join('\n') +
       `\n\nWhere we've revised price, this reflects input-cost and capacity pressure since our last quote; we've absorbed where possible. Happy to discuss the open lines.\n\nBest regards,\n${session.supplierId}`
     const accCount = repliedLines.filter(l => lastReplyOf(l)!.scenario === 'accepted').length
@@ -7449,7 +7245,7 @@ function ReorderLineWorkspace({
       }
       return `Dear ${session.supplierId} Team,\n\nThank you for your reply. Across the following line${stagedLines.length === 1 ? '' : 's'} we'd like to respond:\n\n` +
         stagedLines.map(lineItem).join('\n') +
-        `\n\nThe remaining lines are confirmed on your terms. Please come back on the above and we'll close them out together.\n\nBest regards,\nDebenhams Buying`
+        `\n\nThe remaining lines are confirmed on your terms. Please come back on the above and we'll close them out together.\n\nBest regards,\n${BUYER.buyingTeamShort}`
     }
     const counterValue = counterDraft ?? buildCounterBody()
 
@@ -8015,7 +7811,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                           showToast('Please add a reason for the freight override before sending.'); return
                         }
                         setStatusOverrides(o => ({ ...o, [p.id]: 'Pending Approval' }))
-                        setPoHistory(h => ({ ...h, [p.id]: [...(h[p.id] ?? []), { action: 'Sent to manager', by: 'Emma (Merchandiser)', date: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) }] }))
+                        setPoHistory(h => ({ ...h, [p.id]: [...(h[p.id] ?? []), { action: 'Sent to manager', by: EDIT_USER, date: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) }] }))
                         showToast(`${p.name} sent to manager for approval.`)
                       }} className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors">
                         Send to Manager
@@ -8033,7 +7829,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                         const changeStr = changes.length > 0 ? changes.join(', ') : 'no fields changed'
                         const today = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
                         setStatusOverrides(o => ({ ...o, [p.id]: 'Pending Approval' }))
-                        setPoHistory(h => ({ ...h, [p.id]: [...(h[p.id] ?? []), { action: `Resubmitted with changes: ${changeStr}`, by: 'Emma (Merchandiser)', date: today }] }))
+                        setPoHistory(h => ({ ...h, [p.id]: [...(h[p.id] ?? []), { action: `Resubmitted with changes: ${changeStr}`, by: EDIT_USER, date: today }] }))
                         _sharedResubmits.add(p.id)
                         showToast(`${p.name} resubmitted for management approval.`)
                       }} className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors">
@@ -9380,7 +9176,7 @@ function ManagerReorderView() {
     setRejectOpen(o => ({ ...o, [id]: false }))
     const entry = {
       date: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }),
-      manager: 'Sarah Chen',
+      manager: TEAM.manager1,
       comment: rejectDraft[id] ?? '',
     }
     _sharedRejectionHistory[id] = [entry, ...(_sharedRejectionHistory[id] ?? [])]
@@ -9547,7 +9343,7 @@ function ManagerReorderView() {
                   </div>
                   <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mt-2">Merchandiser response</div>
                   <div className="bg-white rounded-lg border border-gray-100 px-3 py-2 text-xs text-gray-700">
-                    Resubmitted by Emma (Merchandiser) — see editable fields below for current values.
+                    {`Resubmitted by ${EDIT_USER} — see editable fields below for current values.`}
                   </div>
                 </div>
               </details>
@@ -11319,38 +11115,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
     const bySupplier = pos.reduce((acc, po) => { acc[po.supplierId] = [...(acc[po.supplierId] ?? []), po]; return acc }, {} as Record<string, PO[]>)
     return Object.entries(bySupplier).map(([supplierId, ps]) => ({ supplierId, type, pos: ps }))
   }
-  const TRIGGER_MESSAGES: Record<string, TriggerMessage> = {
-    'NK-at_risk': {
-      sender: 'Nordic Knitwear', senderEmail: 'production@nordicknitwear.dk',
-      timestamp: '2026-04-03T14:22:00Z',
-      body: 'Hi Debenhams team,\n\nI\'m writing to inform you of an unavoidable delay to PO-2901 (Cotton Knit Jumpers). Our primary yarn supplier in Denmark has experienced a mechanical failure at their main spinning facility, which has pushed our yarn receipt back by 10 days.\n\nWe are currently forecasting a revised ex-factory date of 27 April (was 20 April). We have explored air freight but the cost uplift is not viable on this margin. We are committed to no further slippage beyond 27 April and will provide weekly production updates.\n\nKind regards,\nOliver Hansen\nNordic Knitwear Production',
-      agentSummary: 'Requested 7-day push on PO-2901 (20 Apr → 27 Apr). Cited mechanical failure at primary yarn mill in Denmark — yarn receipt delayed 10 days. Air freight ruled out on cost. No QC concerns flagged.',
-    },
-    'TB-at_risk': {
-      sender: 'Trendy Boots UK', senderEmail: 'orders@trendyboots.co.uk',
-      timestamp: '2026-04-05T09:47:00Z',
-      body: 'Dear Debenhams Buying Team,\n\nPlease be advised that PO-2845 (Ankle Strap Heels) will require a revised delivery date. Our factory in Portugal is experiencing a capacity constraint due to a larger-than-expected spring order from another retailer that has taken priority on the production line.\n\nWe are now forecasting delivery of 6 May (original: 22 April). We apologise for the inconvenience and are working to recover as much lead time as possible. We will confirm the final ex-factory date no later than 10 April.\n\nBest regards,\nSophia Turner\nTrendy Boots UK',
-      agentSummary: 'Requested 14-day push on PO-2845 (22 Apr → 6 May). Cited factory capacity constraint in Portugal — spring order from another retailer took production priority. Final ex-factory date to be confirmed by 10 Apr.',
-    },
-    'UF-late_dc': {
-      sender: 'Urban Footwear', senderEmail: 'logistics@urbanfootwear.com',
-      timestamp: '2026-04-18T11:15:00Z',
-      body: 'Hi team,\n\nQuick update on PO-2976 (Canvas Lo-Top Trainers). Goods are packed and ready. We are targeting dispatch on 30 April via our usual freight forwarder (DHL Supply Chain). However, we have not yet received the final booking confirmation from DHL — we\'re chasing and expect to confirm within 48 hours.\n\nPlease confirm your DC receiving slot is still available for w/c 14 May. Let us know if there are any issues.\n\nThanks,\nMarcus Reid\nUrban Footwear Logistics',
-      agentSummary: 'Goods packed for PO-2976, targeting 30 Apr dispatch via DHL Supply Chain. Freight booking not yet confirmed — expecting within 48 hrs. Requesting DC slot confirmation for w/c 14 May.',
-    },
-    'ET-late_dc': {
-      sender: 'Eastern Textiles Co', senderEmail: 'dispatch@easterntextiles.co.uk',
-      timestamp: '2026-05-05T10:00:00Z',
-      body: 'Hi team,\n\nJust to update you on PO-3001 (Summer Polo Shirts). Goods are currently being packed at our warehouse. We have not yet received a confirmed freight booking slot from our logistics partner — we are still working on it. We will update you once confirmed.\n\nBest,\nEastern Textiles',
-      agentSummary: 'ET has not confirmed DC booking for PO-3001 (Summer Polo Shirts). Goods not yet fully packed. No booking reference provided. This is the second late-booking incident from ET this quarter.',
-    },
-    'SS-overdue': {
-      sender: 'Summer Styles Ltd', senderEmail: 'production@summerstyles.co.uk',
-      timestamp: '2026-04-10T16:03:00Z',
-      body: 'Dear Debenhams team,\n\nI wanted to give you an early heads-up regarding PO-2891 (Floral Maxi Dress). We have encountered a fabric QC failure — a dye lot inconsistency was identified during final inspection, affecting approximately 40% of the batch.\n\nThe affected fabric has been quarantined and we are sourcing a replacement dye lot. This will add a minimum of 14 days to our production schedule. We understand the impact this has on your intake planning and are doing everything possible to minimise further delay.\n\nWe will provide a revised ex-factory date by end of week.\n\nSincerely,\nAmelia Clarke\nSummer Styles Production',
-      agentSummary: 'PO-2891 delayed by fabric QC failure — dye lot inconsistency in ~40% of batch. Affected fabric quarantined, replacement being sourced. Minimum 14-day impact. Revised ex-factory date due end of this week. No dispatch imminent.',
-    },
-  }
   // Forward-looking: open POs not yet flagged late (on_track) but predicted at high
   // risk of slipping. These make the Actions list proactive, not purely retrospective.
   const predictedPOs = onTrackPOs.filter(po => {
@@ -11463,12 +11227,12 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
       const poList = g.pos.map(p => `- ${p.id}: ${p.product} (Due: ${formatDate(p.expectedDelivery)})`).join('\n')
       if (g.type === 'overdue') {
         const maxDays = Math.max(...g.pos.map(p => daysOverdue(p)))
-        return `Dear ${sup.name} Team,\n\nWe are writing to urgently follow up on ${g.pos.length} purchase order${g.pos.length > 1 ? 's' : ''} that ${g.pos.length > 1 ? 'are' : 'is'} now overdue by up to ${maxDays} days:\n\n${poList}\n\nPlease confirm:\n1. Current dispatch status\n2. Revised ex-factory date\n3. Freight booking reference\n\nWe require an urgent response by end of business today.\n\nKind regards,\nDebenhams Buying Team`
+        return `Dear ${sup.name} Team,\n\nWe are writing to urgently follow up on ${g.pos.length} purchase order${g.pos.length > 1 ? 's' : ''} that ${g.pos.length > 1 ? 'are' : 'is'} now overdue by up to ${maxDays} days:\n\n${poList}\n\nPlease confirm:\n1. Current dispatch status\n2. Revised ex-factory date\n3. Freight booking reference\n\nWe require an urgent response by end of business today.\n\nKind regards,\n${BUYER.buyingTeam}`
       }
       if (g.type === 'at_risk') {
-        return `Dear ${sup.name} Team,\n\nWe are writing regarding date change requests for the following purchase orders:\n\n${poList}\n\nPlease provide:\n1. Root cause of the delay\n2. Confirmation of revised delivery schedule\n3. Mitigation actions being taken\n\nPlease respond within 48 hours.\n\nKind regards,\nDebenhams Buying Team`
+        return `Dear ${sup.name} Team,\n\nWe are writing regarding date change requests for the following purchase orders:\n\n${poList}\n\nPlease provide:\n1. Root cause of the delay\n2. Confirmation of revised delivery schedule\n3. Mitigation actions being taken\n\nPlease respond within 48 hours.\n\nKind regards,\n${BUYER.buyingTeam}`
       }
-      return `Dear ${sup.name} Team,\n\nPre-dispatch chase for the following orders due for delivery shortly:\n\n${poList}\n\nPlease confirm:\n1. Goods packed and ready for collection\n2. Freight forwarder booking reference\n3. Expected handover date\n\nKind regards,\nDebenhams Buying Team`
+      return `Dear ${sup.name} Team,\n\nPre-dispatch chase for the following orders due for delivery shortly:\n\n${poList}\n\nPlease confirm:\n1. Goods packed and ready for collection\n2. Freight forwarder booking reference\n3. Expected handover date\n\nKind regards,\n${BUYER.buyingTeam}`
     }
     // Multi-issue consolidated email
     const sections = groups.map(g => {
@@ -11483,7 +11247,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
       return `PRE-DISPATCH CONFIRMATION (${g.pos.length} PO${g.pos.length > 1 ? 's' : ''}):\n${poList}\nAction required: confirm goods are packed, freight forwarder booking reference, and expected handover date.`
     }).join('\n\n')
     const totalPos = groups.reduce((s, g) => s + g.pos.length, 0)
-    return `Dear ${sup.name} Team,\n\nWe are writing regarding ${totalPos} purchase order${totalPos > 1 ? 's' : ''} that require your urgent attention. This email covers multiple open issues — please respond to each section below.\n\n${sections}\n\nPlease respond to all points above within 24 hours.\n\nKind regards,\nDebenhams Buying Team`
+    return `Dear ${sup.name} Team,\n\nWe are writing regarding ${totalPos} purchase order${totalPos > 1 ? 's' : ''} that require your urgent attention. This email covers multiple open issues — please respond to each section below.\n\n${sections}\n\nPlease respond to all points above within 24 hours.\n\nKind regards,\n${BUYER.buyingTeam}`
   }
 
   // ── Thread helpers ──────────────────────────────────────────────────────────
@@ -11500,7 +11264,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
 
     if (g.type === 'overdue') {
       const poLines = g.pos.map(p => `  - ${p.id} (${p.product}): QC complete. Revised ex-factory date: ${revStr}.`).join('\n')
-      return `Dear Debenhams Buying Team,\n\nThank you for your email. We sincerely apologise for the delays on the following orders:\n\n${poLines}\n\nWe are arranging freight booking as a priority and will confirm booking references by ${handStr}.\n\nPlease accept our apologies for any disruption to your intake planning.\n\nKind regards,\n${name} Team`
+      return `Dear ${BUYER.buyingTeam},\n\nThank you for your email. We sincerely apologise for the delays on the following orders:\n\n${poLines}\n\nWe are arranging freight booking as a priority and will confirm booking references by ${handStr}.\n\nPlease accept our apologies for any disruption to your intake planning.\n\nKind regards,\n${name} Team`
     }
     if (g.type === 'at_risk') {
       const poLines = g.pos.map(p => {
@@ -11509,11 +11273,11 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           : revStr
         return `  - ${p.id} (${p.product}): Revised delivery ${rev}.`
       }).join('\n')
-      return `Dear Debenhams Buying Team,\n\nThank you for your email. To confirm our date change request:\n\n${poLines}\n\nRoot cause: Raw material supply delays from our primary fabric supplier impacted production scheduling.\nMitigation: We are expediting QC and finishing processes to minimise further slippage.\n\nWe are committed to no further extensions on these orders.\n\nKind regards,\n${name} Team`
+      return `Dear ${BUYER.buyingTeam},\n\nThank you for your email. To confirm our date change request:\n\n${poLines}\n\nRoot cause: Raw material supply delays from our primary fabric supplier impacted production scheduling.\nMitigation: We are expediting QC and finishing processes to minimise further slippage.\n\nWe are committed to no further extensions on these orders.\n\nKind regards,\n${name} Team`
     }
     // late_dc
     const poLines = g.pos.map(p => `  - ${p.id} (${p.product}): Packed and ready. Freight forwarder: DB Schenker. Booking ref: ${ref}. Handover: ${handStr}.`).join('\n')
-    return `Dear Debenhams Buying Team,\n\nThank you for your pre-dispatch chase. Confirming dispatch status:\n\n${poLines}\n\nPlease let us know if you require any further documentation.\n\nKind regards,\n${name} Team`
+    return `Dear ${BUYER.buyingTeam},\n\nThank you for your pre-dispatch chase. Confirming dispatch status:\n\n${poLines}\n\nPlease let us know if you require any further documentation.\n\nKind regards,\n${name} Team`
   }
 
   const getFollowUpEmailType = (g: ActionGroup) =>
@@ -11528,13 +11292,13 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
     const cutStr = cutDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
 
     if (g.type === 'overdue') {
-      return `Dear ${name} Team,\n\nThank you for confirming the revised ex-factory dates.\n\nPlease note this represents a significant delay to our intake plan. We require:\n1. Daily status updates until goods are confirmed dispatched\n2. Freight booking references confirmed no later than ${cutStr}\n3. Written confirmation that air freight will be arranged at your cost if dispatch slips further\n\nThis matter has been escalated to our Head of Buying.\n\nPlease confirm receipt and acceptance of these terms.\n\nKind regards,\nDebenhams Buying Team`
+      return `Dear ${name} Team,\n\nThank you for confirming the revised ex-factory dates.\n\nPlease note this represents a significant delay to our intake plan. We require:\n1. Daily status updates until goods are confirmed dispatched\n2. Freight booking references confirmed no later than ${cutStr}\n3. Written confirmation that air freight will be arranged at your cost if dispatch slips further\n\nThis matter has been escalated to our Head of Buying.\n\nPlease confirm receipt and acceptance of these terms.\n\nKind regards,\n${BUYER.buyingTeam}`
     }
     if (g.type === 'at_risk') {
-      return `Dear ${name} Team,\n\nThank you for confirming the revised delivery schedule and explaining the root cause.\n\nWe can accept the revised dates on the following conditions:\n1. No further extensions will be granted on these orders\n2. Air freight at your cost if revised dates slip by more than 3 days\n3. Weekly production updates until dispatch is confirmed\n\nPlease confirm your acceptance of these terms in writing within 24 hours.\n\nKind regards,\nDebenhams Buying Team`
+      return `Dear ${name} Team,\n\nThank you for confirming the revised delivery schedule and explaining the root cause.\n\nWe can accept the revised dates on the following conditions:\n1. No further extensions will be granted on these orders\n2. Air freight at your cost if revised dates slip by more than 3 days\n3. Weekly production updates until dispatch is confirmed\n\nPlease confirm your acceptance of these terms in writing within 24 hours.\n\nKind regards,\n${BUYER.buyingTeam}`
     }
     // late_dc (auto-send)
-    return `Dear ${name} Team,\n\nThank you for confirming the freight booking details. We have updated our systems accordingly.\n\nWe will monitor progress and will be in touch if any issues arise at our DC.\n\nKind regards,\nDebenhams Buying Team`
+    return `Dear ${name} Team,\n\nThank you for confirming the freight booking details. We have updated our systems accordingly.\n\nWe will monitor progress and will be in touch if any issues arise at our DC.\n\nKind regards,\n${BUYER.buyingTeam}`
   }
 
   const handleStartThread = (groups: ActionGroup[], editedBody?: string) => {
@@ -11563,7 +11327,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
     const name = getSupplier(g.supplierId)?.name ?? g.supplierId
     const nl = '\n'
     const list = g.pos.map(p => `- ${p.id}: ${p.product} (due ${formatDate(p.expectedDelivery)}, ${p.quantity.toLocaleString('en-GB')} units)`).join(nl)
-    const closing = nl + nl + 'Kind regards,' + nl + 'Debenhams Buying Team'
+    const closing = nl + nl + 'Kind regards,' + nl + BUYER.buyingTeam
     const ctx = g.messageContext ?? 'chase'
     if (ctx === 'preempt')     return `Dear ${name} Team,${nl}${nl}Ahead of delivery we'd like to confirm dates and the full ordered quantity on the following — please flag any risk to on-time, in-full delivery now:${nl}${nl}${list}${closing}`
     if (ctx === 'performance') return `Dear ${name} Team,${nl}${nl}As part of a review of recent performance, please confirm your plan to deliver the following open orders on time and in full, and raise any concerns:${nl}${nl}${list}${closing}`
@@ -11671,7 +11435,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
 
   const generateDP2Draft = (action: string, sup: { name: string }, muts: Array<{poId: string; field: string; oldVal: string; newVal: string}>): string => {
     const nl = '\n'
-    const closing = nl + nl + 'Kind regards,' + nl + 'Debenhams Buying Team'
+    const closing = nl + nl + 'Kind regards,' + nl + BUYER.buyingTeam
     if (action === 'apply_changes') {
       const mutLines = muts.map(m => `- ${m.poId}: ${m.field} updated from ${m.oldVal} to ${m.newVal}`).join(nl)
       return `Dear ${sup.name} Team,${nl}${nl}Thank you for your reply. We confirm acceptance of the proposed changes:${nl}${nl}${mutLines}${nl}${nl}We have updated our systems accordingly. Please ensure freight is booked in line with the revised schedule.${closing}`
@@ -11690,7 +11454,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
 
   const generateDP3Draft = (action: string, group: ActionGroup, sup: { name: string }, daysSinceChase: number): string => {
     const nl = '\n'
-    const closing = nl + nl + 'Kind regards,' + nl + 'Debenhams Buying Team'
+    const closing = nl + nl + 'Kind regards,' + nl + BUYER.buyingTeam
     if (action === 'followup_chase') {
       const poList = group.pos.map(p => `- ${p.id}: ${p.product}`).join(nl)
       return `Dear ${sup.name} Team,${nl}${nl}We sent you a chase email ${daysSinceChase} days ago regarding the following orders and have not yet received a response:${nl}${nl}${poList}${nl}${nl}This is now urgent. Please confirm the current status of these orders and provide a revised delivery timeline by end of business today.${nl}${nl}Failure to respond will require us to escalate this matter.${closing}`
@@ -11760,19 +11524,6 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
 
 
 
-  const AGENT_LOG: AgentLogEntry[] = [
-    { time: '2026-05-01T11:30:00Z', type: 'low_confidence', message: 'Supplier reply from Next Sourcing (Striped Cotton Tee — REC-006) is non-committal. No specific CP proposed. Agent cannot assess margin impact. Flagged for buyer review.' },
-    { time: '2026-04-22T08:00:00Z', type: 'scan',        message: 'Morning scan complete. 31 open POs reviewed. 3 overdue, 2 date change requests, 4 pre-dispatch chases identified.' },
-    { time: '2026-04-22T08:02:00Z', type: 'at_risk',     message: 'PO-2845 (Ankle Strap Heels, Trendy Boots UK) flagged — revised delivery now 9 May, 17-day extension requested.' },
-    { time: '2026-04-22T08:03:00Z', type: 'at_risk',     message: 'PO-2901 (Cotton Knit Jumpers, Nordic Knitwear) flagged — revised delivery 18 May requested, 28-day extension.' },
-    { time: '2026-04-21T14:30:00Z', type: 'chase_draft', message: 'Chase email drafted for Eastern Textiles Co — 2 overdue POs (PO-2756, PO-2834). Awaiting buyer review.' },
-    { time: '2026-04-21T09:15:00Z', type: 'scorecard',   message: 'Supplier scorecard updated: Eastern Textiles Co on-time rate down to 54% (was 58% last quarter). Trend: Deteriorating.' },
-    { time: '2026-04-20T16:45:00Z', type: 'escalation',  message: 'PO-2756 (Beach Shorts, Eastern Textiles) escalated to head of buying — 14 days overdue, no dispatch confirmation received.' },
-    { time: '2026-04-20T10:00:00Z', type: 'scan',        message: 'Midday scan: PO-2891 (Floral Maxi Dress) now 1 day overdue. Chase email queued for Summer Styles Ltd.' },
-    { time: '2026-04-19T11:20:00Z', type: 'date_change', message: 'Date change proposal received from Nordic Knitwear for PO-2901. New delivery: 18 May 2026 (was 20 Apr). Flagged for buyer approval.' },
-    { time: '2026-04-18T09:00:00Z', type: 'scan',        message: 'Morning scan: 28 open POs reviewed. 2 overdue, 1 pre-dispatch chase. All other POs tracking to plan.' },
-    { time: '2026-04-17T15:30:00Z', type: 'chase_draft', message: 'Pre-dispatch chase drafted for Urban Footwear — PO-2976 (Canvas Lo-Top Trainers). Delivery due 30 Apr. Awaiting buyer review.' },
-  ]
   const LOG_ICON: Record<AgentLogEntry['type'], { icon: string; color: string; bg: string; label: string; actionLabel: string; actionCls: string }> = {
     scan:        { icon: '🔍', color: 'text-blue-600',   bg: 'bg-blue-50',   label: 'Daily Scan',       actionLabel: 'Detected', actionCls: 'bg-gray-100 text-gray-500'   },
     scorecard:   { icon: '📊', color: 'text-purple-600', bg: 'bg-purple-50', label: 'Scorecard Update', actionLabel: 'Detected', actionCls: 'bg-gray-100 text-gray-500'   },
@@ -11873,7 +11624,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                             <span className={`text-[10px] font-semibold px-3 py-1 rounded-full border cursor-pointer ${cfg.autoSend ? 'bg-green-100 text-green-700 border-green-200' : 'bg-gray-100 text-gray-400 border-gray-200'}`}>Auto-send</span>
                             <span className={`text-[10px] font-semibold px-3 py-1 rounded-full border cursor-pointer ${!cfg.autoSend ? 'bg-amber-100 text-amber-700 border-amber-200' : 'bg-gray-100 text-gray-400 border-gray-200'}`}>Needs Review</span>
                           </div>
-                          <textarea className="w-full h-28 text-xs text-gray-600 border border-gray-200 rounded-lg p-2 resize-none focus:outline-none focus:ring-1 focus:ring-indigo-300" defaultValue={`Dear [Supplier Name],\n\nThis is an automated chase for your reference.\n\nKind regards,\nDebenhams Buying Team`} />
+                          <textarea className="w-full h-28 text-xs text-gray-600 border border-gray-200 rounded-lg p-2 resize-none focus:outline-none focus:ring-1 focus:ring-indigo-300" defaultValue={`Dear [Supplier Name],\n\nThis is an automated chase for your reference.\n\nKind regards,\n${BUYER.buyingTeam}`} />
                         </div>
                       )}
                     </div>
@@ -12187,7 +11938,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           const actionDraftBody = (() => {
             if (!drawerGroup || !drawerSup) return ''
             const pill = drawerCurrentPill
-            const closing = nl + nl + 'Kind regards,' + nl + 'Debenhams Buying Team'
+            const closing = nl + nl + 'Kind regards,' + nl + BUYER.buyingTeam
             const poList = drawerGroup.pos.map(p => '- ' + p.id + ': ' + p.product + ' (Due: ' + formatDate(p.expectedDelivery) + ')').join(nl)
             // Fill-rate pre-empt: ask the supplier to confirm they'll ship the FULL
             // ordered quantity. We do NOT change our order — just flag and confirm.
@@ -13554,7 +13305,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                 onClick={() => {
                                   if (opt.key === 'send_confirmation') {
                                     const nl = '\n'
-                                    const closing = nl + nl + 'Kind regards,' + nl + 'Debenhams Buying Team'
+                                    const closing = nl + nl + 'Kind regards,' + nl + BUYER.buyingTeam
                                     const confirmDraft = `Dear ${drawerSup.name} Team,${nl}${nl}We are writing to confirm that all matters relating to the recent order delay have now been resolved. Our records have been updated accordingly.${nl}${nl}Thank you for your cooperation.${closing}`
                                     setChaseThreads(prev => {
                                       const cur = prev[drawerGroup.supplierId]
