@@ -3117,17 +3117,30 @@ export function PORegister({
 
 // ── Suppliers View ─────────────────────────────────────────────────────────────
 export function SuppliersView() {
+  // Surface the worst-trending suppliers from the data (no hardcoded names) so
+  // a downstream client fork inherits the right names without editing App.tsx.
+  const underperformers = [...SUPPLIERS]
+    .filter(s => s.trend === 'deteriorating')
+    .sort((a, b) => a.onTimeRate - b.onTimeRate)
+    .slice(0, 2)
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="p-6">
+        {underperformers.length > 0 && (
         <div className="flex items-start gap-3 bg-orange-50 border border-orange-100 rounded-xl p-4 mb-6">
           <AlertTriangle className="w-4 h-4 text-orange-500 mt-0.5 shrink-0" />
           <p className="text-sm text-orange-800">
-            <strong>Eastern Textiles Co</strong> (54%, deteriorating) and{' '}
-            <strong>Summer Styles Ltd</strong> (68%, deteriorating) are underperforming.
+            {underperformers.map((s, i) => (
+              <Fragment key={s.id}>
+                {i > 0 && ' and '}
+                <strong>{s.name}</strong> ({s.onTimeRate}%, {s.trend})
+              </Fragment>
+            ))}
+            {underperformers.length === 1 ? ' is' : ' are'} underperforming.
             Consider reviewing open commitments and building contingency plans.
           </p>
         </div>
+        )}
 
         <div className="grid grid-cols-2 gap-4">
           {[...SUPPLIERS].sort((a, b) => a.onTimeRate - b.onTimeRate).map(supplier => {
@@ -13403,7 +13416,17 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           const inLens   = (po: PO) => poLens === 'all' ? true : poTemporality(po) === poLens
           const scopeOk  = (po: PO) => (poSupFilter === 'all' || po.supplierId === poSupFilter) &&
             (!poSearch || po.id.toLowerCase().includes(poSearch.toLowerCase()) || po.product.toLowerCase().includes(poSearch.toLowerCase()))
-          const typeMatch = (po: PO) => !poTypeFilter || (poTypeFilter === 'predicted_slip' ? poTemporality(po) === 'predicted' : severityOf(po) === poTypeFilter)
+          // "Overdue" = genuinely past its due date (the SAME date math the row uses for
+          // its "X days overdue" label), NOT the rare 'Ex-factory delay' status — which is
+          // why the old status-based chip read 0 while rows screamed overdue. The chips are
+          // INDEPENDENT filters (a PO can be both Overdue and Late DC), so each stays
+          // meaningful: Overdue selects past-due, Late DC/Date change select by status.
+          const isPastDue    = (po: PO) => po.status !== 'Delivered' && new Date(po.expectedDelivery).getTime() < today.getTime()
+          const matchesType  = (po: PO, key: string) =>
+            key === 'overdue'        ? isPastDue(po)
+            : key === 'predicted_slip' ? poTemporality(po) === 'predicted'
+            : severityOf(po) === key
+          const typeMatch = (po: PO) => !poTypeFilter || matchesType(po, poTypeFilter)
           const lensPop  = ALL_POS.filter(po => scopeOk(po) && inLens(po))   // drives tiers + chips
           const filtered = lensPop.filter(po => (poPriorityFilter === 'all' || poPriority(po) === poPriorityFilter) && typeMatch(po))
           const ordered  = poImpactSort ? [...filtered].sort((a, b) => salesAtRiskOf([b]) - salesAtRiskOf([a])) : filtered
@@ -13424,9 +13447,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           const attentionPop = lensPop.filter(po => poPriority(po) !== 'on_track')
           const heroValue    = salesAtRiskOf(attentionPop)
           const needAttention = attentionPop.length
-          const typeCount = (key: string) => key === 'predicted_slip'
-            ? lensPop.filter(p => poTemporality(p) === 'predicted').length
-            : lensPop.filter(p => severityOf(p) === key).length
+          const typeCount = (key: string) => lensPop.filter(p => matchesType(p, key)).length
           const poThead = (
             <thead className="bg-gray-50 border-b border-gray-100">
               <tr>{['PO Number','Supplier','Product','Status','Risk','Delivery','Predicted landing','Value','Freight',''].map((h, i) => <th key={h || i} className="px-4 py-3 text-left font-semibold text-gray-500 whitespace-nowrap">{h}</th>)}</tr>
