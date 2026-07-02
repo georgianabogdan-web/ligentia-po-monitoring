@@ -5950,13 +5950,24 @@ function poPriority(po: PO): PriorityKey {
   return 'on_track'
 }
 
-// Temporality — the SECOND axis (the Live/Predicted lens), independent of severity.
-//  live      = a committed date has already been missed/changed (status is late)
-//  predicted = on-track status but the forecast says it'll slip / miss sales
-//  clean     = on plan, nothing forecast
+// Temporality — the ONE primary-state classification (owned by the SHOWING toggle).
+// Mutually exclusive, and a real breach ALWAYS outranks a forecast:
+//  live      = LIVE-LATE: physically breached now — a hard-late status OR the
+//              committed delivery date is already past (vs the demo's "now").
+//  predicted = PREDICTED-SLIP: not breached, but predicted landing exceeds plan.
+//  clean     = ON-TRACK: neither.
 type Temporality = 'live' | 'predicted' | 'clean'
+const LATE_STATUSES = new Set<string>(['Ex-factory delay', 'Late DC booking', 'Date change required'])
+const DEMO_NOW = DEMO_TODAY.getTime()
+const committedDueMs = (po: PO) => new Date(po.revisedDelivery ?? po.expectedDelivery).getTime()
+// Physically breached = a stage-gate status is late, OR the committed delivery date
+// has passed. Anchored to DEMO_TODAY (the clock the predictions use) so the demo
+// doesn't drift to "everything overdue" against the real wall clock.
+function isBreached(po: PO): boolean {
+  return po.status !== 'Delivered' && (LATE_STATUSES.has(po.status) || committedDueMs(po) < DEMO_NOW)
+}
 function poTemporality(po: PO): Temporality {
-  if (severityOf(po) !== 'on_track') return 'live'
+  if (isBreached(po)) return 'live'                       // live breach wins over any forecast
   const pred = PO_PREDICTIONS[po.id]
   if (pred && (pred.missedSalesRisk.willMissSales || pred.landingGapDays > SLIP_DAYS)) return 'predicted'
   return 'clean'
@@ -13416,16 +13427,11 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           const inLens   = (po: PO) => poLens === 'all' ? true : poTemporality(po) === poLens
           const scopeOk  = (po: PO) => (poSupFilter === 'all' || po.supplierId === poSupFilter) &&
             (!poSearch || po.id.toLowerCase().includes(poSearch.toLowerCase()) || po.product.toLowerCase().includes(poSearch.toLowerCase()))
-          // "Overdue" = genuinely past its due date (the SAME date math the row uses for
-          // its "X days overdue" label), NOT the rare 'Ex-factory delay' status — which is
-          // why the old status-based chip read 0 while rows screamed overdue. The chips are
-          // INDEPENDENT filters (a PO can be both Overdue and Late DC), so each stays
-          // meaningful: Overdue selects past-due, Late DC/Date change select by status.
-          const isPastDue    = (po: PO) => po.status !== 'Delivered' && Math.ceil((new Date(po.expectedDelivery).getTime() - today.getTime()) / 86400000) < 0
-          const matchesType  = (po: PO, key: string) =>
-            key === 'overdue'        ? isPastDue(po)
-            : key === 'predicted_slip' ? poTemporality(po) === 'predicted'
-            : severityOf(po) === key
+          // TYPE = genuine operational sub-types only (Ex-factory / Late DC / Date
+          // change), filtering WITHIN the SHOWING (temporality) selection. The old
+          // cross-cutting "Overdue" and "Predicted slip" pills are gone — that split
+          // is now owned solely by the SHOWING toggle, so nothing double-classifies.
+          const matchesType = (po: PO, key: string) => severityOf(po) === key
           const typeMatch = (po: PO) => !poTypeFilter || matchesType(po, poTypeFilter)
           const lensPop  = ALL_POS.filter(po => scopeOk(po) && inLens(po))   // drives tiers + chips
           const filtered = lensPop.filter(po => (poPriorityFilter === 'all' || poPriority(po) === poPriorityFilter) && typeMatch(po))
@@ -13456,8 +13462,11 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           const renderPoRow = (po: PO) => {
             const sup = getSupplier(po.supplierId)
             const pred = PO_PREDICTIONS[po.id]
-            const diffDays = Math.ceil((new Date(po.expectedDelivery).getTime() - today.getTime()) / 86400000)
+            // Everything anchors to the primary state so labels can't contradict.
+            const state = poTemporality(po)
+            const diffDays = Math.ceil((committedDueMs(po) - DEMO_NOW) / 86400000)
             const relLabel = diffDays < 0 ? `${Math.abs(diffDays)} days overdue` : diffDays === 0 ? 'Due today' : `due in ${diffDays}d`
+            const showOverdue = state === 'live' && !LATE_STATUSES.has(po.status)   // breached by date: override a "good" status
             const gap = pred?.landingGapDays ?? 0
             const gapCls = gap >= 14 ? 'text-red-600' : gap >= 4 ? 'text-amber-600' : 'text-gray-400'
             return (
@@ -13467,8 +13476,10 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                 <td className="px-4 py-3 text-gray-600 max-w-[160px] truncate">{po.product}</td>
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-1.5 flex-wrap">
-                    {(() => { const sc = STATUS_CONFIG[po.status]; return <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-semibold text-[10px] border ${sc.bg} ${sc.text} ${sc.border}`}><span className={`w-1.5 h-1.5 rounded-full ${sc.dot}`} />{po.status}</span> })()}
-                    {isPredictedToSlip(po, pred) && <PredictedToSlipChip />}
+                    {showOverdue
+                      ? <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-semibold text-[10px] border bg-red-50 text-red-700 border-red-200"><span className="w-1.5 h-1.5 rounded-full bg-red-500" />Overdue</span>
+                      : (() => { const sc = STATUS_CONFIG[po.status]; return <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-semibold text-[10px] border ${sc.bg} ${sc.text} ${sc.border}`}><span className={`w-1.5 h-1.5 rounded-full ${sc.dot}`} />{po.status}</span> })()}
+                    {state === 'predicted' && <PredictedToSlipChip />}
                   </div>
                 </td>
                 <td className="px-4 py-3">{pred ? <RiskPill pred={pred} /> : <span className="text-[10px] text-gray-300">—</span>}</td>
@@ -13540,20 +13551,19 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                   <option value="all">All Suppliers</option>
                   {SUPPLIERS.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
-                {/* Problem type — subordinate "what kind" facet (live kinds; predicted-slip in All) */}
-                {poLens !== 'predicted' && (
-                  <FacetChips
-                    label="Type"
-                    value={poTypeFilter}
-                    onChange={setPoTypeFilter}
-                    options={[
-                      { key: 'overdue', label: 'Overdue',    count: typeCount('overdue'), tone: 'red' },
-                      { key: 'late_dc', label: 'Late DC',    count: typeCount('late_dc'), tone: 'amber' },
-                      { key: 'at_risk', label: 'Date change', count: typeCount('at_risk'), tone: 'orange' },
-                      ...(poLens === 'all' ? [{ key: 'predicted_slip', label: 'Predicted slip', count: typeCount('predicted_slip'), tone: 'violet' as SeverityTone }] : []),
-                    ]}
-                  />
-                )}
+                {/* TYPE — genuine operational sub-types, filtering WITHIN the SHOWING
+                    selection. Zero-count kinds are hidden (e.g. none appear under
+                    Predicted, which has no breached statuses). */}
+                {(() => {
+                  const typeOpts = ([
+                    { key: 'overdue', label: 'Ex-factory',  count: typeCount('overdue'), tone: 'red' as SeverityTone },
+                    { key: 'late_dc', label: 'Late DC',     count: typeCount('late_dc'), tone: 'amber' as SeverityTone },
+                    { key: 'at_risk', label: 'Date change', count: typeCount('at_risk'), tone: 'orange' as SeverityTone },
+                  ]).filter(o => o.count > 0)
+                  return typeOpts.length > 0
+                    ? <FacetChips label="Type" value={poTypeFilter} onChange={setPoTypeFilter} options={typeOpts} />
+                    : null
+                })()}
                 <button
                   onClick={() => setPoImpactSort(s => !s)}
                   className={`h-8 px-3 rounded-lg border text-xs font-semibold flex items-center gap-1.5 transition-colors ${poImpactSort ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}
