@@ -7,6 +7,7 @@ import {
   Bot, User, X, Clock, Mail, Check,
   Calendar, MessageSquare, Send, ChevronRight, ChevronLeft, Plus, AlertCircle, Info, Pencil,
   PlusCircle, StickyNote, Phone,
+  Pause, Play, Shield, Undo2,
 } from 'lucide-react'
 import { ComposedChart, LineChart, Cell, Bar, Line, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceArea, ReferenceLine } from 'recharts'
 import { INVENTORY_PRODUCTS, REORDER_RECOMMENDATIONS } from './mockData'
@@ -21,6 +22,13 @@ import {
 import type { JourneyStageKey, StagePerf, PoPrediction, FillPrediction } from './predict'
 import { SUPPLIERS, SUPPLIER_EMAILS, ALL_POS, PO_PRODUCT_MAP, NEG_PO_MAP, SEED_PO_EVENTS, STATIC_KANBAN_ITEMS, SEEDED_PROMO_PCT, SEEDED_INV_AUDIT, SEEDED_THREADS, SEEDED_SUPPLIER_SESSIONS, TRIGGER_MESSAGES, AGENT_LOG } from './poData'
 import { BUYER, EDIT_USER, TEAM } from './clientConfig'
+import {
+  AUTOMATION_RULES, RULE_SECTIONS, GUARDRAILS, AUTONOMY_LBL, fmtParam,
+  ruleLevel, setRuleLevel, ruleParam, setRuleParam, guardrail, setGuardrail,
+  automationPaused, setAutomationPaused, ruleIsLive, autoRuleCount,
+  AUTOMATION_LOG, logAutomation,
+} from './automationData'
+import type { AutomationRuleDef, AutonomyLevel, AutomationLogEntry } from './automationData'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 type POStatus =
@@ -35,7 +43,7 @@ type POStatus =
   | 'Delivered'
 
 type SupplierTrend = 'improving' | 'stable' | 'deteriorating'
-type Tab = 'alerts' | 'inventory' | 'reorder' | 'reorder-manager' | 'po-monitoring' | 'replenishment'
+type Tab = 'alerts' | 'inventory' | 'reorder' | 'reorder-manager' | 'po-monitoring' | 'replenishment' | 'agent-settings'
 type AlertBucket = 'ex-factory-delay' | 'date-change' | 'submission-deadline' | 'intake-volume'
 
 export interface Supplier {
@@ -864,7 +872,7 @@ function PeakLogoMark() {
 }
 
 // ── Sidebar ────────────────────────────────────────────────────────────────────
-function Sidebar() {
+function Sidebar({ agentSettingsOpen, onOpenAgentSettings }: { agentSettingsOpen: boolean; onOpenAgentSettings: () => void }) {
   return (
     <div className="w-14 bg-white border-r border-gray-100 flex flex-col items-center py-3 shrink-0 min-h-screen">
       <div className="flex items-center justify-center w-full px-2 mb-4"><PeakLogoMark /></div>
@@ -877,7 +885,7 @@ function Sidebar() {
       <div className="flex-1" />
       <div className="flex flex-col items-center gap-0.5 w-full px-1.5">
         <button className="w-full h-9 flex items-center justify-center rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-50 transition-colors"><BookOpen className="w-4 h-4" /></button>
-        <button className="w-full h-9 flex items-center justify-center rounded-lg text-purple-500 hover:bg-gray-50 transition-colors"><Sparkles className="w-4 h-4" /></button>
+        <button onClick={onOpenAgentSettings} title="Agent Settings" className={`w-full h-9 flex items-center justify-center rounded-lg transition-colors ${agentSettingsOpen ? 'bg-violet-50 text-violet-600' : 'text-purple-500 hover:bg-gray-50'}`}><Sparkles className="w-4 h-4" /></button>
         <div className="w-8 border-t border-gray-100 my-1" />
         <button className="w-full h-9 flex items-center justify-center rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-50 transition-colors"><Ghost className="w-4 h-4" /></button>
         <button className="w-full h-9 flex items-center justify-center rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-50 transition-colors"><HelpCircle className="w-4 h-4" /></button>
@@ -1141,18 +1149,37 @@ function ActionQueueCard({
 }
 
 // ── Shared ActionCardPills (status + action-type, used everywhere a card or header surfaces an action) ──
-type CardStatusKind = 'decision-needed' | 'agent-drafted' | 'agent-will-handle'
+type CardStatusKind = 'decision-needed' | 'agent-drafted' | 'agent-will-handle' | 'auto-sent'
 
 const CARD_STATUS_LBL: Record<CardStatusKind, string> = {
   'decision-needed':  'Decision needed',
   'agent-drafted':    'Agent drafted',
   'agent-will-handle':'Agent will handle',
+  'auto-sent':        'Sent automatically',
 }
 const CARD_STATUS_CLS: Record<CardStatusKind, string> = {
   'decision-needed':  'bg-red-100 text-red-700',
   'agent-drafted':    'bg-purple-100 text-purple-700',
   'agent-will-handle':'bg-gray-100 text-gray-600',
+  'auto-sent':        'bg-violet-100 text-violet-700',
 }
+
+// Auto-chase rule (Agent Settings) — conditions only; callers add ruleIsLive().
+// 14+ days overdue and weak suppliers (OTR < 70) are always a human decision,
+// whatever the rule is configured to.
+function autoChaseConditionsOK(pos: PO[], sup: Supplier | null, today: Date): boolean {
+  if (!sup || sup.onTimeRate < 70) return false
+  const maxOver = Math.max(...pos.map(p => daysOverdueAt(p, today)))
+  if (maxOver < (ruleParam('auto-chase', 'minDays') as number) || maxOver >= 14) return false
+  if (sup.onTimeRate < (ruleParam('auto-chase', 'minOTR') as number)) return false
+  const val = pos.reduce((s, p) => s + parseOrderValAt(p.orderValue), 0)
+  if (val >= (ruleParam('auto-chase', 'maxValue') as number) || val >= (guardrail('valueCeiling') as number)) return false
+  if (guardrail('priorityManual') && pos.some(p => p.priority)) return false
+  if (guardrail('excludeDeteriorating') && sup.trend === 'deteriorating') return false
+  return true
+}
+const autoChaseApplies = (pos: PO[], sup: Supplier | null, today: Date) =>
+  ruleIsLive('auto-chase') && autoChaseConditionsOK(pos, sup, today)
 
 // Derive the two pills for a card from its group + supplier. Tier 1 weak-supplier overdues
 // (OTR < 70) upgrade to "Decision needed / Commercial decision" even before the 14-day mark.
@@ -1161,6 +1188,10 @@ function deriveCardPills(group: ActionGroup, sup: Supplier | null): { status: Ca
     const maxOver = Math.max(...group.pos.map(p => Math.ceil((Date.now() - new Date(p.expectedDelivery).getTime()) / 86400000)))
     const decisionNeeded = maxOver >= 14 || (sup && sup.onTimeRate < 70)
     if (decisionNeeded) return { status: 'decision-needed',   actionTypeLabel: 'Commercial decision' }
+    if (autoChaseApplies(group.pos, sup, new Date()))
+      return                   { status: 'auto-sent',         actionTypeLabel: 'Routine chase' }
+    if (ruleLevel('auto-chase') === 'off')
+      return                   { status: 'agent-drafted',     actionTypeLabel: 'Routine chase' }
     return                     { status: 'agent-will-handle', actionTypeLabel: 'Routine chase' }
   }
   if (group.type === 'at_risk') return { status: 'agent-drafted', actionTypeLabel: 'Approve date change' }
@@ -3244,6 +3275,19 @@ const BUY_STATUS_OF: Record<ApprovalStatus, BuyStatus> = {
   'Sent':             'sent',
 }
 const buyStatusOf = (a: ApprovalStatus): BuyStatus => BUY_STATUS_OF[a]
+
+// ── Reorder approval — ONE pipeline, single source of truth ──────────────────
+// The buyer Reorder list AND Reorder – Manager View both read/write THIS store,
+// layered over REORDER_RECOMMENDATIONS[].approvalStatus. One record, filtered
+// into each queue by its state — never duplicated. Module-level (like the other
+// _shared* stores) so an action in one view is visible in the other on tab switch;
+// components bump a local counter to re-render after they mutate it.
+interface ApprovalEntry { status: ApprovalStatus; comment?: string }
+const _approvalState: Record<string, ApprovalEntry> = {}
+const approvalOf        = (p: { id: string; approvalStatus: ApprovalStatus }): ApprovalStatus => _approvalState[p.id]?.status ?? p.approvalStatus
+const approvalCommentOf = (p: { id: string; rejectionReason?: string }): string => _approvalState[p.id]?.comment ?? p.rejectionReason ?? ''
+const setApproval       = (id: string, status: ApprovalStatus, comment = '') => { _approvalState[id] = { status, comment } }
+const clearApproval     = (id: string) => { delete _approvalState[id] }
 
 const BUY_STATUS_CFG: Record<BuyStatus, { label: string; bg: string; text: string; border: string }> = {
   draft:            { label: 'Draft',             bg: 'bg-gray-100',  text: 'text-gray-600',   border: 'border-gray-200'   },
@@ -7602,7 +7646,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
   const [showInbox, setShowInbox] = useState(false)   // Active Negotiations conversation inbox
   const [chartTab, setChartTab] = useState<'stock' | 'availability' | 'size-curve'>('stock')
   const [timeRange, setTimeRange] = useState<'1m' | '6m' | '1y'>('6m')
-  const [statusOverrides, setStatusOverrides] = useState<Record<string, ApprovalStatus>>({})
+  const [, bumpApproval] = useState(0)   // re-render after mutating the shared _approvalState
   const [freightOverrides, setFreightOverrides] = useState<Record<string, 'Sea' | 'Air'>>({})
   const [freightReasons, setFreightReasons]     = useState<Record<string, string>>({})
   const [freightSplits, setFreightSplits]       = useState<Record<string, { air: number; sea: number }>>({})
@@ -7675,8 +7719,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
   const [poHistory, setPoHistory]               = useState<Record<string, Array<{ action: string; by: string; date: string }>>>({})
   const [dismissedHistoryBanners, setDismissedHistoryBanners] = useState<Set<string>>(new Set())
 
-  const effStatus  = (p: typeof REORDER_RECOMMENDATIONS[0]): ApprovalStatus =>
-    statusOverrides[p.id] ?? p.approvalStatus
+  const effStatus  = (p: typeof REORDER_RECOMMENDATIONS[0]): ApprovalStatus => approvalOf(p)
   const effFreight = (p: typeof REORDER_RECOMMENDATIONS[0]): 'Sea' | 'Air' =>
     freightOverrides[p.id] ?? p.recommendedFreight
 
@@ -7834,7 +7877,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                         if (isOverrideFreight && !freightReasons[p.id]?.trim()) {
                           showToast('Please add a reason for the freight override before sending.'); return
                         }
-                        setStatusOverrides(o => ({ ...o, [p.id]: 'Pending Approval' }))
+                        setApproval(p.id, 'Pending Approval'); bumpApproval(v => v + 1)
                         setPoHistory(h => ({ ...h, [p.id]: [...(h[p.id] ?? []), { action: 'Sent to manager', by: EDIT_USER, date: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) }] }))
                         showToast(`${p.name} sent to manager for approval.`)
                       }} className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors">
@@ -7852,7 +7895,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                         if (savedExFactory !== p.exFactoryDate) changes.push(`Ex-Factory: ${p.exFactoryDate} → ${savedExFactory}`)
                         const changeStr = changes.length > 0 ? changes.join(', ') : 'no fields changed'
                         const today = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
-                        setStatusOverrides(o => ({ ...o, [p.id]: 'Pending Approval' }))
+                        setApproval(p.id, 'Pending Approval'); bumpApproval(v => v + 1)
                         setPoHistory(h => ({ ...h, [p.id]: [...(h[p.id] ?? []), { action: `Resubmitted with changes: ${changeStr}`, by: EDIT_USER, date: today }] }))
                         _sharedResubmits.add(p.id)
                         showToast(`${p.name} resubmitted for management approval.`)
@@ -7862,7 +7905,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                     )}
                     {curStatus === 'Approved' && (
                       <button onClick={() => {
-                        setStatusOverrides(o => ({ ...o, [p.id]: 'Sent' }))
+                        setApproval(p.id, 'Sent'); bumpApproval(v => v + 1)
                         showToast(`${p.name} pushed to Order App.`)
                       }} className="h-7 px-3 text-[10px] font-semibold rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors">
                         Push to Order App
@@ -8651,7 +8694,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
             onViewDetails={setDetailSheetRecId}
             onSubmitForApproval={() => setSendMgrModalIds([lp.id])}
             onPushToOrderApp={() => setPushModalIds([lp.id])}
-            onResubmit={() => { setStatusOverrides(o => ({ ...o, [lp.id]: 'Pending Approval' })); showToast(`${lp.name} resubmitted for management approval.`) }}
+            onResubmit={() => { setApproval(lp.id, 'Pending Approval'); bumpApproval(v => v + 1); showToast(`${lp.name} resubmitted for management approval.`) }}
           />
         )
       })() : (
@@ -9048,11 +9091,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
               className="w-full rounded-lg border border-gray-200 px-3 py-2 text-xs text-gray-700 resize-none focus:outline-none focus:ring-1 focus:ring-indigo-400 mb-4 placeholder:text-gray-400" />
             <div className="flex gap-2">
               <button onClick={() => {
-                setStatusOverrides(o => {
-                  const n = { ...o }
-                  sendMgrModalIds.forEach(id => { n[id] = 'Pending Approval' })
-                  return n
-                })
+                sendMgrModalIds.forEach(id => setApproval(id, 'Pending Approval')); bumpApproval(v => v + 1)
                 setSendMgrModalIds([])
                 setSendMgrMsg('')
                 setSelectedIds(new Set())
@@ -9123,11 +9162,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
               </div>
               <div className="flex gap-2">
                 <button onClick={() => {
-                  setStatusOverrides(o => {
-                    const n = { ...o }
-                    pushModalIds.forEach(id => { n[id] = 'Sent' })
-                    return n
-                  })
+                  pushModalIds.forEach(id => setApproval(id, 'Sent')); bumpApproval(v => v + 1)
                   setPushModalIds([])
                   setSelectedIds(new Set())
                   showToast(`${pushModalIds.length} line${pushModalIds.length !== 1 ? 's' : ''} pushed to Order App.`)
@@ -9152,11 +9187,10 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
 }
 
 // ── Manager Reorder View ───────────────────────────────────────────────────────
-type Override = { status: 'Approved' | 'Rejected'; comment: string }
 type ManagerFilter = 'All' | 'Pending Approval' | 'Approved' | 'Rejected'
 
 function ManagerReorderView() {
-  const [overrides,   setOverrides]   = useState<Record<string, Override>>({})
+  const [, bumpApproval] = useState(0)   // re-render after mutating the shared _approvalState
   const [rejectDraft, setRejectDraft] = useState<Record<string, string>>({})
   const [rejectOpen,  setRejectOpen]  = useState<Record<string, boolean>>({})
   const [search,  setSearch]  = useState('')
@@ -9188,15 +9222,12 @@ function ManagerReorderView() {
     setOpenInquiryId(recId)
   }
 
-  const effStatus = (p: typeof REORDER_RECOMMENDATIONS[0]): ApprovalStatus =>
-    (overrides[p.id]?.status ?? p.approvalStatus) as ApprovalStatus
-  const effComment = (p: typeof REORDER_RECOMMENDATIONS[0]) =>
-    overrides[p.id]?.comment ?? p.rejectionReason ?? ''
+  const effStatus = (p: typeof REORDER_RECOMMENDATIONS[0]): ApprovalStatus => approvalOf(p)
+  const effComment = (p: typeof REORDER_RECOMMENDATIONS[0]) => approvalCommentOf(p)
 
-  const approve = (id: string) =>
-    setOverrides(o => ({ ...o, [id]: { status: 'Approved', comment: '' } }))
+  const approve = (id: string) => { setApproval(id, 'Approved'); bumpApproval(v => v + 1) }
   const confirmReject = (id: string) => {
-    setOverrides(o => ({ ...o, [id]: { status: 'Rejected', comment: rejectDraft[id] ?? '' } }))
+    setApproval(id, 'Rejected', rejectDraft[id] ?? ''); bumpApproval(v => v + 1)
     setRejectOpen(o => ({ ...o, [id]: false }))
     const entry = {
       date: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }),
@@ -9205,8 +9236,7 @@ function ManagerReorderView() {
     }
     _sharedRejectionHistory[id] = [entry, ...(_sharedRejectionHistory[id] ?? [])]
   }
-  const undo = (id: string) =>
-    setOverrides(o => { const n = { ...o }; delete n[id]; return n })
+  const undo = (id: string) => { clearApproval(id); bumpApproval(v => v + 1) }
 
   const showMgrToast = (msg: string) => {
     setMgrToast(msg)
@@ -9216,11 +9246,7 @@ function ManagerReorderView() {
   const handleBulkApprove = () => {
     const eligible = [...selectedIds].filter(id => effStatus(REORDER_RECOMMENDATIONS.find(r => r.id === id)!) === 'Pending Approval')
     const skipped  = selectedIds.size - eligible.length
-    setOverrides(o => {
-      const n = { ...o }
-      eligible.forEach(id => { n[id] = { status: 'Approved', comment: '' } })
-      return n
-    })
+    eligible.forEach(id => setApproval(id, 'Approved')); bumpApproval(v => v + 1)
     setSelectedIds(new Set())
     const msg = skipped === 0
       ? `${eligible.length} line${eligible.length !== 1 ? 's' : ''} approved.`
@@ -9230,11 +9256,7 @@ function ManagerReorderView() {
 
   const handleBulkReject = () => {
     const eligible = [...selectedIds].filter(id => effStatus(REORDER_RECOMMENDATIONS.find(r => r.id === id)!) === 'Pending Approval')
-    setOverrides(o => {
-      const n = { ...o }
-      eligible.forEach(id => { n[id] = { status: 'Rejected', comment: bulkRejectComment } })
-      return n
-    })
+    eligible.forEach(id => setApproval(id, 'Rejected', bulkRejectComment)); bumpApproval(v => v + 1)
     setSelectedIds(new Set())
     setBulkRejectModal(false)
     setBulkRejectComment('')
@@ -9305,7 +9327,7 @@ function ManagerReorderView() {
             <div className="flex items-center gap-2">
               {status === 'Pending Approval' && (
                 <>
-                  <button onClick={() => { setOverrides(o => ({ ...o, [p.id]: { status: 'Approved', comment: '' } })); setSelectedProduct({ ...p }) }}
+                  <button onClick={() => { setApproval(p.id, 'Approved'); bumpApproval(v => v + 1); setSelectedProduct({ ...p }) }}
                     className="h-8 px-4 text-xs font-semibold rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors">
                     Approve
                   </button>
@@ -11196,6 +11218,8 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
     if (thread?.status === 'no-reply-overdue') return 'no-reply-overdue'
     if (thread?.status === 'awaiting-reply') return 'awaiting-reply'
     if (g.type === 'overdue' && Math.max(...g.pos.map(p => daysOverdue(p))) >= 14) return 'decision-needed'
+    // Auto-chase rule live (Agent Settings): the agent has already sent the routine chase.
+    if (g.type === 'overdue' && autoChaseApplies(g.pos, SUPPLIERS.find(s => s.id === g.supplierId) ?? null, new Date())) return 'awaiting-reply'
     return 'agent-drafted'
   }
   const cardScore = (g: ActionGroup) => urgWt(g) * g.pos.reduce((s, p) => s + parseOrderVal(p.orderValue), 0)
@@ -14791,9 +14815,434 @@ function ReplenishmentView() {
   )
 }
 
+// ── Agent Settings (automation control panel) ─────────────────────────────────
+// Admin surface for the autonomy ladder: per-rule level (Off / Draft / Auto),
+// inline threshold params, global guardrails and an audit log. Rule state lives
+// in the automationData module store; workflow views read it on render.
+
+type RulePreviewItem = { key: string; title: string; sub: string; held?: string }
+const heldLast = (a: RulePreviewItem, b: RulePreviewItem) => (a.held ? 1 : 0) - (b.held ? 1 : 0)
+
+// Dry-run: what each rule would act on against the CURRENT synthetic data, with
+// the guardrail reason when something is held back. Recomputed live as params change.
+function rulePreview(ruleId: string): RulePreviewItem[] {
+  const today        = DEMO_TODAY
+  const ceiling      = guardrail('valueCeiling') as number
+  const prioManual   = guardrail('priorityManual') as boolean
+  const skipDeterior = guardrail('excludeDeteriorating') as boolean
+
+  if (ruleId === 'auto-chase') {
+    const minDays  = ruleParam('auto-chase', 'minDays')  as number
+    const maxValue = ruleParam('auto-chase', 'maxValue') as number
+    const minOTR   = ruleParam('auto-chase', 'minOTR')   as number
+    const bySup = new Map<string, PO[]>()
+    ALL_POS.filter(p => p.status === 'Ex-factory delay').forEach(p => bySup.set(p.supplierId, [...(bySup.get(p.supplierId) ?? []), p]))
+    const items: RulePreviewItem[] = []
+    bySup.forEach((pos, supId) => {
+      const sup = SUPPLIERS.find(s => s.id === supId)
+      if (!sup) return
+      const maxOver = Math.max(...pos.map(p => daysOverdueAt(p, today)))
+      const val     = pos.reduce((s, p) => s + parseOrderValAt(p.orderValue), 0)
+      const held =
+        maxOver >= 14                                    ? '14+ days overdue — always a human decision' :
+        sup.onTimeRate < 70                              ? 'On-time rate below 70% — commercial decision' :
+        maxOver < minDays                                ? `Not yet ${minDays} day${minDays > 1 ? 's' : ''} overdue` :
+        sup.onTimeRate < minOTR                          ? `On-time rate below the ${minOTR}% floor` :
+        val >= maxValue                                  ? `Order value over ${fmtParam('money', maxValue)}` :
+        val >= ceiling                                   ? 'Over the global value ceiling' :
+        prioManual && pos.some(p => p.priority)          ? 'Key item — always manual' :
+        skipDeterior && sup.trend === 'deteriorating'    ? 'Supplier trend deteriorating' :
+        undefined
+      items.push({
+        key: supId,
+        title: `${sup.name} — ${pos.length} overdue PO${pos.length > 1 ? 's' : ''}`,
+        sub: `£${val.toLocaleString()} · up to ${maxOver}d late · on-time rate ${sup.onTimeRate}%`,
+        held,
+      })
+    })
+    return items.sort(heldLast)
+  }
+
+  if (ruleId === 'auto-preempt') {
+    const rank: Record<string, number> = { Low: 0, Medium: 1, High: 2, Critical: 3 }
+    const minBand = ruleParam('auto-preempt', 'band') as string
+    return Object.values(PO_PREDICTIONS)
+      .filter(pr => pr.isOpen && pr.landingGapDays > 0 && rank[pr.riskBand] >= rank[minBand])
+      .map(pr => {
+        const po = ALL_POS.find(p => p.id === pr.poId)
+        const held = prioManual && po?.priority ? 'Key item — always manual' : undefined
+        return {
+          key: pr.poId,
+          title: `${pr.poId} · ${po?.product ?? ''}`,
+          sub: `Risk ${pr.riskBand} · predicted +${pr.landingGapDays}d${pr.gatingStageLabel ? ` at ${pr.gatingStageLabel.toLowerCase()}` : ''}`,
+          held,
+        }
+      })
+      .sort(heldLast)
+  }
+
+  if (ruleId === 'auto-fill-confirm') {
+    const minUnits = ruleParam('auto-fill-confirm', 'units') as number
+    return Object.values(FILL_PREDICTIONS)
+      .filter(f => f.isOpen && f.predictedShortfallUnits >= minUnits)
+      .map(f => {
+        const po = ALL_POS.find(p => p.id === f.poId)
+        return {
+          key: f.poId,
+          title: `${f.poId} · ${po?.product ?? ''}`,
+          sub: `~${f.predictedFillRatePct}% fill · ~${f.predictedShortfallUnits.toLocaleString()} units short`,
+        }
+      })
+  }
+
+  if (ruleId === 'auto-accept-date') {
+    const maxSlip = ruleParam('auto-accept-date', 'maxSlip') as number
+    return ALL_POS
+      .filter(p => p.status === 'Date change required' && p.revisedDelivery)
+      .map(p => {
+        const slip = Math.round((new Date(p.revisedDelivery!).getTime() - new Date(p.expectedDelivery).getTime()) / 86400000)
+        const held =
+          slip > maxSlip                                              ? `${slip}-day push — over the ${maxSlip}-day limit` :
+          PO_PREDICTIONS[p.id]?.missedSalesRisk.willMissSales         ? 'Sales at risk if accepted' :
+          prioManual && p.priority                                    ? 'Key item — always manual' :
+          (p.dateChanges?.length ?? 0) > 1                            ? 'Repeat slip on this PO' :
+          parseOrderValAt(p.orderValue) >= ceiling                    ? 'Over the global value ceiling' :
+          undefined
+        return {
+          key: p.id,
+          title: `${p.id} · ${p.product}`,
+          sub: `${slip}-day push requested · ${p.orderValue} · ${SUPPLIERS.find(s => s.id === p.supplierId)?.name ?? ''}`,
+          held,
+        }
+      })
+      .sort(heldLast)
+  }
+
+  if (ruleId === 'auto-reorder-push') {
+    const maxCost = ruleParam('auto-reorder-push', 'maxCost') as number
+    return REORDER_RECOMMENDATIONS
+      .filter(r => ['Draft', 'Pending Approval', 'Approved'].includes(approvalOf(r)))
+      .map(r => {
+        const held =
+          r.totalCost >= maxCost ? `£${r.totalCost.toLocaleString()} — over the ${fmtParam('money', maxCost)} limit` :
+          r.totalCost >= ceiling ? 'Over the global value ceiling' :
+          undefined
+        return {
+          key: r.id,
+          title: r.name,
+          sub: `£${r.totalCost.toLocaleString()} total cost · ${approvalOf(r)} · ${r.supplier}`,
+          held,
+        }
+      })
+      .sort(heldLast)
+  }
+
+  if (ruleId === 'auto-counter') {
+    return REORDER_RECOMMENDATIONS
+      .filter(r => r.supplierStatus === 'replied' || r.supplierStatus === 'awaiting_reply')
+      .map(r => ({
+        key: r.id,
+        title: r.name,
+        sub: `${r.supplierStatus === 'replied' ? 'Supplier countered' : 'Awaiting supplier reply'} · £${r.totalCost.toLocaleString()} · ${r.supplier}`,
+      }))
+  }
+
+  return []   // auto-followup: applies to live chase threads (session state) — no static preview
+}
+
+function AutonomySwitch({ level, canEdit, onChange }: { level: AutonomyLevel; canEdit: boolean; onChange: (l: AutonomyLevel) => void }) {
+  return (
+    <div className="flex rounded-lg border border-gray-200 overflow-hidden shrink-0">
+      {(['off', 'draft', 'auto'] as AutonomyLevel[]).map(l => (
+        <button
+          key={l}
+          disabled={!canEdit}
+          onClick={() => onChange(l)}
+          className={`h-7 px-3 text-[10px] font-semibold transition-colors ${
+            level === l
+              ? l === 'auto' ? 'bg-violet-600 text-white' : l === 'draft' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-white'
+              : 'bg-white text-gray-500 hover:bg-gray-50'
+          } ${!canEdit ? 'cursor-not-allowed opacity-70' : ''}`}
+        >
+          {AUTONOMY_LBL[l]}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function GuardrailToggle({ on, disabled, onChange }: { on: boolean; disabled?: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button
+      disabled={disabled}
+      onClick={() => onChange(!on)}
+      className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${on ? 'bg-violet-600' : 'bg-gray-200'} ${disabled ? 'opacity-60 cursor-not-allowed' : ''}`}
+    >
+      <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
+    </button>
+  )
+}
+
+function AutomationRuleCard({ def, canEdit, paused, onLevelChange, onParamChange }: {
+  def:           AutomationRuleDef
+  canEdit:       boolean
+  paused:        boolean
+  onLevelChange: (def: AutomationRuleDef, level: AutonomyLevel) => void
+  onParamChange: (def: AutomationRuleDef, key: string, v: number | string) => void
+}) {
+  const [showPreview, setShowPreview] = useState(false)
+  const level   = ruleLevel(def.id)
+  const items   = rulePreview(def.id)
+  const matched = items.filter(i => !i.held)
+  const held    = items.filter(i => i.held)
+  return (
+    <div className={`bg-white rounded-xl border shadow-sm p-4 ${level === 'auto' && !paused ? 'border-violet-200' : 'border-gray-100'}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-sm font-bold text-gray-900">{def.title}</span>
+          {level === 'auto' && (paused
+            ? <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">Paused</span>
+            : <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700">Live</span>)}
+        </div>
+        <AutonomySwitch level={level} canEdit={canEdit} onChange={l => onLevelChange(def, l)} />
+      </div>
+      <div className={`mt-2 text-[13px] leading-relaxed ${level === 'off' ? 'text-gray-400' : 'text-gray-700'}`}>
+        {def.sentence.map((part, i) => {
+          if (typeof part === 'string') return <span key={i}>{part}</span>
+          const pd  = def.params.find(p => p.key === part.p)!
+          const val = ruleParam(def.id, part.p)
+          return (
+            <select
+              key={i}
+              value={String(val)}
+              disabled={!canEdit || level === 'off'}
+              onChange={e => onParamChange(def, part.p, typeof pd.options[0] === 'number' ? Number(e.target.value) : e.target.value)}
+              className="inline-block align-baseline mx-0.5 h-6 pl-1.5 pr-1 rounded-md border border-gray-200 bg-white text-[11px] font-bold text-indigo-700 disabled:text-gray-400"
+            >
+              {pd.options.map(o => <option key={String(o)} value={String(o)}>{fmtParam(pd.fmt, o)}</option>)}
+            </select>
+          )
+        })}
+      </div>
+      <p className="mt-1.5 text-[11px] text-gray-400">
+        {level === 'auto' ? def.autoHint : level === 'draft' ? def.draftHint : 'The agent only flags — no drafts, no sends.'}
+      </p>
+      <div className="mt-3 pt-3 border-t border-gray-50 flex items-center justify-between">
+        <span className="text-[11px] text-gray-500">
+          Against current data: <span className="font-bold text-gray-700">{matched.length}</span> would {level === 'auto' ? 'be actioned' : 'be drafted'}
+          {held.length > 0 && <> · <span className="font-semibold text-amber-600">{held.length} held by guardrails</span></>}
+        </span>
+        <button onClick={() => setShowPreview(v => !v)} className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-700 inline-flex items-center gap-1">
+          {showPreview ? 'Hide preview' : 'Preview'} <ChevronDown className={`w-3 h-3 transition-transform ${showPreview ? 'rotate-180' : ''}`} />
+        </button>
+      </div>
+      {showPreview && (
+        <div className="mt-2 rounded-lg bg-gray-50 border border-gray-100 divide-y divide-gray-100">
+          {items.length === 0 && <div className="px-3 py-2.5 text-[11px] text-gray-400">Nothing in the current data would trigger this rule.</div>}
+          {items.slice(0, 6).map(it => (
+            <div key={it.key} className="px-3 py-2 flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold text-gray-800">{it.title}</div>
+                <div className="text-[10px] text-gray-500">{it.sub}{it.held && <span className="text-amber-600"> · {it.held}</span>}</div>
+              </div>
+              {it.held
+                ? <span className="shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">Held</span>
+                : <span className="shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700">{level === 'auto' ? 'Would send' : 'Would draft'}</span>}
+            </div>
+          ))}
+          {items.length > 6 && <div className="px-3 py-1.5 text-[10px] text-gray-400">+{items.length - 6} more</div>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AgentSettingsView({ onChanged }: { onChanged?: () => void }) {
+  const [, bump] = useState(0)
+  const rerender = () => { bump(v => v + 1); onChanged?.() }
+  const [role, setRole] = useState<'manager' | 'merchandiser'>('manager')
+  const [toast, setToast] = useState<string | null>(null)
+  const showToast = (m: string) => { setToast(m); setTimeout(() => setToast(null), 6000) }
+  const canEdit = role === 'manager'
+  const paused  = automationPaused()
+
+  const onLevelChange = (def: AutomationRuleDef, level: AutonomyLevel) => {
+    setRuleLevel(def.id, level)
+    // Small reorders: applying the rule has an immediate, visible effect — matching
+    // recommendations are pushed to the Order App now, logged, and undoable.
+    if (def.id === 'auto-reorder-push' && level === 'auto' && !automationPaused()) {
+      const matched = rulePreview(def.id).filter(i => !i.held)
+      if (matched.length > 0) {
+        matched.forEach(m => setApproval(m.key, 'Sent'))
+        logAutomation({
+          time: new Date().toISOString(), ruleId: def.id, tone: 'auto',
+          action: `${matched.length} reorder${matched.length > 1 ? 's' : ''} auto-sent to the Order App`,
+          detail: `${matched.map(m => m.title).join(', ')} — all under ${fmtParam('money', ruleParam(def.id, 'maxCost') as number)} and inside guardrails.`,
+          undo: { recIds: matched.map(m => m.key) },
+        })
+        showToast(`${matched.length} reorder${matched.length > 1 ? 's' : ''} auto-sent to the Order App — logged below, with undo.`)
+      }
+    }
+    rerender()
+  }
+  const onParamChange = (def: AutomationRuleDef, key: string, v: number | string) => { setRuleParam(def.id, key, v); rerender() }
+  const undoEntry = (entry: AutomationLogEntry) => {
+    entry.undo?.recIds.forEach(id => clearApproval(id))
+    entry.undone = true
+    showToast('Reverted — the reorders are back in their previous queue.')
+    rerender()
+  }
+
+  const byLevel  = (l: AutonomyLevel) => AUTOMATION_RULES.filter(r => ruleLevel(r.id) === l).map(r => r.summaryName)
+  const joinList = (xs: string[]) => xs.length <= 1 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`
+  const autoNames = byLevel('auto'); const draftNames = byLevel('draft'); const offNames = byLevel('off')
+  const summary = paused
+    ? 'All automation is paused — the agent drafts and flags, but sends nothing on its own.'
+    : [
+        autoNames.length ? `The agent is handling ${joinList(autoNames)} autonomously` : 'The agent is not acting autonomously on anything yet',
+        draftNames.length ? `${joinList(draftNames)} come to you as drafts` : '',
+        offNames.length ? `${joinList(offNames)} are fully manual` : '',
+      ].filter(Boolean).join('; ') + '.'
+
+  return (
+    <div className="flex-1 overflow-y-auto">
+      <div className="max-w-4xl mx-auto px-6 py-5 space-y-6">
+
+        {/* Autonomy summary + role + kill switch */}
+        <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-start gap-3 min-w-0">
+              <div className="w-9 h-9 rounded-lg bg-violet-50 flex items-center justify-center shrink-0"><Sparkles className="w-4 h-4 text-violet-600" /></div>
+              <div>
+                <div className="text-sm font-bold text-gray-900">Agent autonomy</div>
+                <p className="text-xs text-gray-500 mt-0.5 max-w-xl">{summary}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <select
+                value={role}
+                onChange={e => setRole(e.target.value as 'manager' | 'merchandiser')}
+                className="h-8 pl-2.5 pr-6 rounded-lg border border-gray-200 bg-white text-xs font-semibold text-gray-700"
+              >
+                <option value="manager">{TEAM.manager1} — Manager</option>
+                <option value="merchandiser">{TEAM.merchandiser} — view only</option>
+              </select>
+              <button
+                disabled={!canEdit}
+                onClick={() => { setAutomationPaused(!paused); rerender() }}
+                className={`inline-flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-semibold transition-colors ${
+                  paused ? 'bg-amber-500 text-white hover:bg-amber-600' : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'
+                } ${!canEdit ? 'opacity-60 cursor-not-allowed' : ''}`}
+              >
+                {paused ? <Play className="w-3.5 h-3.5" /> : <Pause className="w-3.5 h-3.5" />}
+                {paused ? 'Resume automation' : 'Pause all automation'}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {paused && (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700 font-medium">
+            All automation is paused. Rules keep their configuration, but the agent will not send or approve anything until you resume.
+          </div>
+        )}
+        {!canEdit && (
+          <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-xs text-blue-700 font-medium">
+            You're viewing as {TEAM.merchandiser}. Only managers can change automation rules — controls are read-only.
+          </div>
+        )}
+
+        {/* Rules by workflow area */}
+        {RULE_SECTIONS.map(sec => (
+          <div key={sec.id}>
+            <div className="flex items-baseline gap-2 mb-2">
+              <div className="text-xs font-bold uppercase tracking-widest text-gray-400">{sec.label}</div>
+              <div className="text-[11px] text-gray-400">{sec.blurb}</div>
+            </div>
+            <div className="space-y-3">
+              {AUTOMATION_RULES.filter(r => r.section === sec.id).map(def => (
+                <AutomationRuleCard key={def.id} def={def} canEdit={canEdit} paused={paused} onLevelChange={onLevelChange} onParamChange={onParamChange} />
+              ))}
+            </div>
+          </div>
+        ))}
+
+        {/* Global guardrails */}
+        <div>
+          <div className="flex items-baseline gap-2 mb-2">
+            <div className="text-xs font-bold uppercase tracking-widest text-gray-400">Global guardrails</div>
+            <div className="text-[11px] text-gray-400">Apply on top of every rule — the agent can never act outside these.</div>
+          </div>
+          <div className="bg-white rounded-xl border border-gray-100 shadow-sm divide-y divide-gray-50">
+            {GUARDRAILS.map(g => (
+              <div key={g.key} className="px-4 py-3 flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-gray-800 flex items-center gap-1.5"><Shield className="w-3 h-3 text-gray-300 shrink-0" />{g.label}</div>
+                  <div className="text-[11px] text-gray-400 mt-0.5">{g.help}</div>
+                </div>
+                {g.kind === 'toggle' ? (
+                  <GuardrailToggle on={guardrail(g.key) as boolean} disabled={!canEdit} onChange={v => { setGuardrail(g.key, v); rerender() }} />
+                ) : (
+                  <select
+                    value={String(guardrail(g.key))}
+                    disabled={!canEdit}
+                    onChange={e => { setGuardrail(g.key, typeof g.options![0] === 'number' ? Number(e.target.value) : e.target.value); rerender() }}
+                    className="h-7 pl-2 pr-6 rounded-lg border border-gray-200 bg-white text-[11px] font-bold text-indigo-700 disabled:text-gray-400 shrink-0"
+                  >
+                    {g.options!.map(o => <option key={String(o)} value={String(o)}>{fmtParam(g.fmt, o)}</option>)}
+                  </select>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Activity log */}
+        <div>
+          <div className="flex items-baseline gap-2 mb-2">
+            <div className="text-xs font-bold uppercase tracking-widest text-gray-400">Automation activity</div>
+            <div className="text-[11px] text-gray-400">Every autonomous action, the rule that authorised it, and a way back.</div>
+          </div>
+          <div className="bg-white rounded-xl border border-gray-100 shadow-sm divide-y divide-gray-50">
+            {AUTOMATION_LOG.map((e, i) => {
+              const def = AUTOMATION_RULES.find(r => r.id === e.ruleId)
+              const toneCls = e.tone === 'auto' ? 'bg-violet-100 text-violet-700' : e.tone === 'held' ? 'bg-amber-100 text-amber-700' : 'bg-purple-100 text-purple-700'
+              const toneLbl = e.tone === 'auto' ? 'Auto' : e.tone === 'held' ? 'Held' : 'Drafted'
+              return (
+                <div key={i} className="px-4 py-3 flex items-start gap-3">
+                  <span className={`mt-0.5 shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded-full ${toneCls}`}>{toneLbl}</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-semibold text-gray-800">{e.action}</div>
+                    <div className="text-[11px] text-gray-500 mt-0.5">{e.detail}</div>
+                    <div className="text-[10px] text-gray-400 mt-1">
+                      {new Date(e.time).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                      {def && <> · Rule: {def.title}</>}
+                    </div>
+                  </div>
+                  {e.undo && !e.undone && (
+                    <button disabled={!canEdit} onClick={() => undoEntry(e)} className={`shrink-0 inline-flex items-center gap-1 h-7 px-2.5 rounded-lg border border-gray-200 bg-white text-[10px] font-semibold text-gray-600 hover:bg-gray-50 ${!canEdit ? 'opacity-60 cursor-not-allowed' : ''}`}>
+                      <Undo2 className="w-3 h-3" />Undo
+                    </button>
+                  )}
+                  {e.undone && <span className="shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500">Undone</span>}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      </div>
+
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-gray-900 text-white text-xs font-semibold px-4 py-2.5 rounded-lg shadow-lg">{toast}</div>
+      )}
+    </div>
+  )
+}
+
 // ── App ────────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [tab, setTab] = useState<Tab>('po-monitoring')
+  const [tab, setTab] = useState<Tab>('po-monitoring')   // Ligentia demo lands on PO Monitoring
+  const [, bumpShell] = useState(0)   // refresh the header automation pill when Agent Settings mutates the store
   const [configMode, setConfigMode] = useState(false)
   const [pendingOpenInquiry, setPendingOpenInquiry] = useState<string | null>(null)
   const [pendingOpenPO, setPendingOpenPO] = useState<string | null>(null)
@@ -14831,24 +15280,42 @@ export default function App() {
 
   return (
     <div className="flex min-h-screen bg-gray-50">
-      <Sidebar />
+      <Sidebar agentSettingsOpen={tab === 'agent-settings'} onOpenAgentSettings={() => handleTabChange('agent-settings')} />
       <div className="flex-1 flex flex-col min-h-screen overflow-hidden">
         {/* Header */}
         <div className="bg-white border-b border-gray-100 px-6 py-4 shrink-0">
           <div className="flex items-center justify-between">
             <div>
               <div className="flex items-center gap-2.5">
-                <Package className="w-5 h-5 text-indigo-600" />
-                <h1 className="text-lg font-bold text-gray-900">Inventory</h1>
+                {tab === 'agent-settings' ? <Sparkles className="w-5 h-5 text-violet-600" /> : <Package className="w-5 h-5 text-indigo-600" />}
+                <h1 className="text-lg font-bold text-gray-900">{tab === 'agent-settings' ? 'Agent Settings' : 'Inventory'}</h1>
                 <span className="inline-flex items-center gap-1.5 px-2 py-0.5 bg-green-50 text-green-600 text-[11px] font-semibold rounded-full border border-green-100">
                   <span className="w-1.5 h-1.5 bg-green-500 rounded-full" />Active
                 </span>
               </div>
               <p className="text-xs text-gray-400 mt-0.5">
-                A holistic inventory view to forecast, order and balance optimal stock levels across your network
+                {tab === 'agent-settings'
+                  ? 'Decide what the agent may do on its own — and the guardrails it must stay within'
+                  : 'A holistic inventory view to forecast, order and balance optimal stock levels across your network'}
               </p>
             </div>
             <div className="flex items-center gap-2">
+              <button
+                onClick={() => handleTabChange('agent-settings')}
+                className={`inline-flex items-center gap-2 h-9 px-3 rounded-lg text-sm shadow-sm transition-colors border ${
+                  tab === 'agent-settings'
+                    ? 'bg-violet-50 text-violet-700 border-violet-200'
+                    : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'
+                }`}
+              >
+                <Sparkles className={`w-3.5 h-3.5 ${automationPaused() ? 'text-amber-500' : 'text-violet-500'}`} />
+                <span className="font-semibold text-gray-600 text-xs">Agent Settings</span>
+                {automationPaused() ? (
+                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">Paused</span>
+                ) : autoRuleCount() > 0 && (
+                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700">{autoRuleCount()} live</span>
+                )}
+              </button>
               <button className="inline-flex items-center gap-2 h-9 px-3 rounded-lg text-sm text-gray-500 bg-white border border-gray-200 hover:bg-gray-50 shadow-sm transition-colors">
                 <span className="text-xs text-gray-400">Updated 3 min ago</span>
                 <span className="w-px h-4 bg-gray-200" />
@@ -14885,6 +15352,7 @@ export default function App() {
         {tab === 'reorder-manager' && <ManagerReorderView />}
         {tab === 'po-monitoring'   && <POMonitoringView initialOpenPO={pendingOpenPO} initialOpenAction={pendingOpenAction} onNavigateToNeg={handleNavigateToNeg} />}
         {tab === 'replenishment'   && <ReplenishmentView />}
+        {tab === 'agent-settings'  && <AgentSettingsView onChanged={() => bumpShell(v => v + 1)} />}
       </div>
     </div>
   )
