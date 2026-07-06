@@ -3296,6 +3296,9 @@ const BUY_STATUS_CFG: Record<BuyStatus, { label: string; bg: string; text: strin
   rejected:         { label: 'Rejected',                  bg: 'bg-red-50',    text: 'text-red-700',    border: 'border-red-200'    },
   sent:             { label: 'Sent to Order App',         bg: 'bg-indigo-50', text: 'text-indigo-700', border: 'border-indigo-200' },
 }
+// Display label for an ApprovalStatus filter value — same vocabulary as the pill,
+// so dropdowns/chips above the tables read identically to the status pills.
+const approvalLabel = (a: ApprovalStatus): string => BUY_STATUS_CFG[buyStatusOf(a)].label
 const SUPPLIER_STATUS_CFG: Record<SupplierStatus, { label: string; bg: string; text: string; border: string }> = {
   not_contacted:  { label: 'Not contacted',  bg: 'bg-gray-50',   text: 'text-gray-500',   border: 'border-gray-200'   },
   awaiting_reply: { label: 'Awaiting reply', bg: 'bg-blue-50',   text: 'text-blue-700',   border: 'border-blue-200'   },
@@ -8778,7 +8781,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                     value={filter}
                     onChange={e => setFilter(e.target.value as ReorderFilter)}
                   >
-                    {FILTER_TABS.map(s => <option key={s} value={s}>{s === 'All' ? 'All' : s}</option>)}
+                    {FILTER_TABS.map(s => <option key={s} value={s}>{s === 'All' ? 'All' : approvalLabel(s as ApprovalStatus)}</option>)}
                   </select>
                   <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
                 </div>
@@ -9687,7 +9690,7 @@ function ManagerReorderView() {
           <div className="flex items-center gap-2">
             {(['Pending Approval', 'Approved', 'Rejected'] as const).map(s => (
               <span key={s} className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold ${filterCfg[s].bg} ${filterCfg[s].text}`}>
-                {s === 'Pending Approval' ? 'Pending' : s}: {counts[s]}
+                {approvalLabel(s as ApprovalStatus)}: {counts[s]}
               </span>
             ))}
           </div>
@@ -9704,7 +9707,7 @@ function ManagerReorderView() {
                   className={`flex items-center gap-2 h-8 px-4 rounded-lg text-xs font-semibold transition-colors ${
                     active ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'
                   }`}>
-                  {f}
+                  {f === 'All' ? 'All' : approvalLabel(f as ApprovalStatus)}
                   <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${active ? `${cfg.bg} ${cfg.text}` : 'bg-gray-200 text-gray-500'}`}>
                     {counts[f]}
                   </span>
