@@ -3290,11 +3290,11 @@ const setApproval       = (id: string, status: ApprovalStatus, comment = '') => 
 const clearApproval     = (id: string) => { delete _approvalState[id] }
 
 const BUY_STATUS_CFG: Record<BuyStatus, { label: string; bg: string; text: string; border: string }> = {
-  draft:            { label: 'Draft',             bg: 'bg-gray-100',  text: 'text-gray-600',   border: 'border-gray-200'   },
-  pending_approval: { label: 'Pending approval',  bg: 'bg-amber-50',  text: 'text-amber-700',  border: 'border-amber-200'  },
-  approved:         { label: 'Approved',          bg: 'bg-green-50',  text: 'text-green-700',  border: 'border-green-200'  },
-  rejected:         { label: 'Rejected',          bg: 'bg-red-50',    text: 'text-red-700',    border: 'border-red-200'    },
-  sent:             { label: 'Sent to supplier',  bg: 'bg-indigo-50', text: 'text-indigo-700', border: 'border-indigo-200' },
+  draft:            { label: 'Draft Recommendation',      bg: 'bg-gray-100',  text: 'text-gray-600',   border: 'border-gray-200'   },
+  pending_approval: { label: 'Pending manager approval',  bg: 'bg-amber-50',  text: 'text-amber-700',  border: 'border-amber-200'  },
+  approved:         { label: 'Approved',                  bg: 'bg-green-50',  text: 'text-green-700',  border: 'border-green-200'  },
+  rejected:         { label: 'Rejected',                  bg: 'bg-red-50',    text: 'text-red-700',    border: 'border-red-200'    },
+  sent:             { label: 'Sent to Order App',         bg: 'bg-indigo-50', text: 'text-indigo-700', border: 'border-indigo-200' },
 }
 const SUPPLIER_STATUS_CFG: Record<SupplierStatus, { label: string; bg: string; text: string; border: string }> = {
   not_contacted:  { label: 'Not contacted',  bg: 'bg-gray-50',   text: 'text-gray-500',   border: 'border-gray-200'   },
