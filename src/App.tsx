@@ -5936,6 +5936,131 @@ function WhyQtyModal({ p, onClose }: { p: ReorderRecommendation; onClose: () => 
   )
 }
 
+// ── Borrowed UX patterns: provenance · assumptions · reasoning · guardrail ────
+// Adapted from an internal Guided-Buying prototype. The through-line is trust:
+// every agent-filled value says where it came from, every assumption is named in
+// plain language, the reasoning is one collapse away, and the buyer always sees
+// what happens next (which limit applies, who signs off) before they act.
+
+// Management sign-off threshold for a single reorder's value. Below it, the buy
+// routes straight through for a light check; at/above it, a manager must sign off.
+const BUY_APPROVAL_LIMIT_GBP = 50_000
+
+// Where an agent-filled value came from — a tiny pill next to the value so an
+// AI-populated field never reads as an unexplained black box.
+type SourceKind = 'agent' | 'forecast' | 'supplier' | 'policy' | 'edited' | 'default'
+const SOURCE_CFG: Record<SourceKind, { label: string; Icon: React.ComponentType<{ className?: string }>; bg: string; text: string; border: string }> = {
+  agent:    { label: 'Agent',         Icon: Sparkles,   bg: 'bg-violet-50', text: 'text-violet-600', border: 'border-violet-200' },
+  forecast: { label: 'From forecast', Icon: TrendingUp, bg: 'bg-blue-50',   text: 'text-blue-600',   border: 'border-blue-200'   },
+  supplier: { label: 'From supplier', Icon: Mail,       bg: 'bg-sky-50',    text: 'text-sky-600',    border: 'border-sky-200'    },
+  policy:   { label: 'Policy',        Icon: Shield,     bg: 'bg-gray-50',   text: 'text-gray-500',   border: 'border-gray-200'   },
+  edited:   { label: 'Your edit',     Icon: Pencil,     bg: 'bg-amber-50',  text: 'text-amber-700',  border: 'border-amber-200'  },
+  default:  { label: 'Team default',  Icon: Info,       bg: 'bg-gray-50',   text: 'text-gray-500',   border: 'border-gray-200'   },
+}
+function SourceChip({ kind, label, title, className = '' }: { kind: SourceKind; label?: string; title?: string; className?: string }) {
+  const c = SOURCE_CFG[kind]
+  return (
+    <span title={title} className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[8px] font-semibold border leading-none whitespace-nowrap ${c.bg} ${c.text} ${c.border} ${className}`}>
+      <c.Icon className="w-2 h-2 shrink-0" />{label ?? c.label}
+    </span>
+  )
+}
+
+// A plain-language note naming an assumption the agent made, with an open
+// invitation to correct it. Deliberately quiet (italic, muted) so it reads as a
+// helpful aside, not a warning.
+function AssumptionNote({ children, className = '' }: { children: React.ReactNode; className?: string }) {
+  return (
+    <div className={`flex items-start gap-1.5 text-[11px] text-gray-500 leading-relaxed ${className}`}>
+      <Sparkles className="w-3 h-3 text-violet-400 shrink-0 mt-0.5" />
+      <span className="italic">{children}</span>
+    </div>
+  )
+}
+
+// Collapsed-by-default "here's what I did" reasoning trail. Progressive
+// disclosure: the recommendation stays clean, the working is one click away.
+function AgentReasoningTrail({ steps, title = "Here's what I did to prepare this", className = '' }: {
+  steps: React.ReactNode[]; title?: string; className?: string
+}) {
+  return (
+    <details className={`group bg-violet-50/40 border border-violet-100 rounded-xl px-4 py-3 ${className}`}>
+      <summary className="cursor-pointer list-none flex items-center gap-1.5 text-xs font-semibold text-violet-700 select-none">
+        <Sparkles className="w-3.5 h-3.5 shrink-0" />
+        {title}
+        <svg className="w-3 h-3 ml-auto text-violet-400 transition-transform group-open:rotate-90 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" />
+        </svg>
+      </summary>
+      <ul className="mt-2.5 space-y-1.5">
+        {steps.map((s, i) => (
+          <li key={i} className="flex items-start gap-2 text-[11px] text-gray-600 leading-relaxed">
+            <Check className="w-3 h-3 text-violet-500 shrink-0 mt-0.5" />
+            <span>{s}</span>
+          </li>
+        ))}
+      </ul>
+    </details>
+  )
+}
+
+// The headline recommendation, carrying its own justification and £ impact — so
+// "what the agent suggests and why it matters" is never left implicit.
+function RecommendationBanner({ headline, impact, className = '' }: {
+  headline: React.ReactNode; impact?: React.ReactNode; className?: string
+}) {
+  return (
+    <div className={`flex items-start gap-2.5 rounded-xl border border-violet-200 bg-gradient-to-r from-violet-50 to-indigo-50/40 px-4 py-3 ${className}`}>
+      <div className="w-6 h-6 rounded-lg bg-violet-600 flex items-center justify-center shrink-0"><Sparkles className="w-3.5 h-3.5 text-white" /></div>
+      <div className="min-w-0">
+        <div className="text-[10px] font-bold uppercase tracking-wide text-violet-500 mb-0.5">Agent recommendation</div>
+        <div className="text-[13px] text-gray-800 leading-snug font-medium">{headline}</div>
+        {impact && <div className="text-[11px] font-semibold text-green-700 mt-1">{impact}</div>}
+      </div>
+    </div>
+  )
+}
+
+// One calm line telling the buyer what happens next: which spending limit applies,
+// who it routes to, and why them. Turns an opaque approval step into a predictable
+// one.
+function RoutingGuardrailCard({ amount, limit = BUY_APPROVAL_LIMIT_GBP, approver, approverWhy, className = '' }: {
+  amount: number; limit?: number; approver: string; approverWhy?: string; className?: string
+}) {
+  const within = amount <= limit
+  return (
+    <div className={`flex items-start gap-2 rounded-xl border px-4 py-2.5 ${within ? 'bg-green-50/50 border-green-200' : 'bg-amber-50/50 border-amber-200'} ${className}`}>
+      <Shield className={`w-4 h-4 shrink-0 mt-0.5 ${within ? 'text-green-600' : 'text-amber-600'}`} />
+      <div className="text-[12px] leading-relaxed">
+        <span className={`font-semibold ${within ? 'text-green-800' : 'text-amber-800'}`}>
+          {within ? `Within the ${fmtGBP(limit)} buying limit` : `Above the ${fmtGBP(limit)} buying limit`}
+        </span>
+        <span className="text-gray-600">
+          {' · '}this order is <span className="font-semibold text-gray-800">{fmtGBP(amount)}</span>
+          {within
+            ? <> · routes to <span className="font-semibold text-gray-800">{approver}</span> for a standard check</>
+            : <> · needs <span className="font-semibold text-gray-800">{approver}</span> to sign off before it can be pushed</>}
+        </span>
+        {approverWhy && <div className="text-[10px] text-gray-400 mt-0.5">{approver} — {approverWhy}</div>}
+      </div>
+    </div>
+  )
+}
+
+// Plain-English KPI tile — big number, human label, jargon-free subtitle.
+function StatCard({ value, label, sub, tone = 'gray', className = '' }: {
+  value: React.ReactNode; label: string; sub?: string; tone?: 'gray' | 'amber' | 'green' | 'indigo'; className?: string
+}) {
+  const valueCls = { gray: 'text-gray-900', amber: 'text-amber-600', green: 'text-green-600', indigo: 'text-indigo-600' }[tone]
+  return (
+    <div className={`bg-white border border-gray-100 rounded-xl px-4 py-3 shadow-sm ${className}`}>
+      <div className={`text-2xl font-bold ${valueCls}`}>{value}</div>
+      <div className="text-xs font-semibold text-gray-700 mt-0.5">{label}</div>
+      {sub && <div className="text-[10px] text-gray-400 mt-0.5">{sub}</div>}
+    </div>
+  )
+}
+
 // ── Shared severity summary bar ──────────────────────────────────────────────
 // ONE triage headline for PO Monitoring tabs: a loud hero £-at-risk + reconciled
 // denominator, plus the severity tiers as colour-coded CLICKABLE segments. The
@@ -7624,6 +7749,7 @@ function ReorderLineWorkspace({
             <span className="text-[12px] text-gray-600">{approval.msg}</span>
             {approval.action && <span className="ml-auto">{approval.action}</span>}
           </div>
+          <RoutingGuardrailCard className="mt-3" amount={Math.round(savedQtyOf(rec) * savedCostOf(rec))} approver={TEAM.manager1} approverWhy={`owns reorder sign-off for ${BUYER.companyName}`} />
           <div className="text-[11px] text-gray-400 mt-2">
             Internal buy gate — runs in parallel with the supplier negotiation above. The two tracks are independent.
           </div>
@@ -7855,6 +7981,19 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
             </div>
           )}
 
+          {/* Agent recommendation headline + what-happens-next routing (borrowed) */}
+          {(() => {
+            const coverWeeks = p.avgReorderCoverWeeks || 4
+            const protectedSales = Math.round(p.weeklySales * coverWeeks * p.sellingPrice)
+            return (
+              <RecommendationBanner
+                headline={<>Reorder <span className="font-bold text-gray-900">{p.recommendedReorderQty.toLocaleString()} units</span> now to hold {coverWeeks} weeks of cover at the current {p.weeklySales.toLocaleString()}/week sell-through.</>}
+                impact={<>Protects ~£{protectedSales.toLocaleString()} of sales over the next {coverWeeks} weeks · stockout risk {p.stockoutRisk}</>}
+              />
+            )
+          })()}
+          <RoutingGuardrailCard amount={editTotalCost} approver={TEAM.manager1} approverWhy={`owns reorder sign-off for ${BUYER.companyName}`} />
+
           {/* Product header — identity + KPIs in one card */}
           {(() => {
             const gm = getMarginForWindow(p.marginPct, p.id, timeRange)
@@ -8002,6 +8141,7 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                   onChange={e => setDraftQty(Number(e.target.value))}
                   className="text-xs font-bold text-gray-900 bg-transparent border-b border-indigo-300 focus:outline-none focus:border-indigo-600 w-full text-center" />
                 <div className="text-[10px] text-gray-400 mt-0.5">Order Qty</div>
+                <div className="mt-1 flex justify-center"><SourceChip kind={qtyChanged ? 'edited' : 'forecast'} title={qtyChanged ? "You changed this from the agent's suggestion" : "Sized by the agent from the demand forecast"} /></div>
                 {qtyChanged
                   ? <div className="text-[9px] text-gray-400 mt-0.5">Suggested: {p.recommendedReorderQty.toLocaleString()}</div>
                   : <div className="text-[9px] text-indigo-400 mt-0.5">updates next Monday</div>}
@@ -8014,12 +8154,14 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                     className="text-xs font-bold text-gray-900 bg-transparent border-b border-indigo-300 focus:outline-none focus:border-indigo-600 w-16 text-center" />
                 </div>
                 <div className="text-[10px] text-gray-400 mt-0.5">Cost Price</div>
+                <div className="mt-1 flex justify-center"><SourceChip kind={costChanged ? 'edited' : 'supplier'} title={costChanged ? "You changed this from the supplier's quoted cost" : "From the supplier's latest agreed cost"} /></div>
                 {costChanged && <div className="text-[9px] text-gray-400 mt-0.5">Suggested: £{p.costPrice.toFixed(2)}</div>}
               </div>
               <div className="bg-indigo-50/50 border border-indigo-100 rounded-lg px-3 py-2 text-center col-span-2">
                 <input type="date" value={draftExFactory} onChange={e => setDraftExFactory(e.target.value)}
                   className="text-xs font-bold text-gray-900 bg-transparent border-b border-indigo-300 focus:outline-none focus:border-indigo-600 w-full text-center" />
                 <div className="text-[10px] text-gray-400 mt-0.5">Ex-Factory</div>
+                <div className="mt-1 flex justify-center"><SourceChip kind={exfChanged ? 'edited' : 'supplier'} title={exfChanged ? 'You changed the ex-factory date' : 'From the supplier lead time'} /></div>
                 {exfChanged && <div className="text-[9px] text-gray-400 mt-0.5">Suggested: {p.exFactoryDate}</div>}
               </div>
             </div>
@@ -8039,7 +8181,23 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                 <div className="text-[10px] text-gray-400 mt-0.5">Selling Price</div>
               </div>
             </div>
+            <AssumptionNote>
+              Quantity assumes the current {p.weeklySales.toLocaleString()}/week sell-through holds for the next {p.avgReorderCoverWeeks || 4} weeks. Expecting a spike or a slowdown? Edit the order qty and I'll recompute everything below.
+            </AssumptionNote>
           </div>
+
+          {(() => {
+            const coverWeeks = p.avgReorderCoverWeeks || 4
+            return (
+              <AgentReasoningTrail steps={[
+                <>Read <span className="font-semibold text-gray-700">{p.weeklySales.toLocaleString()} units/week</span> of recent sell-through for this line.</>,
+                <>Sized the order for <span className="font-semibold text-gray-700">{coverWeeks} weeks</span> of forward cover plus <span className="font-semibold text-gray-700">{p.safetyStock.toLocaleString()}</span> safety stock → <span className="font-semibold text-gray-700">{p.recommendedReorderQty.toLocaleString()} units</span>.</>,
+                <>Recommended <span className="font-semibold text-gray-700">{p.recommendedFreight} freight</span> as the best cost/margin trade-off for the receipt date.</>,
+                <>Priced it from the supplier's latest agreed cost (<span className="font-semibold text-gray-700">£{p.costPrice.toFixed(2)}</span>) and ex-factory date.</>,
+                <>Flagged stockout risk as <span className="font-semibold text-gray-700">{p.stockoutRisk}</span> at the current {p.leadTime} lead time.</>,
+              ]} />
+            )
+          })()}
 
           {/* Freight Allocation */}
           {(() => {
@@ -8138,6 +8296,9 @@ function ReorderView({ initialOpenInquiry, onNavigateToPO }: { initialOpenInquir
                     )}
                   </div>
                 </button>
+                <AssumptionNote className="mb-3">
+                  I recommended {recMode === 'Sea' ? 'sea freight' : 'air freight'} as the {recommendMode === 'margin' ? 'best-margin' : 'lowest-cost'} option that still hits your receipt date. Switch to an alternative below if timing matters more.
+                </AssumptionNote>
                 {/* Alternatives */}
                 <details className="group" open={showOverrideReason}>
                   <summary className="cursor-pointer list-none flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-800 select-none">
@@ -9349,6 +9510,19 @@ function ManagerReorderView() {
             </div>
           </div>
 
+          {/* Agent recommendation + what-happens-next routing (borrowed) */}
+          {(() => {
+            const coverWeeks = p.avgReorderCoverWeeks || 4
+            const protectedSales = Math.round(p.weeklySales * coverWeeks * p.sellingPrice)
+            return (
+              <RecommendationBanner
+                headline={<>Agent recommends <span className="font-bold text-gray-900">{p.recommendedReorderQty.toLocaleString()} units</span> for {coverWeeks} weeks of cover at the current {p.weeklySales.toLocaleString()}/week sell-through.</>}
+                impact={<>Protects ~£{protectedSales.toLocaleString()} of sales over the next {coverWeeks} weeks · stockout risk {p.stockoutRisk}</>}
+              />
+            )
+          })()}
+          <RoutingGuardrailCard amount={editTotalCost} approver={TEAM.manager1} approverWhy={`owns reorder sign-off for ${BUYER.companyName}`} />
+
           {/* Inline reject form */}
           {rejectOpen[p.id] && (
             <div className="bg-red-50 border border-red-200 rounded-xl px-5 py-4">
@@ -9440,6 +9614,7 @@ function ManagerReorderView() {
                     onChange={e => setDraftQty(Number(e.target.value))}
                     className="text-xs font-bold text-gray-900 bg-transparent border-b border-indigo-300 focus:outline-none focus:border-indigo-600 w-full text-center" />
                   <div className="text-[10px] text-gray-400 mt-0.5">Order Qty</div>
+                  <div className="mt-1 flex justify-center"><SourceChip kind={qtyChanged ? 'edited' : 'forecast'} label={qtyChanged ? 'Edited' : 'Forecast'} title={qtyChanged ? "Changed from the agent's suggestion" : "Sized by the agent from the demand forecast"} /></div>
                   {qtyChanged
                     ? <div className="text-[9px] text-gray-400 mt-0.5">Suggested: {p.recommendedReorderQty.toLocaleString()}</div>
                     : <div className="text-[9px] text-indigo-400 mt-0.5">updates next Monday</div>}
@@ -9452,12 +9627,14 @@ function ManagerReorderView() {
                       className="text-xs font-bold text-gray-900 bg-transparent border-b border-indigo-300 focus:outline-none focus:border-indigo-600 w-16 text-center" />
                   </div>
                   <div className="text-[10px] text-gray-400 mt-0.5">Cost Price</div>
+                  <div className="mt-1 flex justify-center"><SourceChip kind={costChanged ? 'edited' : 'supplier'} label={costChanged ? 'Edited' : 'Supplier'} title={costChanged ? "Changed from the supplier's quoted cost" : "From the supplier's latest agreed cost"} /></div>
                   {costChanged && <div className="text-[9px] text-gray-400 mt-0.5">Suggested: £{p.costPrice.toFixed(2)}</div>}
                 </div>
                 <div className="bg-indigo-50/50 border border-indigo-100 rounded-lg px-3 py-2 text-center min-w-[88px]">
                   <input type="date" value={draftExFactory} onChange={e => setDraftExFactory(e.target.value)}
                     className="text-xs font-bold text-gray-900 bg-transparent border-b border-indigo-300 focus:outline-none focus:border-indigo-600 w-full text-center" />
                   <div className="text-[10px] text-gray-400 mt-0.5">Ex-Factory</div>
+                  <div className="mt-1 flex justify-center"><SourceChip kind={exfChanged ? 'edited' : 'supplier'} label={exfChanged ? 'Edited' : 'Supplier'} title={exfChanged ? 'Changed from the supplier lead time' : 'From the supplier lead time'} /></div>
                   {exfChanged && <div className="text-[9px] text-gray-400 mt-0.5">Suggested: {p.exFactoryDate}</div>}
                 </div>
               </div>
@@ -9479,6 +9656,19 @@ function ManagerReorderView() {
               </div>
             </div>
           </div>
+
+          {(() => {
+            const coverWeeks = p.avgReorderCoverWeeks || 4
+            return (
+              <AgentReasoningTrail steps={[
+                <>Read <span className="font-semibold text-gray-700">{p.weeklySales.toLocaleString()} units/week</span> of recent sell-through for this line.</>,
+                <>Sized the order for <span className="font-semibold text-gray-700">{coverWeeks} weeks</span> of forward cover plus <span className="font-semibold text-gray-700">{p.safetyStock.toLocaleString()}</span> safety stock → <span className="font-semibold text-gray-700">{p.recommendedReorderQty.toLocaleString()} units</span>.</>,
+                <>Recommended <span className="font-semibold text-gray-700">{p.recommendedFreight} freight</span> as the best cost/margin trade-off for the receipt date.</>,
+                <>Priced it from the supplier's latest agreed cost (<span className="font-semibold text-gray-700">£{p.costPrice.toFixed(2)}</span>) and ex-factory date.</>,
+                <>Flagged stockout risk as <span className="font-semibold text-gray-700">{p.stockoutRisk}</span> at the current {p.leadTime} lead time.</>,
+              ]} />
+            )
+          })()}
 
           {/* KPI strip */}
           {(() => {
@@ -9585,6 +9775,8 @@ function ManagerReorderView() {
     'Approved':         REORDER_RECOMMENDATIONS.filter(p => effStatus(p) === 'Approved').length,
     'Rejected':         REORDER_RECOMMENDATIONS.filter(p => effStatus(p) === 'Rejected').length,
   }
+  const pendingValue  = REORDER_RECOMMENDATIONS.filter(p => effStatus(p) === 'Pending Approval').reduce((s, r) => s + Math.round(savedQtyOf(r) * savedCostOf(r)), 0)
+  const approvedValue = REORDER_RECOMMENDATIONS.filter(p => effStatus(p) === 'Approved').reduce((s, r) => s + Math.round(savedQtyOf(r) * savedCostOf(r)), 0)
 
   const rows = REORDER_RECOMMENDATIONS.filter(p => {
     const matchSearch = !search ||
@@ -9682,18 +9874,17 @@ function ManagerReorderView() {
 
         {mgrSubView === 'recommendations' && (<>
         {/* Header */}
-        <div className="flex items-center justify-between mb-5">
-          <div>
-            <div className="text-base font-bold text-gray-900">Manager Review</div>
-            <div className="text-xs text-gray-400 mt-0.5">Review and action reorder recommendations submitted for management approval</div>
-          </div>
-          <div className="flex items-center gap-2">
-            {(['Pending Approval', 'Approved', 'Rejected'] as const).map(s => (
-              <span key={s} className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold ${filterCfg[s].bg} ${filterCfg[s].text}`}>
-                {approvalLabel(s as ApprovalStatus)}: {counts[s]}
-              </span>
-            ))}
-          </div>
+        <div className="mb-4">
+          <div className="text-base font-bold text-gray-900">Manager Review</div>
+          <div className="text-xs text-gray-400 mt-0.5">Review and action reorder recommendations submitted for management approval</div>
+        </div>
+
+        {/* Plain-English KPI row (borrowed from the Guided-Buying prototype) */}
+        <div className="grid grid-cols-4 gap-4 mb-5">
+          <StatCard tone="amber"  value={counts['Pending Approval']} label="Waiting for you" sub={pendingValue > 0 ? `${fmtGBP(pendingValue)} to review` : 'nothing in the queue'} />
+          <StatCard tone="green"  value={counts['Approved']}         label="You've approved"  sub={`${fmtGBP(approvedValue)} cleared to buy`} />
+          <StatCard tone="gray"   value={counts['Rejected']}         label="Sent back"        sub="rejected with a reason" />
+          <StatCard tone="indigo" value={counts['All']}              label="Recommendations"  sub="in this cycle" />
         </div>
 
         {/* Filter tabs */}
