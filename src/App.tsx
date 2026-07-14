@@ -21,12 +21,14 @@ import {
 } from './predict'
 import type { JourneyStageKey, StagePerf, PoPrediction, FillPrediction } from './predict'
 import { SUPPLIERS, SUPPLIER_EMAILS, ALL_POS, PO_PRODUCT_MAP, NEG_PO_MAP, SEED_PO_EVENTS, STATIC_KANBAN_ITEMS, SEEDED_PROMO_PCT, SEEDED_INV_AUDIT, SEEDED_THREADS, SEEDED_SUPPLIER_SESSIONS, TRIGGER_MESSAGES, AGENT_LOG } from './poData'
-import { BUYER, EDIT_USER, TEAM } from './clientConfig'
+import { BUYER, EDIT_USER, TEAM, ENTITY } from './clientConfig'
 import {
   AUTOMATION_RULES, RULE_SECTIONS, GUARDRAILS, AUTONOMY_LBL, fmtParam,
   ruleLevel, setRuleLevel, ruleParam, setRuleParam, guardrail, setGuardrail,
   automationPaused, setAutomationPaused, ruleIsLive, autoRuleCount,
   AUTOMATION_LOG, logAutomation,
+  TOLERANCE_DEFS, TOLERANCE_DEPTS, GLOBAL_TOLERANCE,
+  toleranceFor, toleranceShown, toleranceRaw, setTolerance, clearToleranceDept, deptOverrideCount,
 } from './automationData'
 import type { AutomationRuleDef, AutonomyLevel, AutomationLogEntry } from './automationData'
 
@@ -1895,7 +1897,7 @@ function SupplierDetailView({
       <div className="bg-white border border-gray-100 rounded-2xl shadow-sm">
         <div className="px-6 pt-5 pb-4 border-b border-gray-100">
           <button onClick={onBack} className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-800 mb-3">
-            <ChevronLeft className="w-3.5 h-3.5" /> Back to Supplier Health
+            <ChevronLeft className="w-3.5 h-3.5" /> Back to {ENTITY.healthTitle}
           </button>
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0 flex-1">
@@ -5763,10 +5765,10 @@ function BulkNegotiationsView({
 // Light gray-track style: where it sits beside the solid filled mode segment on
 // Actions, it reads as the subordinate peer (mode = the more fundamental cut),
 // while on All POs / Reorder it stands alone as the lead view control.
-function GroupBySegment({ bySupplier, onChange }: { bySupplier: boolean; onChange: (bySupplier: boolean) => void }) {
+function GroupBySegment({ bySupplier, onChange, byLabel = 'By supplier' }: { bySupplier: boolean; onChange: (bySupplier: boolean) => void; byLabel?: string }) {
   return (
     <div className="inline-flex items-center rounded-lg bg-gray-100 p-0.5 gap-0.5">
-      {([[false, 'Individual'], [true, 'By supplier']] as const).map(([val, label]) => (
+      {([[false, 'Individual'], [true, byLabel]] as const).map(([val, label]) => (
         <button
           key={label}
           onClick={() => onChange(val)}
@@ -6133,15 +6135,19 @@ const LATE_STATUSES = new Set<string>(['Ex-factory delay', 'Late DC booking', 'D
 const DEMO_NOW = DEMO_TODAY.getTime()
 const committedDueMs = (po: PO) => new Date(po.revisedDelivery ?? po.expectedDelivery).getTime()
 // Physically breached = a stage-gate status is late, OR the committed delivery date
-// has passed. Anchored to DEMO_TODAY (the clock the predictions use) so the demo
-// doesn't drift to "everything overdue" against the real wall clock.
+// has passed by more than the department's grace tolerance. Anchored to DEMO_TODAY
+// (the clock the predictions use) so the demo doesn't drift to "everything overdue"
+// against the real wall clock. The grace + slip thresholds are configurable per
+// department in Agent Settings → Tolerances (default grace 0 = today's behaviour).
 function isBreached(po: PO): boolean {
-  return po.status !== 'Delivered' && (LATE_STATUSES.has(po.status) || committedDueMs(po) < DEMO_NOW)
+  const graceMs = toleranceFor(po.category, 'lateGraceDays') * 86_400_000
+  return po.status !== 'Delivered' && (LATE_STATUSES.has(po.status) || committedDueMs(po) + graceMs < DEMO_NOW)
 }
 function poTemporality(po: PO): Temporality {
   if (isBreached(po)) return 'live'                       // live breach wins over any forecast
   const pred = PO_PREDICTIONS[po.id]
-  if (pred && (pred.missedSalesRisk.willMissSales || pred.landingGapDays > SLIP_DAYS)) return 'predicted'
+  const slip = toleranceFor(po.category, 'slipDays')
+  if (pred && (pred.missedSalesRisk.willMissSales || pred.landingGapDays > slip)) return 'predicted'
   return 'clean'
 }
 
@@ -11883,7 +11889,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
         {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center bg-gray-100 rounded-xl p-1 gap-0.5">
-            {([['actions','Actions'],['intake','Intake Forecast'],['allpos','All POs'],['suppliers','Supplier Health'],['agentlog','Agent Log']] as const).map(([t, label]) => (
+            {([['actions','Actions'],['intake','Intake Forecast'],['allpos','All POs'],['suppliers',ENTITY.healthTitle],['agentlog','Agent Log']] as const).map(([t, label]) => (
               <button key={t} onClick={() => setSubTab(t)} className={`h-8 px-4 rounded-lg text-xs font-semibold transition-colors ${subTab === t ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>{label}</button>
             ))}
           </div>
@@ -12273,7 +12279,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
 
               {/* GROUPING: the lighter segmented peer, immediately after mode.
                   Same shared control as All POs and Reorder. */}
-              <GroupBySegment bySupplier={actionGroupBy === 'supplier'} onChange={b => setActionGroupBy(b ? 'supplier' : 'none')} />
+              <GroupBySegment bySupplier={actionGroupBy === 'supplier'} onChange={b => setActionGroupBy(b ? 'supplier' : 'none')} byLabel={ENTITY.groupByLabel} />
 
               {/* Firm vertical divider — separates the view-shaping controls from refine */}
               <div className="w-px h-7 bg-gray-300 mx-1.5 shrink-0" />
@@ -12384,7 +12390,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
             {drawerOpen && drawerGroup && drawerSup && (
               <DetailWorkspaceLayout
                 onBack={() => { if (drawerView === 'po-detail') { setDrawerView('action'); setDrawerViewPOId(null) } else { setDrawerCardKey(null); if (msgReturnTab) { setSubTab(msgReturnTab); setMsgReturnTab(null) } } }}
-                backLabel={drawerView === 'po-detail' ? drawerSup.name : msgReturnTab === 'allpos' ? 'Back to All POs' : msgReturnTab === 'intake' ? 'Back to Intake Forecast' : msgReturnTab === 'suppliers' ? 'Back to Supplier Health' : 'Back to actions'}
+                backLabel={drawerView === 'po-detail' ? drawerSup.name : msgReturnTab === 'allpos' ? 'Back to All POs' : msgReturnTab === 'intake' ? 'Back to Intake Forecast' : msgReturnTab === 'suppliers' ? `Back to ${ENTITY.healthTitle}` : 'Back to actions'}
                 breadcrumb={drawerView === 'po-detail' ? <span className="font-mono">{drawerViewPOId}</span> : <>PO Monitoring · Actions · {drawerSup.name}</>}
                 header={drawerView === 'action' ? (
                   <div className="bg-white border border-gray-200 rounded-2xl px-5 py-4">
@@ -12636,6 +12642,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                                     selectedKey="chase"
                                     options={[
                                       { key: 'chase', label: 'Pre-empt: confirm full quantity', consequence: 'Agent-drafted note asking the supplier to confirm no short-shipment', onClick: () => { if (drawerCardKey) setSelectedActionPill(prev => ({ ...prev, [drawerCardKey]: 'chase' })) } },
+                                      { key: 'topup', label: 'Place a top-up order', consequence: `Draft a reorder for ~${shortUnits.toLocaleString('en-GB')} units to cover the predicted shortfall`, notRecommended: 'Use only if the shortfall would risk a stockout and the supplier can’t make the quantity up — we don’t gross up automatically', onClick: () => setActionToast(`Top-up reorder drafted for ~${shortUnits.toLocaleString('en-GB')} units — review it in the Reorder tab before sending`) },
                                     ]}
                                   />
                                   <details className="mt-3">
@@ -13755,7 +13762,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
 
               <div className="flex items-center gap-3 flex-wrap">
                 {/* Lead view-shaping control — reshapes POs ⇄ supplier groups. */}
-                <GroupBySegment bySupplier={poGroupBy === 'supplier'} onChange={b => setPoGroupBy(b ? 'supplier' : 'none')} />
+                <GroupBySegment bySupplier={poGroupBy === 'supplier'} onChange={b => setPoGroupBy(b ? 'supplier' : 'none')} byLabel={ENTITY.groupByLabel} />
                 <div className="w-px h-7 bg-gray-300 shrink-0" />
                 <div className="relative">
                   <Search className="w-3.5 h-3.5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -13858,7 +13865,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
               <div className="bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden">
                 <table className="w-full text-xs">
                   <thead className="bg-gray-50 border-b border-gray-100">
-                    <tr>{['Supplier','Category','On-Time Rate','Order completeness','Open PO risk','Avg Delay','Open POs','Lead Time','Trend','Status'].map(h => <th key={h} className="px-4 py-3 text-left font-semibold text-gray-500 whitespace-nowrap">{h}</th>)}</tr>
+                    <tr>{[ENTITY.singular,'Category','On-Time Rate','Order completeness','Open PO risk','Avg Delay','Open POs','Lead Time','Trend','Status'].map(h => <th key={h} className="px-4 py-3 text-left font-semibold text-gray-500 whitespace-nowrap">{h}</th>)}</tr>
                   </thead>
                   <tbody className="divide-y divide-gray-50">
                     {SUPPLIERS.map(s => {
@@ -15364,6 +15371,86 @@ function AgentSettingsView({ onChanged }: { onChanged?: () => void }) {
                 )}
               </div>
             ))}
+          </div>
+        </div>
+
+        {/* Tolerances — per-tenant + per-department detection thresholds */}
+        <div>
+          <div className="flex items-baseline gap-2 mb-2">
+            <div className="text-xs font-bold uppercase tracking-widest text-gray-400">Tolerances</div>
+            <div className="text-[11px] text-gray-400">What counts as late, early or slipping — set the tenant default, then override per department.</div>
+          </div>
+          <div className="bg-white rounded-xl border border-gray-100 shadow-sm">
+            {/* Tenant default */}
+            <div className="px-4 py-3 border-b border-gray-50">
+              <div className="text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-2">Tenant default</div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {TOLERANCE_DEFS.map(t => (
+                  <label key={t.key} className="block" title={t.help}>
+                    <div className="text-[11px] font-semibold text-gray-700 mb-1">{t.label}</div>
+                    <select value={String(toleranceShown(GLOBAL_TOLERANCE, t.key))} disabled={!canEdit}
+                      onChange={e => { setTolerance(GLOBAL_TOLERANCE, t.key, Number(e.target.value)); rerender() }}
+                      className="h-7 w-full pl-2 pr-6 rounded-lg border border-gray-200 bg-white text-[11px] font-bold text-indigo-700 disabled:text-gray-400">
+                      {t.options.map(o => <option key={o} value={o}>{fmtParam(t.fmt, o)}</option>)}
+                    </select>
+                    <div className="text-[10px] text-gray-400 mt-1 leading-snug">{t.help}</div>
+                  </label>
+                ))}
+              </div>
+            </div>
+            {/* Per-department overrides */}
+            <details className="group">
+              <summary className="cursor-pointer list-none flex items-center gap-1.5 px-4 py-3 text-xs font-semibold text-indigo-600 select-none">
+                <svg className="w-3 h-3 transition-transform group-open:rotate-90 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" />
+                </svg>
+                Per-department overrides
+                <span className="text-[10px] text-gray-400 font-normal">{TOLERANCE_DEPTS.filter(d => deptOverrideCount(d) > 0).length} of {TOLERANCE_DEPTS.length} departments customised</span>
+              </summary>
+              <div className="px-4 pb-3 overflow-x-auto">
+                <table className="w-full text-[11px]">
+                  <thead>
+                    <tr className="text-gray-400">
+                      <th className="text-left font-semibold py-1.5 pr-2">Department</th>
+                      {TOLERANCE_DEFS.map(t => <th key={t.key} className="text-center font-semibold px-1.5 whitespace-nowrap">{t.label}</th>)}
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-50">
+                    {TOLERANCE_DEPTS.map(dept => {
+                      const oc = deptOverrideCount(dept)
+                      return (
+                        <tr key={dept}>
+                          <td className="py-1.5 pr-2 font-semibold text-gray-700 whitespace-nowrap">
+                            {dept}
+                            {oc > 0 && <span className="ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-600 border border-indigo-100">{oc} custom</span>}
+                          </td>
+                          {TOLERANCE_DEFS.map(t => {
+                            const overridden = toleranceRaw(dept, t.key) !== undefined
+                            return (
+                              <td key={t.key} className="px-1 py-1 text-center">
+                                <select value={String(toleranceShown(dept, t.key))} disabled={!canEdit}
+                                  onChange={e => { setTolerance(dept, t.key, Number(e.target.value)); rerender() }}
+                                  className={`h-6 pl-1.5 pr-1 rounded-md border text-[11px] font-bold disabled:text-gray-400 ${overridden ? 'border-indigo-200 bg-indigo-50 text-indigo-700' : 'border-gray-200 bg-white text-gray-500'}`}>
+                                  {t.options.map(o => <option key={o} value={o}>{fmtParam(t.fmt, o)}</option>)}
+                                </select>
+                              </td>
+                            )
+                          })}
+                          <td className="text-right pl-2">
+                            {oc > 0 && canEdit && <button onClick={() => { clearToleranceDept(dept); rerender() }} className="text-[10px] font-semibold text-gray-400 hover:text-gray-600">Reset</button>}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+            {/* Connected automation — tolerances are the thresholds the rules act on */}
+            <div className="px-4 py-2.5 border-t border-gray-50 text-[10px] text-gray-400 leading-relaxed">
+              <span className="font-semibold text-gray-500">Connected automation:</span> the “Grace before late” tolerance sets when a PO counts as overdue — so <span className="font-medium text-gray-500">Chase overdue POs</span> and its follow-ups act relative to it. The predicted-slip tolerance drives the “Predicted to slip” flags behind <span className="font-medium text-gray-500">Pre-empt predicted slips</span> and small date-change acceptance.
+            </div>
           </div>
         </div>
 

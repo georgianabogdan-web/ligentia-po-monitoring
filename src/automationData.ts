@@ -205,6 +205,47 @@ export const setAutomationPaused = (v: boolean) => { _paused = v }
 export const ruleIsLive          = (id: string) => !_paused && ruleLevel(id) === 'auto'
 export const autoRuleCount       = () => AUTOMATION_RULES.filter(r => ruleLevel(r.id) === 'auto').length
 
+// ── Tolerances — per-tenant + per-department detection thresholds ────────────
+// What counts as "late", "early", "predicted to slip" or "out of tolerance"
+// differs by customer AND by department. These configurable thresholds are the
+// single source of truth the detection logic (isBreached / poTemporality) reads,
+// and the automation rules act relative to them (e.g. auto-chase fires on POs
+// that are "overdue" — which now respects the grace tolerance below).
+export type ToleranceKey = 'lateGraceDays' | 'slipDays' | 'earlyDays' | 'outOfToleranceDays'
+
+export interface ToleranceDef { key: ToleranceKey; label: string; help: string; options: number[]; fmt: ParamFmt }
+export const TOLERANCE_DEFS: ToleranceDef[] = [
+  { key: 'lateGraceDays',      label: 'Grace before “late”',      options: [0, 1, 2, 3, 5, 7],  fmt: 'days', help: 'A PO is only flagged late once it is past its committed date by more than this. 0 = flag the moment it is overdue.' },
+  { key: 'slipDays',           label: 'Predicted-slip tolerance', options: [3, 5, 7, 10, 14],   fmt: 'days', help: 'How far past plan the predicted landing may drift before a PO is flagged “predicted to slip”.' },
+  { key: 'earlyDays',          label: 'Early-arrival tolerance',  options: [3, 5, 7, 14],       fmt: 'days', help: 'Arrivals more than this many days ahead of plan are flagged as too early (excess stock / cash tied up).' },
+  { key: 'outOfToleranceDays', label: 'Escalate when overdue by', options: [7, 14, 21, 30],     fmt: 'days', help: 'Once a PO is overdue by more than this it is treated as out of tolerance and escalated.' },
+]
+export const TOLERANCE_DEFAULTS: Record<ToleranceKey, number> = { lateGraceDays: 0, slipDays: 7, earlyDays: 3, outOfToleranceDays: 14 }
+// Departments the tolerances can be tuned per — mirrors the PO `category` axis.
+export const TOLERANCE_DEPTS = ["Women's Apparel", "Men's Apparel", 'Outerwear', 'Knitwear', 'Footwear', 'Accessories', 'Beauty']
+export const GLOBAL_TOLERANCE = '__global__'
+
+const _tolGlobal: Partial<Record<ToleranceKey, number>> = {}
+const _tolByDept: Record<string, Partial<Record<ToleranceKey, number>>> = {}
+
+// Effective value for a PO's department: department override → tenant global → default.
+export const toleranceFor = (dept: string | null | undefined, key: ToleranceKey): number => {
+  const d = dept ? _tolByDept[dept]?.[key] : undefined
+  return d ?? _tolGlobal[key] ?? TOLERANCE_DEFAULTS[key]
+}
+// Raw stored value for a specific scope (undefined = inheriting), for the settings UI.
+export const toleranceRaw = (scope: string, key: ToleranceKey): number | undefined =>
+  scope === GLOBAL_TOLERANCE ? _tolGlobal[key] : _tolByDept[scope]?.[key]
+// Value shown in a scope's control: its own value, or what it inherits.
+export const toleranceShown = (scope: string, key: ToleranceKey): number =>
+  scope === GLOBAL_TOLERANCE ? (_tolGlobal[key] ?? TOLERANCE_DEFAULTS[key]) : toleranceFor(scope, key)
+export const setTolerance = (scope: string, key: ToleranceKey, v: number) => {
+  if (scope === GLOBAL_TOLERANCE) _tolGlobal[key] = v
+  else _tolByDept[scope] = { ..._tolByDept[scope], [key]: v }
+}
+export const clearToleranceDept = (dept: string) => { delete _tolByDept[dept] }
+export const deptOverrideCount = (dept: string) => _tolByDept[dept] ? Object.keys(_tolByDept[dept]).length : 0
+
 // ── Automation activity log ──────────────────────────────────────────────────
 export interface AutomationLogEntry {
   time:    string   // ISO
