@@ -11311,6 +11311,11 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
   // Actions: top-level mode (reactive vs pre-emptive) + grouping + optimistic toast.
   const [actionMode,       setActionMode]       = useState<'now' | 'predicted' | 'all'>('now')
   const [actionGroupBy,    setActionGroupBy]    = useState<'none' | 'supplier'>('none')
+  // Actions triage: which category sections are expanded in the default digest, and
+  // whether the user has touched them (before that, the highest-£ category is open).
+  const [expandedTiers,    setExpandedTiers]    = useState<Set<string>>(new Set())
+  const [tiersTouched,     setTiersTouched]     = useState(false)
+  const [focusOpen,        setFocusOpen]        = useState(true)
   const [actedCards,       setActedCards]       = useState<Set<string>>(new Set())
   const [actionToast,      setActionToast]      = useState<string | null>(null)
   const [drawerDecision,   setDrawerDecision]   = useState<Record<string, 'cancel' | 'cpr' | 'accept_late'>>({})
@@ -11990,13 +11995,33 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
           })
           const actionHeroValue = salesAtRiskOf(liveGroups.flatMap(g => g.pos))
           const actionSuppliers = new Set(liveGroups.map(g => g.supplierId)).size
-          const sorted = [...filtered].sort((a, b) => {
+          const sortGroups = (gs: ActionGroup[]) => [...gs].sort((a, b) => {
             if (sortMode === 'value')   return groupValue(b) - groupValue(a)
             if (sortMode === 'overdue') return groupMaxOverdue(b) - groupMaxOverdue(a)
             // Default 'missed_sales': commercial impact is primary, lateness is the tiebreak.
             const ms = groupMissedSales(b) - groupMissedSales(a)
             return ms !== 0 ? ms : groupMaxOverdue(b) - groupMaxOverdue(a)
           })
+          const sorted = sortGroups(filtered)
+
+          // ── Progressive disclosure ────────────────────────────────────────
+          // Today's focus: the few highest-impact actions that cover most of the £
+          // at risk — so the user isn't asked to work a list they can never finish.
+          const focusGroups = [...liveGroups]
+            .sort((a, b) => (groupMissedSales(b) - groupMissedSales(a)) || (groupMaxOverdue(b) - groupMaxOverdue(a)))
+            .slice(0, 5)
+          const focusValue = salesAtRiskOf(focusGroups.flatMap(g => g.pos))
+          const focusPct   = actionHeroValue > 0 ? Math.round(focusValue / actionHeroValue * 100) : 0
+          // Category digest: groups for one tier, and which section opens by default.
+          const tierGroupsFor = (key: string) => sortGroups(liveGroups.filter(g => ACT_TIER_META[key]?.pred(g) ?? false))
+          const topTierKey    = [...actionTiers].filter(t => t.count > 0).sort((a, b) => b.value - a.value)[0]?.key
+          const openKeys      = tiersTouched ? expandedTiers : new Set(topTierKey ? [topTierKey] : [])
+          const toggleTier    = (key: string) => {
+            setTiersTouched(true)
+            setExpandedTiers(() => { const n = new Set(openKeys); n.has(key) ? n.delete(key) : n.add(key); return n })
+          }
+          // Default digest = no category drilled into and not explicitly grouped by supplier.
+          const showDigest = actTypeFilter === 'all' && actionGroupBy !== 'supplier'
 
           // Inline one-click approval: optimistic clear + toast (no navigation).
           const inlineApprove = (g: ActionGroup, ck: string, label: string) => {
@@ -12314,7 +12339,7 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                     tiers={actionTiers}
                     onTier={key => setActTypeFilter(actTypeFilter === key ? 'all' : key)}
                   />
-                  {topSup && (
+                  {topSup && !(showDigest && liveGroups.length >= 6) && (
                     <div className="text-[13px] font-semibold text-gray-800">
                       Start with {topSup.name}{decisions > 0 ? ' — overdue decisions are most urgent' : modePredicted ? ' — pre-empt before it’s late' : ''}
                     </div>
@@ -12323,7 +12348,29 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
               )
             })()}
 
-            {/* ── Action list — dense rows; flat or grouped by supplier ─────── */}
+            {/* ── Today's focus — the few actions that cover most of the £ at risk,
+                 so the user starts with impact, not a firehose. ── */}
+            {showDigest && liveGroups.length >= 6 && focusGroups.length > 0 && (
+              <div className="rounded-2xl border border-violet-200 bg-gradient-to-r from-violet-50/70 to-indigo-50/40 overflow-hidden">
+                <button onClick={() => setFocusOpen(v => !v)} className="w-full flex items-center gap-2 px-4 py-2.5 text-left">
+                  <Star className="w-4 h-4 text-violet-600 shrink-0" />
+                  <span className="text-[13px] font-bold text-gray-900">Today's focus</span>
+                  <span className="text-[12px] text-gray-600">— {focusGroups.length} action{focusGroups.length === 1 ? '' : 's'} cover <span className="font-bold text-violet-700">{fmtGBP(focusValue)}</span> ({focusPct}%) of what's at risk</span>
+                  <ChevronDown className={`ml-auto w-4 h-4 text-violet-400 transition-transform shrink-0 ${focusOpen ? '' : '-rotate-90'}`} />
+                </button>
+                {focusOpen && <div className="bg-white/70 border-t border-violet-100 divide-y divide-gray-100">{focusGroups.map(renderActionRow)}</div>}
+              </div>
+            )}
+
+            {/* Drilled into one category — offer the way back to the digest */}
+            {!showDigest && actTypeFilter !== 'all' && actionGroupBy !== 'supplier' && (
+              <button onClick={() => setActTypeFilter('all')} className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-indigo-600 hover:text-indigo-800">
+                <ChevronLeft className="w-3.5 h-3.5" /> All categories
+              </button>
+            )}
+
+            {/* ── Action list — digest (by category) by default; full list when a
+                 category is drilled into or grouping by supplier. ── */}
             {sorted.length === 0 ? (
               <div className="bg-white border border-gray-200 rounded-2xl flex flex-col items-center justify-center py-20 text-gray-400 px-4">
                 <Check className="w-8 h-8 mb-2 text-green-300" />
@@ -12377,6 +12424,36 @@ function POMonitoringView({ initialOpenPO, initialOpenAction, onNavigateToNeg: _
                     )
                   })
                 })()}
+              </div>
+            ) : showDigest ? (
+              /* ── Category digest — collapsible section per action type, top 3 shown,
+                   "view all" drills into the full list. Caps what renders at scale. ── */
+              <div className="space-y-3">
+                {actionTiers.filter(t => t.count > 0).map(t => {
+                  const gs      = tierGroupsFor(t.key)
+                  const open    = openKeys.has(t.key)
+                  const preview = gs.slice(0, 3)
+                  return (
+                    <div key={t.key} className="bg-white border border-gray-200 rounded-2xl overflow-hidden">
+                      <button onClick={() => toggleTier(t.key)} className="w-full flex items-center gap-2.5 px-4 py-3 text-left hover:bg-gray-50 transition-colors">
+                        <span className={`w-2 h-2 rounded-full shrink-0 ${SEVERITY_TONE[t.tone].dot}`} />
+                        <span className="text-[13px] font-bold text-gray-900">{t.label}</span>
+                        <span className="text-[11px] text-gray-500">{t.count} action{t.count === 1 ? '' : 's'} · <span className="font-semibold text-gray-700">{fmtGBP(t.value)}</span> at risk</span>
+                        <ChevronDown className={`ml-auto w-4 h-4 text-gray-400 transition-transform shrink-0 ${open ? '' : '-rotate-90'}`} />
+                      </button>
+                      {open && (
+                        <div className="border-t border-gray-100">
+                          <div className="divide-y divide-gray-100">{preview.map(renderActionRow)}</div>
+                          {gs.length > preview.length && (
+                            <button onClick={() => setActTypeFilter(t.key)} className="w-full text-left px-4 py-2.5 border-t border-gray-100 text-[12px] font-semibold text-indigo-600 hover:bg-indigo-50 transition-colors">
+                              View all {gs.length} {t.label.toLowerCase()} →
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
               </div>
             ) : (
               <div className="bg-white border border-gray-200 rounded-2xl overflow-hidden">
